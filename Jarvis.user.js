@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Jarvis Bot 2000.161
+// @name         Jarvis Bot 2000.162
 // @namespace    http://tampermonkey.net/
-// @version      2000.161
-// @description  Jarvis Bot 2000.161 — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
+// @version      2000.162
+// @description  Jarvis Bot 2000.162 — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
 // @match        *://www.tmn2010.net/authenticated/*
@@ -21,7 +21,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.161
+/*  Jarvis Bot 2000.162
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -43,7 +43,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.161';
+  const APP_VERSION = '2000.162';
   const APP_TAG     = '[JB]';
 
   // Known staff accounts (profile IDs)
@@ -621,6 +621,7 @@
     crimeInt:    GM_getValue('cbCrimeInt', 125),
     gtaInt:      GM_getValue('cbGtaInt', 245),
     jailInt:     GM_getValue('cbJailInt', 3),
+    jailDailyLimit: GM_getValue('cbJailDailyLimit', 2000),
     jailCheckInt:GM_getValue('cbJailCheckInt', 5),
     boozeInt:    GM_getValue('cbBoozeInt', 120),
     boozeBuy:    GM_getValue('cbBoozeBuy', 5),
@@ -2547,8 +2548,76 @@
     } else { st.acting = false; st.action = ''; GM_setValue('cbActStart',0); }
   }
 
+  /* === JAIL DAILY ATTEMPT COUNTER (game-time reset at 00:00) === */
+
+  // Returns the current game-day string (YYYY-MM-DD) based on server time
+  function gameDayStr() {
+    const d = getServerTime();
+    return `${d.getUTCFullYear()}-${_pad(d.getUTCMonth()+1)}-${_pad(d.getUTCDate())}`;
+  }
+
+  function getJailCount() {
+    const today = gameDayStr();
+    const storedDay = GM_getValue('cbJailCountDay', '');
+    if (storedDay !== today) {
+      // New game-day — reset counter
+      GM_setValue('cbJailCountDay', today);
+      GM_setValue('cbJailCount', 0);
+      // Re-enable jail if it was auto-disabled by the limit
+      if (GM_getValue('cbJailAutoOff', false)) {
+        GM_setValue('cbJailAutoOff', false);
+        st.jail = GM_getValue('cbJailWasOn', true);
+        saveSt();
+        console.log('[JB][JAIL] New game-day — counter reset, jail re-enabled');
+        sendTg(`⛓️ <b>Jail Reset</b>\n${st.player||'?'} | New day, counter cleared`);
+      }
+      return 0;
+    }
+    return GM_getValue('cbJailCount', 0);
+  }
+
+  function incJailCount() {
+    const today = gameDayStr();
+    const storedDay = GM_getValue('cbJailCountDay', '');
+    if (storedDay !== today) { GM_setValue('cbJailCountDay', today); GM_setValue('cbJailCount', 0); }
+    const n = GM_getValue('cbJailCount', 0) + 1;
+    GM_setValue('cbJailCount', n);
+
+    // Hit the daily limit? Turn off jail to avoid attention.
+    if (n >= cfg.jailDailyLimit) {
+      GM_setValue('cbJailWasOn', st.jail);
+      GM_setValue('cbJailAutoOff', true);
+      st.jail = false; saveSt();
+      console.log(`[JB][JAIL] Daily limit ${cfg.jailDailyLimit} reached — jail disabled`);
+      sendTg(`🛑 <b>Jail Limit</b>\n${st.player||'?'} | ${n}/${cfg.jailDailyLimit} reached, jail OFF`);
+      updateJailCountUI();
+    }
+    return n;
+  }
+
+  function updateJailCountUI() {
+    if (!_shadow) return;
+    const el = _shadow.querySelector('#jb-jail-count');
+    if (el) {
+      const n = getJailCount();
+      const lim = cfg.jailDailyLimit;
+      const pct = lim > 0 ? (n/lim) : 0;
+      const clr = pct >= 1 ? 'var(--jb-danger)' : pct >= 0.9 ? 'var(--jb-warning)' : 'var(--jb-text-sec)';
+      el.innerHTML = `<span style="color:${clr}">${n}/${lim}</span>`;
+    }
+  }
+
+  function jailLimitReached() {
+    return getJailCount() >= cfg.jailDailyLimit;
+  }
+
   function doJailbreak() {
     if (!st.jail || st.acting || st.inJail || paused) return;
+    if (jailLimitReached()) {
+      // Safety: should already be off, but double-check
+      if (st.jail) { st.jail = false; saveSt(); }
+      return;
+    }
     const now = Date.now();
     if (now - st.lastJail < jitteredCooldown(cfg.jailInt)) return;
     if (curPage() !== 'jail') { safeNav('/authenticated/jail.aspx?'+Date.now()); return; }
@@ -2556,6 +2625,9 @@
     if (links.length > 0) {
       st.acting = true; st.action = 'jailbreak'; GM_setValue('cbActStart', now);
       links[Math.floor(Math.random()*links.length)].click();
+      // This is a real attempt (success or fail) — count it
+      incJailCount();
+      updateJailCountUI();
       st.lastJail = now; saveSt();
       setTimeout(() => { st.acting = false; st.action = ''; GM_setValue('cbActStart',0); safeNav('/authenticated/jail.aspx?'+Date.now()); }, 500 + Math.floor(Math.random()*400));
     } else { st.lastJail = now; saveSt(); }
@@ -3148,6 +3220,11 @@
         </div>
       </div>
 
+      <div class="jb-jail-counter" id="jb-jail-counter-row" style="display:flex;justify-content:space-between;align-items:center;padding:3px 10px;font-size:10px;border-top:1px solid var(--jb-border);color:var(--jb-text-ter)">
+        <span>⛓️ Jail attempts today:</span>
+        <span id="jb-jail-count" style="font-weight:600">0/2000</span>
+      </div>
+
       <div class="jb-footer" id="jb-status">Ready</div>
 
       <div class="jb-modal-bg" id="jb-backdrop"></div>
@@ -3201,6 +3278,14 @@
             <div class="jb-row">
               <label class="jb-label">Interval (s):</label>
               <input class="jb-input jb-input-sm" type="number" id="jb-jail-int" value="${cfg.jailInt}">
+            </div>
+            <div class="jb-row">
+              <label class="jb-label">Daily limit:</label>
+              <input class="jb-input jb-input-sm" type="number" id="jb-jail-limit" value="${cfg.jailDailyLimit}" min="50" max="4000" step="50">
+              <span class="jb-sub">(50–4000)</span>
+            </div>
+            <div class="jb-sub jb-mb">Today: <span id="jb-jail-count-settings">${getJailCount()}/${cfg.jailDailyLimit}</span> · resets 00:00 game time
+              <button class="jb-btn jb-btn-outline" id="jb-jail-reset" style="margin-left:6px;padding:1px 6px;font-size:9px">Reset now</button>
             </div>
 
             <hr class="jb-sep">
@@ -3604,6 +3689,32 @@
     _shadow.querySelector('#jb-booze-buy').addEventListener('change', e => { cfg.boozeBuy = Math.max(1,Math.min(300,parseInt(e.target.value))); GM_setValue('cbBoozeBuy',cfg.boozeBuy); });
     _shadow.querySelector('#jb-booze-sell').addEventListener('change', e => { cfg.boozeSell = Math.max(1,Math.min(300,parseInt(e.target.value))); GM_setValue('cbBoozeSell',cfg.boozeSell); });
     _shadow.querySelector('#jb-jail-int').addEventListener('change', e => { cfg.jailInt = Math.max(1,Math.min(999,parseInt(e.target.value))); GM_setValue('cbJailInt',cfg.jailInt); });
+    _shadow.querySelector('#jb-jail-limit').addEventListener('change', e => {
+      cfg.jailDailyLimit = Math.max(50, Math.min(4000, parseInt(e.target.value)||2000));
+      e.target.value = cfg.jailDailyLimit;
+      GM_setValue('cbJailDailyLimit', cfg.jailDailyLimit);
+      // If we're now under the new limit and jail was auto-disabled, re-enable
+      if (GM_getValue('cbJailAutoOff', false) && getJailCount() < cfg.jailDailyLimit) {
+        GM_setValue('cbJailAutoOff', false);
+        st.jail = GM_getValue('cbJailWasOn', true); saveSt();
+        syncAll();
+      }
+      updateJailCountUI();
+      const sEl = _shadow.querySelector('#jb-jail-count-settings');
+      if (sEl) sEl.textContent = `${getJailCount()}/${cfg.jailDailyLimit}`;
+    });
+    _shadow.querySelector('#jb-jail-reset').addEventListener('click', () => {
+      GM_setValue('cbJailCount', 0);
+      GM_setValue('cbJailCountDay', gameDayStr());
+      if (GM_getValue('cbJailAutoOff', false)) {
+        GM_setValue('cbJailAutoOff', false);
+        st.jail = GM_getValue('cbJailWasOn', true); saveSt(); syncAll();
+      }
+      updateJailCountUI();
+      const sEl = _shadow.querySelector('#jb-jail-count-settings');
+      if (sEl) sEl.textContent = `0/${cfg.jailDailyLimit}`;
+      setStatus('⛓️ Jail counter reset');
+    });
     _shadow.querySelector('#jb-min-hp').addEventListener('change', e => { cfg.minHealth = Math.max(1,Math.min(99,parseInt(e.target.value))); GM_setValue('cbMinHealth',cfg.minHealth); });
     _shadow.querySelector('#jb-target-hp').addEventListener('change', e => { cfg.targetHealth = Math.max(10,Math.min(100,parseInt(e.target.value))); GM_setValue('cbTargetHealth',cfg.targetHealth); });
     _shadow.querySelector('#jb-garage-int').addEventListener('change', e => { const m = Math.max(1,Math.min(120,parseInt(e.target.value))); cfg.garageInt = m*60; GM_setValue('cbGarageInt',cfg.garageInt); });
@@ -3701,6 +3812,8 @@
     setInterval(() => {
       const el = _shadow.querySelector('#jb-break-status');
       if (el) el.textContent = 'Break: ' + (getBreakStatus().msg || 'None active');
+      // Refresh jail counter too (catches game-day rollover during idle)
+      updateJailCountUI();
     }, 5000);
 
     // Whitelist modal
@@ -3852,6 +3965,9 @@
       const s = _shadow.querySelector('#jb-dtm-state');
       if (s) s.textContent = 'idle (step 0)';
     });
+
+    // Initialize jail counter display
+    updateJailCountUI();
 
     // Drag
     let locked = GM_getValue('cbLocked', true);
