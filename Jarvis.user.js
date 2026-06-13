@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Jarvis Bot 2000.162
+// @name         Jarvis Bot 2000.163
 // @namespace    http://tampermonkey.net/
-// @version      2000.162
-// @description  Jarvis Bot 2000.162 — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
+// @version      2000.163
+// @description  Jarvis Bot 2000.163 — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
 // @match        *://www.tmn2010.net/authenticated/*
@@ -21,7 +21,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.162
+/*  Jarvis Bot 2000.163
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -43,7 +43,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.162';
+  const APP_VERSION = '2000.163';
   const APP_TAG     = '[JB]';
 
   // Known staff accounts (profile IDs)
@@ -2275,6 +2275,15 @@
 
   function handleDtmPage() {
     if (localStorage.getItem('cbPendDtmHandle') !== 'true') return false;
+
+    // Guard: if we just acted (clicked buy/complete) in the last 30s, the page we're
+    // now seeing is the postback result — don't re-process or re-alert.
+    const guard = parseInt(localStorage.getItem('cbDtmJustActed')||'0',10);
+    if (guard > 0 && Date.now()-guard < 30000) {
+      clearDtmHandle(); st.acting = false; st.action = ''; GM_setValue('cbActStart',0);
+      return false;
+    }
+
     const pts = parseInt(localStorage.getItem('cbPendDtmHandleTs')||'0',10);
     if (pts > 0 && Date.now()-pts > 120000) { clearDtmHandle(); st.acting = false; return false; }
     if (!window.location.pathname.toLowerCase().includes('organizedcrime.aspx')) {
@@ -2300,17 +2309,23 @@
     // Complete DTM button present?
     const compBtn = document.getElementById('ctl00_main_btnCompleteDTM') || [...document.querySelectorAll('input[type="submit"],button')].find(b => /complete\s*dtm/i.test((b.value||b.textContent||'').trim()));
     if (compBtn && !compBtn.disabled) {
-      setTimeout(() => { compBtn.click(); clearDtmHandle(); localStorage.setItem(LS_LAST_DTM_ACC, String(Date.now()));
-        storeDtm({ready:false,total:7200,h:2,m:0,s:0,at:Date.now()});
+      // Clear flag + set guard + store cooldown SYNCHRONOUSLY before the click triggers postback
+      clearDtmHandle();
+      localStorage.setItem('cbDtmJustActed', String(Date.now()));
+      localStorage.setItem(LS_LAST_DTM_ACC, String(Date.now()));
+      storeDtm({ready:false,total:7200,h:2,m:0,s:0,at:Date.now()});
+      sendTg(`🚚 <b>DTM Done</b>\n${st.player||'?'} | 2h cooldown`);
+      setTimeout(() => {
+        compBtn.click();
         setTimeout(() => { st.acting = false; st.action = ''; GM_setValue('cbActStart',0); }, 20000);
-        sendTg(`🚚 <b>DTM Done</b>\n${st.player||'?'} | 2h cooldown`); }, 2000);
+      }, 1500);
       return true;
     }
 
     // Find max amount + buy form
     const pageTxt = document.body.textContent||'';
     let maxAmt = 0;
-    for (const pat of [/maximum amount you can carry is (\d+)/i, /maximum amount you can buy is (\d+)/i, /maximum amount.*?is (\d+)/i, /can buy.*?(\d+)\s*units/i]) {
+    for (const pat of [/maximum amount you can carry is (\d+)/i, /maximum amount you can buy is (\d+)/i, /maximum amount.*?is (\d+)/i, /can buy.*?(\d+)\s*units/i, /max(?:imum)?[:\s]+(\d+)/i, /you can (?:carry|buy)\D*(\d+)/i]) {
       const m = pageTxt.match(pat); if (m) { maxAmt = parseInt(m[1],10); break; }
     }
     if (!maxAmt && st.player) {
@@ -2322,31 +2337,37 @@
     let buyBtn = document.getElementById('ctl00_main_btnBuyLDrugs') || document.getElementById('ctl00_main_btnBuyDrugs') || document.getElementById('ctl00_main_btnBuy') || [...document.querySelectorAll('input[type="submit"],button')].find(b => /buy\s*drugs/i.test((b.value||b.textContent||'').trim()));
     if (!drugIn && buyBtn) drugIn = buyBtn.parentElement?.querySelector('input[type="text"],input:not([type])') || buyBtn.closest('div,td,tr,form')?.querySelector('input[type="text"],input:not([type])');
     if (!buyBtn) buyBtn = [...document.querySelectorAll('input[type="submit"]')].find(b => /buy/i.test(b.value||''));
-    if (!drugIn && maxAmt > 0) {
+    if (!drugIn && (maxAmt > 0 || buyBtn)) {
       const all = [...document.querySelectorAll('input[type="text"],input:not([type="submit"]):not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="button"])')].filter(i => !i.id.includes('search') && !i.id.includes('chat'));
       if (all.length === 1) drugIn = all[0];
     }
 
-    if (maxAmt > 0 && drugIn && buyBtn && !buyBtn.disabled) {
-      drugIn.value = String(maxAmt);
-      setTimeout(() => {
-        buyBtn.click();
-        storeDtm({ready:false,total:7200,h:2,m:0,s:0,at:Date.now()});
-        clearDtmHandle(); localStorage.setItem(LS_LAST_DTM_ACC, String(Date.now()));
-        // Hold the lock 20s so a slow postback isn't diverted by other actions
-        setTimeout(() => { st.acting = false; st.action = ''; GM_setValue('cbActStart',0); }, 20000);
-        sendTg(`🚚 <b>DTM Bought ${maxAmt}</b>\n${st.player||'?'} | 2h cooldown`);
-      }, 800 + Math.floor(Math.random()*400));
-      return true;
+    // If we found the form but couldn't parse the max, fall back to the input's own max attribute,
+    // or a high number the game will cap — so we never miss a buy just because the text didn't match.
+    if (maxAmt === 0 && drugIn && buyBtn && !buyBtn.disabled) {
+      const attrMax = parseInt(drugIn.getAttribute('max') || drugIn.getAttribute('maxlength') || '0', 10);
+      maxAmt = attrMax > 0 && attrMax < 100000 ? attrMax : 99999;
+      console.log('[JB][DTM] maxAmt not parsed from text — using fallback', maxAmt);
     }
 
-    if (drugIn && buyBtn && !buyBtn.disabled && drugIn.value && parseInt(drugIn.value) > 0) {
+    if (maxAmt > 0 && drugIn && buyBtn && !buyBtn.disabled) {
+      // Fill the value and fire events so ASP.NET registers it
+      drugIn.value = String(maxAmt);
+      try { drugIn.dispatchEvent(new Event('input', {bubbles:true})); drugIn.dispatchEvent(new Event('change', {bubbles:true})); } catch(_){}
+
+      // Clear flag + set guard + store cooldown SYNCHRONOUSLY before the click triggers postback.
+      // This is what stops the repeat-alert loop: if the page reloads, the guard blocks re-entry.
+      clearDtmHandle();
+      localStorage.setItem('cbDtmJustActed', String(Date.now()));
+      localStorage.setItem(LS_LAST_DTM_ACC, String(Date.now()));
+      storeDtm({ready:false,total:7200,h:2,m:0,s:0,at:Date.now()});
+      sendTg(`🚚 <b>DTM Bought ${maxAmt}</b>\n${st.player||'?'} | 2h cooldown`);
+
       setTimeout(() => {
         buyBtn.click();
-        storeDtm({ready:false,total:7200,h:2,m:0,s:0,at:Date.now()});
-        clearDtmHandle();
+        // Hold the lock 20s so a slow postback isn't diverted by other actions
         setTimeout(() => { st.acting = false; st.action = ''; GM_setValue('cbActStart',0); }, 20000);
-      }, 800 + Math.floor(Math.random()*400));
+      }, 900 + Math.floor(Math.random()*400));
       return true;
     }
 
@@ -4621,6 +4642,7 @@
       const pendDtm = localStorage.getItem(LS_PEND_DTM);
       if (pendDtm && st.autoDTM) {
         localStorage.removeItem(LS_PEND_DTM);
+        localStorage.removeItem('cbDtmJustActed'); // fresh invite — clear any stale guard
         localStorage.setItem('cbPendDtmHandle','true');
         localStorage.setItem('cbPendDtmHandleTs', String(Date.now()));
         sendTg(`🚚 <b>DTM Accepted</b>\n${st.player||'?'}`);
