@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Jarvis Bot 2000.160
+// @name         Jarvis Bot 2000.161
 // @namespace    http://tampermonkey.net/
-// @version      2000.160
-// @description  Jarvis Bot 2000.160 — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
+// @version      2000.161
+// @description  Jarvis Bot 2000.161 — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
 // @match        *://www.tmn2010.net/authenticated/*
@@ -21,7 +21,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.160
+/*  Jarvis Bot 2000.161
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -43,7 +43,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.160';
+  const APP_VERSION = '2000.161';
   const APP_TAG     = '[JB]';
 
   // Known staff accounts (profile IDs)
@@ -2275,73 +2275,38 @@
   function handleDtmPage() {
     if (localStorage.getItem('cbPendDtmHandle') !== 'true') return false;
     const pts = parseInt(localStorage.getItem('cbPendDtmHandleTs')||'0',10);
-    if (pts > 0 && Date.now()-pts > 120000) { localStorage.removeItem('cbPendDtmHandle'); localStorage.removeItem('cbPendDtmHandleTs'); st.acting = false; return false; }
+    if (pts > 0 && Date.now()-pts > 120000) { clearDtmHandle(); st.acting = false; return false; }
     if (!window.location.pathname.toLowerCase().includes('organizedcrime.aspx')) {
       const retry = localStorage.getItem(LS_PEND_DTM);
       if (retry) { localStorage.removeItem(LS_PEND_DTM); try { const u = new URL(retry); window.location.href = u.pathname+u.search; } catch(_) { window.location.href = retry.replace(/^https?:\/\/[^/]+/,''); } return true; }
       return false;
     }
 
-    // Block all other actions while on DTM page
+    // Block other actions while on the DTM page
     st.acting = true; st.action = 'dtm'; GM_setValue('cbActStart', Date.now());
 
-    // Wait for page to fully load — give it up to 20 seconds before giving up on this attempt
-    const LS_DTM_HANDLE_FIRST = 'cbDtmHandleFirstSeen';
-    let firstSeen = parseInt(localStorage.getItem(LS_DTM_HANDLE_FIRST)||'0',10);
-    if (firstSeen === 0) {
-      firstSeen = Date.now();
-      localStorage.setItem(LS_DTM_HANDLE_FIRST, String(firstSeen));
-      console.log('[JB][DTM] Landed on DTM page, waiting for full load...');
-      setStatus('🚚 DTM page loading...');
-    }
-    const sinceLanded = Date.now() - firstSeen;
-
-    // Check if page is fully loaded
-    const pageReady = document.readyState === 'complete';
-    const buyBtnPresent = !!document.getElementById('ctl00_main_btnBuyDrugs') ||
-                         !!document.getElementById('ctl00_main_btnBuyLDrugs') ||
-                         [...document.querySelectorAll('input[type="submit"]')].some(b => /buy/i.test(b.value||''));
-    const compBtnPresent = !!document.getElementById('ctl00_main_btnCompleteDTM') ||
-                          [...document.querySelectorAll('input[type="submit"],button')].some(b => /complete\s*dtm/i.test((b.value||b.textContent||'').trim()));
-    const elementsReady = buyBtnPresent || compBtnPresent;
-
-    // First 5 seconds: just wait for page to be ready and elements to appear
-    if (sinceLanded < 5000 && (!pageReady || !elementsReady)) {
-      console.log(`[JB][DTM] Waiting — ready=${pageReady}, elements=${elementsReady} (${Math.round(sinceLanded/1000)}s)`);
-      return true; // Stay in handle mode, mainLoop will retry
-    }
-
-    // Between 5-20 seconds: try harder, log diagnostics
-    if (sinceLanded < 20000 && !elementsReady) {
-      console.log(`[JB][DTM] Still no buy/complete button after ${Math.round(sinceLanded/1000)}s — retrying`);
-      return true;
-    }
-
-    // Past 20 seconds with no elements found — log and clean up
-    if (sinceLanded >= 20000 && !elementsReady) {
-      const errSnip = (document.body.textContent||'').replace(/\s+/g,' ').substring(0,200);
-      console.warn(`[JB][DTM] Timed out waiting for DTM page elements after ${Math.round(sinceLanded/1000)}s. Page: ${errSnip}`);
-      sendTg(`⚠️ <b>DTM Buy Failed</b>\n${st.player||'?'} | Page didn't load buy form in 20s. Manual check required.`);
-      localStorage.removeItem(LS_DTM_HANDLE_FIRST);
-      localStorage.removeItem('cbPendDtmHandle');
-      localStorage.removeItem('cbPendDtmHandleTs');
-      st.acting = false;
+    // On cooldown? (normal — the 2h timer already tracks this) Just clear the flag and walk away.
+    const bt = (document.body.textContent||'').toLowerCase();
+    if (/you cannot do a dtm|you have to wait/.test(bt)) {
+      clearDtmHandle(); st.acting = false; st.action = ''; GM_setValue('cbActStart',0);
       return false;
     }
-
-    // Page is loaded and we have elements — proceed
-    if (!document.getElementById('ctl00_main_btnBuyDrugs') && !document.getElementById('ctl00_main_btnBuyLDrugs') && ![...document.querySelectorAll('input[type="submit"]')].find(b => /buy/i.test(b.value||''))) {
-      if (/buy\s*drugs/i.test(document.body.textContent||'')) return true;
+    if (/invalid request|invalid invite|expired|no longer/i.test(bt)) {
+      clearDtmHandle(); localStorage.removeItem(LS_PEND_DTM); localStorage.removeItem(LS_LAST_DTM_MAIL);
+      st.acting = false; sendTg(`❌ <b>DTM Invalid</b>\n${st.player||'?'}`); return true;
     }
 
+    // Complete DTM button present?
     const compBtn = document.getElementById('ctl00_main_btnCompleteDTM') || [...document.querySelectorAll('input[type="submit"],button')].find(b => /complete\s*dtm/i.test((b.value||b.textContent||'').trim()));
     if (compBtn && !compBtn.disabled) {
-      setTimeout(() => { compBtn.click(); localStorage.removeItem('cbPendDtmHandle'); localStorage.removeItem(LS_DTM_HANDLE_FIRST); localStorage.setItem(LS_LAST_DTM_ACC, String(Date.now())); st.acting = false;
+      setTimeout(() => { compBtn.click(); clearDtmHandle(); localStorage.setItem(LS_LAST_DTM_ACC, String(Date.now()));
         storeDtm({ready:false,total:7200,h:2,m:0,s:0,at:Date.now()});
+        setTimeout(() => { st.acting = false; st.action = ''; GM_setValue('cbActStart',0); }, 20000);
         sendTg(`🚚 <b>DTM Done</b>\n${st.player||'?'} | 2h cooldown`); }, 2000);
       return true;
     }
 
+    // Find max amount + buy form
     const pageTxt = document.body.textContent||'';
     let maxAmt = 0;
     for (const pat of [/maximum amount you can carry is (\d+)/i, /maximum amount you can buy is (\d+)/i, /maximum amount.*?is (\d+)/i, /can buy.*?(\d+)\s*units/i]) {
@@ -2354,9 +2319,8 @@
 
     let drugIn = document.getElementById('ctl00_main_tbDrugLAmount') || document.getElementById('ctl00_main_tbDrugAmount') || document.getElementById('ctl00_main_txtDrugAmount') || document.querySelector('input[id*="tbDrug"],input[id*="txtDrug"],input[id*="Drug"][type="text"],input[id*="Amount"][type="text"]');
     let buyBtn = document.getElementById('ctl00_main_btnBuyLDrugs') || document.getElementById('ctl00_main_btnBuyDrugs') || document.getElementById('ctl00_main_btnBuy') || [...document.querySelectorAll('input[type="submit"],button')].find(b => /buy\s*drugs/i.test((b.value||b.textContent||'').trim()));
-
     if (!drugIn && buyBtn) drugIn = buyBtn.parentElement?.querySelector('input[type="text"],input:not([type])') || buyBtn.closest('div,td,tr,form')?.querySelector('input[type="text"],input:not([type])');
-    if (!buyBtn) { buyBtn = [...document.querySelectorAll('input[type="submit"]')].find(b => /buy/i.test(b.value||'')); }
+    if (!buyBtn) buyBtn = [...document.querySelectorAll('input[type="submit"]')].find(b => /buy/i.test(b.value||''));
     if (!drugIn && maxAmt > 0) {
       const all = [...document.querySelectorAll('input[type="text"],input:not([type="submit"]):not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="button"])')].filter(i => !i.id.includes('search') && !i.id.includes('chat'));
       if (all.length === 1) drugIn = all[0];
@@ -2364,15 +2328,11 @@
 
     if (maxAmt > 0 && drugIn && buyBtn && !buyBtn.disabled) {
       drugIn.value = String(maxAmt);
-      // Give the form a moment to register the value, then click — longer delay for slow pages
       setTimeout(() => {
         buyBtn.click();
         storeDtm({ready:false,total:7200,h:2,m:0,s:0,at:Date.now()});
-        localStorage.removeItem('cbPendDtmHandle');
-        localStorage.removeItem('cbPendDtmHandleTs');
-        localStorage.removeItem(LS_DTM_HANDLE_FIRST);
-        localStorage.setItem(LS_LAST_DTM_ACC, String(Date.now()));
-        // Keep st.acting = true for 20 seconds after buy click so nothing diverts the page during postback
+        clearDtmHandle(); localStorage.setItem(LS_LAST_DTM_ACC, String(Date.now()));
+        // Hold the lock 20s so a slow postback isn't diverted by other actions
         setTimeout(() => { st.acting = false; st.action = ''; GM_setValue('cbActStart',0); }, 20000);
         sendTg(`🚚 <b>DTM Bought ${maxAmt}</b>\n${st.player||'?'} | 2h cooldown`);
       }, 800 + Math.floor(Math.random()*400));
@@ -2383,18 +2343,19 @@
       setTimeout(() => {
         buyBtn.click();
         storeDtm({ready:false,total:7200,h:2,m:0,s:0,at:Date.now()});
-        localStorage.removeItem('cbPendDtmHandle');
-        localStorage.removeItem('cbPendDtmHandleTs');
-        localStorage.removeItem(LS_DTM_HANDLE_FIRST);
+        clearDtmHandle();
         setTimeout(() => { st.acting = false; st.action = ''; GM_setValue('cbActStart',0); }, 20000);
       }, 800 + Math.floor(Math.random()*400));
       return true;
     }
 
-    const bt = (document.body.textContent||'').toLowerCase();
-    if (/you cannot do a dtm|you have to wait/.test(bt)) { localStorage.removeItem('cbPendDtmHandle'); localStorage.removeItem('cbPendDtmHandleTs'); localStorage.removeItem(LS_DTM_HANDLE_FIRST); st.acting = false; return true; }
-    if (/invalid request|invalid invite|expired|no longer/i.test(bt)) { localStorage.removeItem('cbPendDtmHandle'); localStorage.removeItem('cbPendDtmHandleTs'); localStorage.removeItem(LS_DTM_HANDLE_FIRST); localStorage.removeItem(LS_PEND_DTM); localStorage.removeItem(LS_LAST_DTM_MAIL); st.acting = false; sendTg(`❌ <b>DTM Invalid</b>\n${st.player||'?'}`); return true; }
+    // Buy form not ready yet (e.g. partner hasn't accepted). Stay put; mainLoop retries.
     return true;
+  }
+
+  function clearDtmHandle() {
+    localStorage.removeItem('cbPendDtmHandle');
+    localStorage.removeItem('cbPendDtmHandleTs');
   }
 
   /* === PAGE HELPERS === */
