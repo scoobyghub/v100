@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Jarvis Bot 2000.180
+// @name         Jarvis Bot 2000.181
 // @namespace    http://tampermonkey.net/
-// @version      2000.180
-// @description  Jarvis Bot 2000.180 — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
+// @version      2000.181
+// @description  Jarvis Bot 2000.181 — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
 // @match        *://www.tmn2010.net/authenticated/*
@@ -27,11 +27,12 @@
 // @grant        GM_xmlhttpRequest
 // @connect      api.telegram.org
 // @connect      raw.githubusercontent.com
+// @connect      *
 // @updateURL    https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.meta.js
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.180
+/*  Jarvis Bot 2000.181
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -103,7 +104,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.180';
+  const APP_VERSION = '2000.181';
   const APP_TAG     = '[JB]';
 
   // Known staff accounts (profile IDs)
@@ -818,6 +819,7 @@
   }
 
   const LS_WEBQ = 'cbWebhookSendQueue';
+  let _webInFlight = {};
 
   function _loadWebQ() {
     try { const q = JSON.parse(localStorage.getItem(LS_WEBQ) || '[]'); return Array.isArray(q) ? q : []; }
@@ -848,7 +850,9 @@
     if (!q.length) return;
     const now = Date.now();
     for (const item of q) {
+      if (_webInFlight[item.id]) continue;
       if (now < (item.nextAt || 0)) continue;
+      _webInFlight[item.id] = true;
       item.attempts = (item.attempts || 0) + 1;
       _saveWebQ(q);
       GM_xmlhttpRequest({
@@ -858,6 +862,7 @@
         headers: { 'Content-Type': 'application/json' },
         data: JSON.stringify({ content: item.msg }),
         onload: r => {
+          delete _webInFlight[item.id];
           if (r.status === 204 || r.status === 200) {
             _removeWebQ(item.id);
             console.log(APP_TAG, 'Webhook sent');
@@ -868,8 +873,8 @@
             _backoffOrDropWebQ(item.id, item.attempts);
           }
         },
-        onerror: () => { console.error(APP_TAG, 'Webhook error'); updateWebhookStatus('Webhook error'); _backoffOrDropWebQ(item.id, item.attempts); },
-        ontimeout: () => { console.error(APP_TAG, 'Webhook timeout'); updateWebhookStatus('Webhook timeout'); _backoffOrDropWebQ(item.id, item.attempts); }
+        onerror: () => { delete _webInFlight[item.id]; console.error(APP_TAG, 'Webhook error'); updateWebhookStatus('Webhook error'); _backoffOrDropWebQ(item.id, item.attempts); },
+        ontimeout: () => { delete _webInFlight[item.id]; console.error(APP_TAG, 'Webhook timeout'); updateWebhookStatus('Webhook timeout'); _backoffOrDropWebQ(item.id, item.attempts); }
       });
     }
   }
@@ -954,12 +959,6 @@
     if (_tgPumpTimer) return;
     pumpTgQueue(); // resume anything left over from a previous page immediately
     _tgPumpTimer = setInterval(pumpTgQueue, 3000);
-  }
-
-  function sendTgRepeat(msg, count=5, gap=1500, label='alert') {
-    const n = Math.max(1, Math.min(10, count));
-    for (let i = 0; i < n; i++)
-      setTimeout(() => { console.log(APP_TAG, `${label} ${i+1}/${n}`); sendTg(msg); }, i * gap);
   }
 
   /* === CRITICAL ALERT QUEUE (reload-proof) ===
@@ -1123,6 +1122,7 @@
     }
     if (_softBanSent) {
       _softBanSent = false;
+      clearCriticalAlert('softban');
       if (paused) { paused = false; setStatus('Soft-ban cleared'); }
     }
     return false;
@@ -4283,7 +4283,6 @@
         </div>
       </div>
 
-      <div class="jb-modal-bg" id="jb-wl-backdrop" style="display:none"></div>
       <div class="jb-modal" id="jb-wl-modal">
         <div class="jb-modal-content" style="width:280px">
           <div class="jb-modal-head"><span>OC/DTM Whitelist</span><button class="jb-hbtn" id="jb-wl-close">✕</button></div>
@@ -4569,7 +4568,10 @@
     function closeModal() { modal.classList.remove('open'); backdrop.style.display = 'none'; paused = false; saveSt(); }
     _shadow.querySelector('#jb-settings-btn').addEventListener('click', openModal);
     _shadow.querySelector('#jb-modal-close').addEventListener('click', closeModal);
-    backdrop.addEventListener('click', closeModal);
+    backdrop.addEventListener('click', () => {
+      closeModal();
+      ['#jb-wl-modal','#jb-ow-modal','#jb-oc-modal','#jb-dtm-modal','#jb-xp-modal'].forEach(id => closeModal2(id));
+    });
 
     // Settings inputs
     _shadow.querySelector('#jb-login-user').addEventListener('input', e => { LOGIN.user = e.target.value.trim(); GM_setValue('cbLoginUser', LOGIN.user); });
@@ -4962,15 +4964,6 @@
   const OCADS_PATH = '/authenticated/ocads.aspx';
   const LS_DTM_LIST_DONE = 'cbDtmListDone';
   const LS_TRAVEL_PENDING = 'cbTravelPending';
-
-  // Check if we're currently in the hot city
-  function isInHot() {
-    const hot = getHot();
-    if (!hot) return false;
-    const cur = getCurCity();
-    if (!cur) return false;
-    return cur.toLowerCase().includes(hot.toLowerCase()) || hot.toLowerCase().includes(cur.toLowerCase());
-  }
 
   // Auto-travel to hot city via the travel page
   async function doAutoTravel() {

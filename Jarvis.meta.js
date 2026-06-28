@@ -1,8 +1,8 @@
-// ==UserScript==
-// @name         Jarvis Bot 2000.180
+﻿// ==UserScript==
+// @name         Jarvis Bot 2000.181
 // @namespace    http://tampermonkey.net/
-// @version      2000.180
-// @description  Jarvis Bot 2000.180 — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
+// @version      2000.181
+// @description  Jarvis Bot 2000.181 — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
 // @match        *://www.tmn2010.net/authenticated/*
@@ -27,6 +27,7 @@
 // @grant        GM_xmlhttpRequest
 // @connect      api.telegram.org
 // @connect      raw.githubusercontent.com
+// @connect      *
 // @updateURL    https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.meta.js
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
