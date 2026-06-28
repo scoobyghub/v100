@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Jarvis Bot 2000.183
+// @name         Jarvis Bot 2000.184
 // @namespace    http://tampermonkey.net/
-// @version      2000.183
-// @description  Jarvis Bot 2000.183 — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
+// @version      2000.184
+// @description  Jarvis Bot 2000.184 — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
 // @match        *://www.tmn2010.net/authenticated/*
@@ -32,7 +32,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.183
+/*  Jarvis Bot 2000.184
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -120,7 +120,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.183';
+  const APP_VERSION = '2000.184';
   const APP_TAG     = '[JB]';
 
   // Known staff accounts (profile IDs)
