@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Jarvis Bot 2000.181
+// @name         Jarvis Bot 2000.182
 // @namespace    http://tampermonkey.net/
-// @version      2000.181
-// @description  Jarvis Bot 2000.181 — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
+// @version      2000.182
+// @description  Jarvis Bot 2000.182 — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
 // @match        *://www.tmn2010.net/authenticated/*
@@ -32,7 +32,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.181
+/*  Jarvis Bot 2000.182
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -104,7 +104,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.181';
+  const APP_VERSION = '2000.182';
   const APP_TAG     = '[JB]';
 
   // Known staff accounts (profile IDs)
@@ -833,10 +833,19 @@
     _deferWebQ(id, Date.now() + Math.min(60000, 2000 * attempts));
   }
 
+  function stripTgHtml(s) {
+    return String(s || '')
+      .replace(/<b>(.*?)<\/b>/gi, '$1')
+      .replace(/<i>(.*?)<\/i>/gi, '$1')
+      .replace(/<pre>([\s\S]*?)<\/pre>/gi, '$1')
+      .replace(/<[^>]+>/g, '');
+  }
+
   function sendWebhook(msg) {
     if (!tg.webhookEnabled || !tg.webhook) return;
+    const plain = stripTgHtml(msg);
     const q = _loadWebQ();
-    q.push({ id: Date.now() + '_' + Math.random().toString(36).slice(2, 7), msg, attempts: 0, nextAt: 0 });
+    q.push({ id: Date.now() + '_' + Math.random().toString(36).slice(2, 7), msg: plain, attempts: 0, nextAt: 0 });
     if (q.length > 50) q.splice(0, q.length - 50);
     _saveWebQ(q);
     pumpWebhookQueue();
@@ -867,6 +876,12 @@
             _removeWebQ(item.id);
             console.log(APP_TAG, 'Webhook sent');
             updateWebhookStatus('Webhook sent');
+          } else if (r.status === 429) {
+            let retryMs = 5000;
+            try { const j = JSON.parse(r.responseText); if (j.retry_after) retryMs = Math.ceil(j.retry_after * 1000) + 500; } catch(_){}
+            console.warn(APP_TAG, 'Webhook 429 — retry in', retryMs, 'ms');
+            updateWebhookStatus(`Webhook rate-limited, retry in ${Math.ceil(retryMs/1000)}s`);
+            _deferWebQ(item.id, Date.now() + retryMs);
           } else {
             console.error(APP_TAG, 'Webhook failed', r.status, r.statusText);
             updateWebhookStatus(`Webhook failed: ${r.status}`);
@@ -1076,7 +1091,7 @@
 
   function testTg() {
     if (!tg.token || !tg.chat) return alert('Set Bot Token and Chat ID first');
-    tgMsg('startup', `🤖 <b>${APP_NAME} ${APP_VERSION}</b>\nTelegram working!\nAlerts: captcha, messages, staff, logout, health`);
+    sendTg(`🤖 <b>${APP_NAME} ${APP_VERSION}</b>\nTelegram working!\nAlerts: captcha, messages, staff, logout, health`);
     alert('Test sent — check Telegram');
   }
 
@@ -1713,9 +1728,12 @@
     }
     if (!hasImp && !hasSql) {
       if (_sqlSent) {
-        // Check has cleared — stop chasing it (whatever the last fingerprint was)
-        const lastSig = localStorage.getItem('cbSqlCheckFp') || '';
-        if (lastSig) clearCriticalAlert('sqlcheck:' + contentHash(lastSig));
+        // Clear ALL pending sqlcheck alerts — not just the last seen question.
+        // If two distinct questions appeared before the check was answered, each
+        // queued under its own hash key; cbSqlCheckFp only stored the last one,
+        // so a single-key clear would leave earlier questions firing for ~30 min.
+        const q = _loadCrit().filter(a => !a.key.startsWith('sqlcheck:'));
+        _saveCrit(q);
       }
       _sqlSent = false;
       localStorage.removeItem('cbSqlCheckFp');
