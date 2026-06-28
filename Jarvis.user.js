@@ -1,8 +1,8 @@
-﻿// ==UserScript==
+// ==UserScript==
 // @name         Jarvis Bot 2000.183
 // @namespace    http://tampermonkey.net/
 // @version      2000.183
-// @description  Jarvis Bot 2000.183 â€” automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
+// @description  Jarvis Bot 2000.183 — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
 // @match        *://www.tmn2010.net/authenticated/*
@@ -33,7 +33,7 @@
 // ==/UserScript==
 
 /*  Jarvis Bot 2000.183
- *  Game automation assistant â€” MS Office inspired UI
+ *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
  *  Telegram alerts, staff-check detection, auto-login
@@ -57,7 +57,7 @@
 (function initPageLoadWatchdog() {
     try {
         if (window.top !== window.self) return; // main frame only
-        const LOAD_TIMEOUT_MS = 45000;  // not 'complete' within 45s â†’ reload
+        const LOAD_TIMEOUT_MS = 45000;  // not 'complete' within 45s → reload
         const MAX_RELOADS = 4;          // give up after a few tries to avoid loops
         const startedAt = Date.now();
         const reloadKey = 'cbLoadStuckReloads';
@@ -78,12 +78,12 @@
             }
             const reloads = parseInt(localStorage.getItem(reloadKey) || '0', 10);
             if (reloads >= MAX_RELOADS) {
-                console.warn('[JB][LOADWATCHDOG] Page hung but max stuck-reloads reached â€” not reloading again');
+                console.warn('[JB][LOADWATCHDOG] Page hung but max stuck-reloads reached — not reloading again');
                 return;
             }
             localStorage.setItem(reloadKey, String(reloads + 1));
             localStorage.setItem(lastReloadKey, String(Date.now()));
-            console.warn(`[JB][LOADWATCHDOG] Page hung mid-load (>${LOAD_TIMEOUT_MS/1000}s) â€” reloading (attempt ${reloads + 1}/${MAX_RELOADS})`);
+            console.warn(`[JB][LOADWATCHDOG] Page hung mid-load (>${LOAD_TIMEOUT_MS/1000}s) — reloading (attempt ${reloads + 1}/${MAX_RELOADS})`);
             try { window.stop(); } catch (e) {}
             location.reload();
         };
@@ -103,13 +103,13 @@
  * this fires immediately at document-idle and bounces the tab to the
  * authenticated home page before the logout page renders.
  * The server has already destroyed the session by this point, so the redirect
- * falls through to the login page â†’ auto-login flow. The primary prevention is
+ * falls through to the login page → auto-login flow. The primary prevention is
  * in handleSleep(), which no longer navigates to act=out at all.
  */
 (function blockLogoutRedirect() {
   try {
     if (!window.location.search.includes('act=out')) return;
-    console.log('[JB] Logout URL intercepted â€” redirecting to home');
+    console.log('[JB] Logout URL intercepted — redirecting to home');
     window.location.replace('/authenticated/default.aspx');
   } catch (_) {}
 })();
@@ -341,7 +341,7 @@
     if (_flashTimer) return;
     let tog = false;
     _flashTimer = setInterval(() => {
-      document.title = tog ? 'ðŸ”´ LOGIN NEEDED' : _origTitle;
+      document.title = tog ? '🔴 LOGIN NEEDED' : _origTitle;
       tog = !tog;
     }, 1000);
   }
@@ -422,7 +422,7 @@
       if (loWasSent(key)) return false;
 
       const kind = isExplicit ? 'LOGOUT/TIMEOUT' : 'SESSION LOST';
-      const msg = `ðŸšª <b>${kind}</b>\n${GM_getValue('cbPlayer','')||'?'} | ${fmtDate()}\nPlease log back in`;
+      const msg = `🚪 <b>${kind}</b>\n${GM_getValue('cbPlayer','')||'?'} | ${fmtDate()}\nPlease log back in`;
 
       loMarkSent(key);
       GM_xmlhttpRequest({
@@ -443,14 +443,14 @@
   const _search  = window.location.search.toLowerCase();
 
   if (_path.includes('/default.aspx') && _search.includes('show=1')) {
-    console.log(APP_TAG, 'Session refresh â€” redirecting in 6s');
+    console.log(APP_TAG, 'Session refresh — redirecting in 6s');
     const ov = document.createElement('div');
     Object.assign(ov.style, {
       position:'fixed',top:'10px',right:'10px',background:'rgba(0,0,0,.85)',color:'#fff',
       padding:'12px',borderRadius:'4px',fontFamily:'Segoe UI,sans-serif',fontSize:'13px',
       zIndex:'9999',textAlign:'center',minWidth:'220px',border:'1px solid #0078d4'
     });
-    ov.innerHTML = `ðŸ”„ <b>Redirecting</b> in <span id="jb-cd">6</span>s...`;
+    ov.innerHTML = `🔄 <b>Redirecting</b> in <span id="jb-cd">6</span>s...`;
     document.body.appendChild(ov);
     let cd = 6;
     const ci = setInterval(() => {
@@ -534,7 +534,7 @@
 
     function fillCreds() {
       if (LOGIN.user === 'your_username_here' || LOGIN.pass === 'your_password_here') {
-        showOverlay('âš ï¸ Set credentials in settings'); return false;
+        showOverlay('⚠️ Set credentials in settings'); return false;
       }
       const u = document.getElementById(UID);
       const p = document.getElementById(PID);
@@ -556,12 +556,12 @@
         tryLogin._r++;
         if (tryLogin._r <= 3) { setTimeout(tryLogin, 500); return; }
         tryLogin._r = 0; clearTimers();
-        showOverlay('âš ï¸ Waiting for captcha...'); return;
+        showOverlay('⚠️ Waiting for captcha...'); return;
       }
       tryLogin._r = 0; clearTimers();
       att++; localStorage.setItem(LS_ATT, String(att));
       lastTok = tok; localStorage.setItem(LS_TOK, lastTok);
-      showOverlay(`ðŸ” Submitting ${att}/${LOGIN.maxAttempts}...`);
+      showOverlay(`🔐 Submitting ${att}/${LOGIN.maxAttempts}...`);
       btn.click();
     }
 
@@ -571,7 +571,7 @@
       endTs = Date.now() + delay;
       const updateCd = () => {
         const rem = Math.ceil((endTs - Date.now())/1000);
-        if (rem > 0) showOverlay(`âœ… Captcha done â€” submitting in ${rem}s`);
+        if (rem > 0) showOverlay(`✅ Captcha done — submitting in ${rem}s`);
       };
       updateCd();
       cdTimer = setInterval(updateCd, 500);
@@ -587,7 +587,7 @@
           clearTimers(); lastTok = '';
           localStorage.removeItem(LS_TOK);
           localStorage.setItem(LS_ATT,'0'); localStorage.setItem(LS_PAU,'false');
-          showOverlay('âŒ Failed â€” redirecting...');
+          showOverlay('❌ Failed — redirecting...');
           setTimeout(() => { window.location.href = 'https://www.tmn2010.net/Default.aspx?show=1'; }, 2000);
           return;
         }
@@ -597,18 +597,18 @@
       const done = captchaDone();
       const tok = getToken();
       if (btn && !btn.disabled && done && tok && tok !== lastTok && !subTimer) {
-        showOverlay('âœ… Captcha done â€” submitting...');
+        showOverlay('✅ Captcha done — submitting...');
         scheduleSubmit(LOGIN.delay + Math.floor(Math.random()*2000));
       } else if (subTimer && (!done || !tok || (btn && btn.disabled))) {
         clearTimers();
-        showOverlay(done ? (tok ? 'â³ Waiting...' : 'â³ Waiting for token...') : 'â³ Waiting for captcha...');
+        showOverlay(done ? (tok ? '⏳ Waiting...' : '⏳ Waiting for token...') : '⏳ Waiting for captcha...');
       }
     }
 
     function initLogin() {
       resetLogin();
 
-      // Check sleep mode â€” don't auto-login during sleep window
+      // Check sleep mode — don't auto-login during sleep window
       if (GM_getValue('jbSleepOn', false)) {
         const sleepTime = GM_getValue('jbSleepTime', '23:00');
         const wakeTime = GM_getValue('jbWakeTime', '07:00');
@@ -633,8 +633,8 @@
 
         if (inSleep) {
           GM_setValue('jbIsSleeping', true);
-          showOverlay(`ðŸ˜´ Sleep mode\nAuto-login disabled until ${wakeTime}`);
-          console.log('[JB Login] Sleep mode active â€” skipping auto-login until', wakeTime);
+          showOverlay(`😴 Sleep mode\nAuto-login disabled until ${wakeTime}`);
+          console.log('[JB Login] Sleep mode active — skipping auto-login until', wakeTime);
           // Recheck every 60s in case wake time arrives
           setTimeout(() => location.reload(), 60000);
           return;
@@ -895,7 +895,7 @@
           } else if (r.status === 429) {
             let retryMs = 5000;
             try { const j = JSON.parse(r.responseText); if (j.retry_after) retryMs = Math.ceil(j.retry_after * 1000) + 500; } catch(_){}
-            console.warn(APP_TAG, 'Webhook 429 â€” retry in', retryMs, 'ms');
+            console.warn(APP_TAG, 'Webhook 429 — retry in', retryMs, 'ms');
             updateWebhookStatus(`Webhook rate-limited, retry in ${Math.ceil(retryMs/1000)}s`);
             _deferWebQ(item.id, Date.now() + retryMs);
           } else {
@@ -918,8 +918,8 @@
 
   /* === TELEGRAM DELIVERY QUEUE (reliable send) ===
    * The old sendTg fired a single GM_xmlhttpRequest with no retry. If the request
-   * was interrupted â€” page navigating right after an action, the tab backgrounded
-   * and throttled, or Telegram returning 429 to a burst â€” the message was lost or
+   * was interrupted — page navigating right after an action, the tab backgrounded
+   * and throttled, or Telegram returning 429 to a burst — the message was lost or
    * stalled (that's the "DTM at 16:49 arrived at 17:15"). Every send now goes into
    * a persistent localStorage queue and is pumped until Telegram returns 200, with
    * 429 retry_after handling and backoff. The queue resumes on the next page load,
@@ -973,7 +973,7 @@
           } else if (r.status === 429) {
             let wait = 5000;
             try { const j = JSON.parse(r.responseText); if (j.parameters && j.parameters.retry_after) wait = (j.parameters.retry_after + 1) * 1000; } catch(_){}
-            console.error(APP_TAG, 'TG 429 â€” retry in', wait, 'ms');
+            console.error(APP_TAG, 'TG 429 — retry in', wait, 'ms');
             _deferTgQ(item.id, Date.now() + wait);
           } else {
             console.error(APP_TAG, 'TG fail', r.status);
@@ -994,7 +994,7 @@
 
   /* === CRITICAL ALERT QUEUE (reload-proof) ===
    * sendTgRepeat schedules its repeats with setTimeout, which are DESTROYED when
-   * Jarvis navigates between pages â€” so a 5x burst could deliver only 2 before a
+   * Jarvis navigates between pages — so a 5x burst could deliver only 2 before a
    * page change killed the rest. That's how a missed script check turned into a
    * 12h no-reply soft ban. This queue persists the remaining sends to localStorage
    * and resumes them on the next page load + every tick, so the full burst always
@@ -1081,17 +1081,17 @@
    * (a message id, or a short hash of the text) so identical content dedups.
    */
   function seenOnce(bucket, id, cap = 50) {
-    if (id == null) return true; // no id to key on â€” treat as already-seen (don't alert)
+    if (id == null) return true; // no id to key on — treat as already-seen (don't alert)
     const lsk = 'cbSeen_' + bucket;
     let arr;
     try { arr = JSON.parse(localStorage.getItem(lsk) || '[]'); } catch (e) { arr = []; }
     if (!Array.isArray(arr)) arr = [];
     const key = String(id);
-    if (arr.includes(key)) return false; // already seen â€” caller should stay silent
+    if (arr.includes(key)) return false; // already seen — caller should stay silent
     arr.push(key);
     if (arr.length > cap) arr.splice(0, arr.length - cap); // keep newest `cap`
     try { localStorage.setItem(lsk, JSON.stringify(arr)); } catch (e) {}
-    return true; // first sighting â€” caller may alert
+    return true; // first sighting — caller may alert
   }
 
   // Cheap stable hash for content-derived dedup ids (FNV-1a, hex string).
@@ -1107,16 +1107,16 @@
 
   function testTg() {
     if (!tg.token || !tg.chat) return alert('Set Bot Token and Chat ID first');
-    sendTg(`ðŸ¤– <b>${APP_NAME} ${APP_VERSION}</b>\nTelegram working!\nAlerts: captcha, messages, staff, logout, health`);
-    alert('Test sent â€” check Telegram');
+    sendTg(`🤖 <b>${APP_NAME} ${APP_VERSION}</b>\nTelegram working!\nAlerts: captcha, messages, staff, logout, health`);
+    alert('Test sent — check Telegram');
   }
 
   function testWebhook() {
     if (!tg.webhook) return alert('Set Webhook URL first');
     if (!tg.webhookEnabled) return alert('Enable webhook first');
     updateWebhookStatus('Sending webhook test...');
-    sendWebhook(`ðŸ¤– <b>${APP_NAME} ${APP_VERSION}</b>\nWebhook working!`);
-    alert('Webhook test sent â€” check the target endpoint');
+    sendWebhook(`🤖 <b>${APP_NAME} ${APP_VERSION}</b>\nWebhook working!`);
+    alert('Webhook test sent — check the target endpoint');
   }
 
   function restorePendingAction() {
@@ -1144,8 +1144,8 @@
     ];
     if (patterns.some(re => re.test(txt))) {
       if (!_softBanSent) {
-        tgMsg('softban', `â›” <b>SOFT-BAN / BLOCKED</b>\n${st.player||'?'} | ${fmtDate()}\nDetected anti-bot/soft-ban text â€” automation paused`);
-        queueCriticalAlert('softban', `â›” <b>SOFT-BAN / BLOCKED</b>\n${st.player||'?'} | ${fmtDate()}\nDetected anti-bot/soft-ban text â€” automation paused`, 5, 2000, 10, 180000);
+        tgMsg('softban', `⛔ <b>SOFT-BAN / BLOCKED</b>\n${st.player||'?'} | ${fmtDate()}\nDetected anti-bot/soft-ban text — automation paused`);
+        queueCriticalAlert('softban', `⛔ <b>SOFT-BAN / BLOCKED</b>\n${st.player||'?'} | ${fmtDate()}\nDetected anti-bot/soft-ban text — automation paused`, 5, 2000, 10, 180000);
         _softBanSent = true;
       }
       paused = true;
@@ -1261,12 +1261,12 @@
     coffeeNextAt:   GM_getValue('jbCoffeeNext', 0),       // timestamp of next break
     coffeeEndAt:    GM_getValue('jbCoffeeEnd', 0),        // timestamp break ends
 
-    // Lunch break: daily, configurable time + duration, Â±10 min jitter
+    // Lunch break: daily, configurable time + duration, ±10 min jitter
     lunchOn:        GM_getValue('jbLunchOn', false),
     lunchTime:      GM_getValue('jbLunchTime', '12:30'),  // HH:MM format
     lunchDuration:  GM_getValue('jbLunchDur', 30),        // minutes
     lunchMode:      GM_getValue('jbLunchMode', 'daily'),  // daily | once
-    lunchJitter:    GM_getValue('jbLunchJitter', 10),     // random Â±minutes
+    lunchJitter:    GM_getValue('jbLunchJitter', 10),     // random ±minutes
     lunchTakenToday:GM_getValue('jbLunchTaken', ''),      // date string of last lunch
     lunchEndAt:     GM_getValue('jbLunchEnd', 0),
 
@@ -1274,7 +1274,7 @@
     sleepOn:        GM_getValue('jbSleepOn', false),
     sleepTime:      GM_getValue('jbSleepTime', '23:00'),  // HH:MM
     wakeTime:       GM_getValue('jbWakeTime', '07:00'),   // HH:MM
-    sleepJitter:    GM_getValue('jbSleepJitter', 10),     // random Â±minutes
+    sleepJitter:    GM_getValue('jbSleepJitter', 10),     // random ±minutes
     sleepMode:      GM_getValue('jbSleepMode', 'daily'),  // daily | weekdays | weekends
     sleepLogout:    GM_getValue('jbSleepLogout', true),    // actually navigate to logout
     isSleeping:     GM_getValue('jbIsSleeping', false)
@@ -1343,7 +1343,7 @@
       breaks.lunchEndAt = now + breaks.lunchDuration * 60000;
       breaks.lunchTakenToday = todayStr();
       saveBreaks();
-      tgMsg('lunch', `ðŸ” <b>Lunch Break</b>\n${st.player||'?'} | ${breaks.lunchDuration}min`);
+      tgMsg('lunch', `🍔 <b>Lunch Break</b>\n${st.player||'?'} | ${breaks.lunchDuration}min`);
       console.log(`[JB] Lunch started, ends at ${fmtDate(new Date(breaks.lunchEndAt))}`);
       return true;
     }
@@ -1351,7 +1351,7 @@
   }
 
   // True if any enabled core action is due (or about to be) within `withinMs`.
-  // Used so a coffee break never starts in the exact moment an action would fire â€”
+  // Used so a coffee break never starts in the exact moment an action would fire —
   // more human (do the action, then break) and avoids delaying a ready action.
   // Mirrors the moderator script's "bail the long wait when an action is due".
   function actionDueSoon(withinMs = 4000) {
@@ -1376,7 +1376,7 @@
     if (breaks.coffeeEndAt > 0 && Date.now() < breaks.coffeeEndAt) return true;
     // Time for a new break
     if (breaks.coffeeNextAt > 0 && Date.now() >= breaks.coffeeNextAt) {
-      // Don't start the break while an action is due â€” fire the action first, then
+      // Don't start the break while an action is due — fire the action first, then
       // the break begins on the next pass (nudge coffeeNextAt forward a few seconds).
       if (actionDueSoon(4000)) {
         breaks.coffeeNextAt = Date.now() + 5000;
@@ -1385,11 +1385,11 @@
       }
       breaks.coffeeEndAt = Date.now() + breaks.coffeeDuration * 60000;
       saveBreaks();
-      tgMsg('coffee', `â˜• <b>Coffee Break</b>\n${st.player||'?'} | ${breaks.coffeeDuration}min`);
+      tgMsg('coffee', `☕ <b>Coffee Break</b>\n${st.player||'?'} | ${breaks.coffeeDuration}min`);
       console.log(`[JB] Coffee break started, ${breaks.coffeeDuration}min`);
       return true;
     }
-    // Not scheduled yet â€” schedule one
+    // Not scheduled yet — schedule one
     if (breaks.coffeeNextAt === 0) scheduleCoffee();
     return false;
   }
@@ -1442,7 +1442,7 @@
       if (!breaks.isSleeping) {
         breaks.isSleeping = true;
         saveBreaks();
-        tgMsg('sleep', `ðŸ˜´ <b>Sleep Mode</b>\n${st.player||'?'} | Until ${breaks.wakeTime}`);
+        tgMsg('sleep', `😴 <b>Sleep Mode</b>\n${st.player||'?'} | Until ${breaks.wakeTime}`);
         console.log(`[JB] Entering sleep mode until ${breaks.wakeTime}`);
         if (breaks.sleepLogout) {
           setTimeout(() => { window.location.href = '/authenticated/default.aspx'; }, 3000);
@@ -1453,7 +1453,7 @@
       if (breaks.isSleeping) {
         breaks.isSleeping = false;
         saveBreaks();
-        tgMsg('wake', `â˜€ï¸ <b>Wake Up</b>\n${st.player||'?'} | Good morning!`);
+        tgMsg('wake', `☀️ <b>Wake Up</b>\n${st.player||'?'} | Good morning!`);
         console.log('[JB] Waking up from sleep mode');
       }
       return false;
@@ -1461,14 +1461,14 @@
   }
 
   function getBreakStatus() {
-    if (breaks.isSleeping) return { active:true, type:'sleep', msg:`ðŸ˜´ Sleeping until ${breaks.wakeTime}` };
+    if (breaks.isSleeping) return { active:true, type:'sleep', msg:`😴 Sleeping until ${breaks.wakeTime}` };
     if (breaks.lunchEndAt > 0 && Date.now() < breaks.lunchEndAt) {
       const rem = Math.ceil((breaks.lunchEndAt - Date.now())/60000);
-      return { active:true, type:'lunch', msg:`ðŸ” Lunch (${rem}m left)` };
+      return { active:true, type:'lunch', msg:`🍔 Lunch (${rem}m left)` };
     }
     if (breaks.coffeeEndAt > 0 && Date.now() < breaks.coffeeEndAt) {
       const rem = Math.ceil((breaks.coffeeEndAt - Date.now())/60000);
-      return { active:true, type:'coffee', msg:`â˜• Coffee (${rem}m left)` };
+      return { active:true, type:'coffee', msg:`☕ Coffee (${rem}m left)` };
     }
     return { active:false, type:null, msg:null };
   }
@@ -1630,7 +1630,7 @@
   function setStatus(msg) {
     if (_shadow) {
       const el = _shadow.querySelector('#jb-status');
-      const ji = st.inJail ? 'ðŸ”’' : 'âœ…';
+      const ji = st.inJail ? '🔒' : '✅';
       const pi = st.pending ? `<br>Pending: ${st.pending}` : '';
       if (el) el.innerHTML = `${esc(msg)}<br>Player: ${esc(st.player)}<br>Jail: ${ji}${pi}<br>Crime: ${fmtAgo(st.lastCrime)}<br>GTA: ${fmtAgo(st.lastGta)}<br>Booze: ${fmtAgo(st.lastBooze)}`;
     }
@@ -1649,7 +1649,7 @@
     if (hp < cfg.minHealth) {
       if (now - _lastHealthAlert >= 10000) {
         _lastHealthAlert = now;
-        tgMsg('health', `ðŸ¥ <b>LOW HEALTH</b>\n${st.player||'?'} | ${hp}% (min: ${cfg.minHealth}%)\n${st.health ? 'ðŸ’Š Auto-buy ON' : 'âš ï¸ Auto-buy OFF'}`);
+        tgMsg('health', `🏥 <b>LOW HEALTH</b>\n${st.player||'?'} | ${hp}% (min: ${cfg.minHealth}%)\n${st.health ? '💊 Auto-buy ON' : '⚠️ Auto-buy OFF'}`);
         return true;
       }
     } else { _lastHealthAlert = 0; }
@@ -1673,8 +1673,8 @@
     if (banTs) {
       if (!_scriptBanSent) {
         const until = new Date(banTs).toLocaleString('en-GB');
-        tgMsg('scriptTest', `ðŸš¨ <b>SCRIPT CHECK BANNED</b>\n${st.player||'?'} | ${fmtDate()}\nPaused until ${until}\nDo not auto-submit while banned`);
-        queueCriticalAlert('scriptcheck:ban', `ðŸš¨ <b>SCRIPT CHECK BANNED</b>\n${st.player||'?'} | ${fmtDate()}\nPaused until ${until}\nDo not auto-submit while banned`, 5, 2000, 10, 180000);
+        tgMsg('scriptTest', `🚨 <b>SCRIPT CHECK BANNED</b>\n${st.player||'?'} | ${fmtDate()}\nPaused until ${until}\nDo not auto-submit while banned`);
+        queueCriticalAlert('scriptcheck:ban', `🚨 <b>SCRIPT CHECK BANNED</b>\n${st.player||'?'} | ${fmtDate()}\nPaused until ${until}\nDo not auto-submit while banned`, 5, 2000, 10, 180000);
         _scriptBanSent = true;
       }
       return true;
@@ -1684,7 +1684,7 @@
     if (!tg.scriptTest) return false;
     if (isOnCaptcha()) {
       if (!_captchaSent) {
-        tgMsg('scriptTest', `âš ï¸ <b>SCRIPT CHECK</b>\n${st.player||'?'} | ${fmtDate()}\nAutomation paused`);
+        tgMsg('scriptTest', `⚠️ <b>SCRIPT CHECK</b>\n${st.player||'?'} | ${fmtDate()}\nAutomation paused`);
         _captchaSent = true;
       }
       return true;
@@ -1730,13 +1730,13 @@
       }
       // Persist a content-keyed fingerprint so reloads don't re-alert. Using the
       // list-based seenOnce (not a single last-value) means a check that cycles
-      // between two questions (Aâ†’Bâ†’A) won't re-alert on A's reappearance â€” each
+      // between two questions (A→B→A) won't re-alert on A's reappearance — each
       // distinct question alerts exactly once. Borrowed from the moderator script.
       const sig = q.substring(0,120);
       if (seenOnce('sqlcheck', contentHash(sig), 30)) {
         localStorage.setItem('cbSqlCheckFp', sig); // keep for the clear-on-gone logic below
         queueCriticalAlert('sqlcheck:' + contentHash(sig),
-          `â— <b>STAFF CHECK</b>\n${st.player||'?'} | ${fmtDate()}\n${esc(sig)}\nâš ï¸ Answer in-game to avoid a soft ban`,
+          `❗ <b>STAFF CHECK</b>\n${st.player||'?'} | ${fmtDate()}\n${esc(sig)}\n⚠️ Answer in-game to avoid a soft ban`,
           5, 2000, 10, 180000);
       }
       _sqlSent = true;
@@ -1744,7 +1744,7 @@
     }
     if (!hasImp && !hasSql) {
       if (_sqlSent) {
-        // Clear ALL pending sqlcheck alerts â€” not just the last seen question.
+        // Clear ALL pending sqlcheck alerts — not just the last seen question.
         // If two distinct questions appeared before the check was answered, each
         // queued under its own hash key; cbSqlCheckFp only stored the last one,
         // so a single-key clear would leave earlier questions firing for ~30 min.
@@ -1770,7 +1770,7 @@
     if (!_logoutSent && !loWasSent(key)) {
       const kind = key !== 'login-page' ? 'LOGOUT/TIMEOUT' : 'SESSION LOST';
       loMarkSent(key);
-      sendTg(`ðŸšª <b>${kind}</b>\n${st.player||'?'} | ${fmtDate()}\nPlease log back in`);
+      sendTg(`🚪 <b>${kind}</b>\n${st.player||'?'} | ${fmtDate()}\nPlease log back in`);
       fireLogoutAlerts();
       _logoutSent = true;
       return true;
@@ -1781,12 +1781,12 @@
   /* === STAFF-MAIL ALERT HELPERS === */
 
   function sendScriptTestAlert(mailId, sender, subject) {
-    // Ban-risk alert â€” must reach you even across page navigations. 5 quick sends,
-    // then re-pings every 3 min (Ã—10 = ~30 min backstop) so a missed burst still
+    // Ban-risk alert — must reach you even across page navigations. 5 quick sends,
+    // then re-pings every 3 min (×10 = ~30 min backstop) so a missed burst still
     // chases you down before the no-reply window closes.
     queueCriticalAlert(
       'scriptcheck:' + (mailId || contentHash(sender + subject)),
-      `â— <b>SCRIPT CHECK (inbox)</b>\n${st.player||'?'} | ${fmtDate()}\nFrom: ${esc(sender)} | ${esc(subject)}\nâš ï¸ Reply in-game to avoid a soft ban`,
+      `❗ <b>SCRIPT CHECK (inbox)</b>\n${st.player||'?'} | ${fmtDate()}\nFrom: ${esc(sender)} | ${esc(subject)}\n⚠️ Reply in-game to avoid a soft ban`,
       5, 2000, 10, 180000
     );
   }
@@ -1803,7 +1803,7 @@
     const preview = body ? `\n<pre>${esc(body.substring(0,300))}</pre>` : '';
     queueCriticalAlert(
       'staffmail:' + (mailId || contentHash(sender + subject)),
-      `â— <b>STAFF MAIL</b>\n${st.player||'?'} | ${fmtDate()}\nFrom: <b>${esc(sender)}</b> | ${esc(subject)}${preview}`,
+      `❗ <b>STAFF MAIL</b>\n${st.player||'?'} | ${fmtDate()}\nFrom: <b>${esc(sender)}</b> | ${esc(subject)}${preview}`,
       5, 2000, 6, 180000
     );
   }
@@ -1913,7 +1913,7 @@
     if (owFlashTimer) clearInterval(owFlashTimer);
     let c = 0;
     owFlashTimer = setInterval(() => {
-      document.title = (c%2===0) ? `ðŸŸ¢ ${name} ONLINE` : _origTitle;
+      document.title = (c%2===0) ? `🟢 ${name} ONLINE` : _origTitle;
       c++;
       if (c > 12) { clearInterval(owFlashTimer); owFlashTimer = null; document.title = _origTitle; }
     }, 1000);
@@ -1938,16 +1938,16 @@
     owBrowserNotify(`${APP_NAME}: player online`, `${p.name} is online`, p.href);
     owSound();
     owFlashTitle(p.name);
-    if (ow.telegram) tgMsg('online', `ðŸŸ¢ <b>ONLINE</b> â€” ${esc(p.name)}\n${st.player||'?'} | ${fmtDate()}`);
-    setStatus(`ðŸŸ¢ ${p.name} online`);
+    if (ow.telegram) tgMsg('online', `🟢 <b>ONLINE</b> — ${esc(p.name)}\n${st.player||'?'} | ${fmtDate()}`);
+    setStatus(`🟢 ${p.name} online`);
     console.log('[JB][WATCH]', p.name, 'came ONLINE');
   }
 
   function owTriggerOffline(name) {
     if (!ow.notifyOff) return;
     owBrowserNotify(`${APP_NAME}: player offline`, `${name} went offline`);
-    if (ow.telegram) tgMsg('offline', `ðŸ”´ <b>OFFLINE</b> â€” ${esc(name)}\n${st.player||'?'} | ${fmtDate()}`);
-    setStatus(`ðŸ”´ ${name} offline`);
+    if (ow.telegram) tgMsg('offline', `🔴 <b>OFFLINE</b> — ${esc(name)}\n${st.player||'?'} | ${fmtDate()}`);
+    setStatus(`🔴 ${name} offline`);
     console.log('[JB][WATCH]', name, 'went OFFLINE');
   }
 
@@ -1967,11 +1967,11 @@
         const isOnline = !!hit;
         const wasOnline = !!ow.lastOn[k];
 
-        // State change: offline â†’ online
+        // State change: offline → online
         if (isOnline && !wasOnline) {
           owTriggerOnline(hit);
         }
-        // State change: online â†’ offline
+        // State change: online → offline
         if (!isOnline && wasOnline) {
           owTriggerOffline(raw);
         }
@@ -2123,7 +2123,7 @@
   }
 
   function fmtTimer(t, readyKey) {
-    if (!t) return { txt:'â€”', clr:'gray', rdy:false };
+    if (!t) return { txt:'—', clr:'gray', rdy:false };
     if (t[readyKey] || t.total <= 0) return { txt:'Ready', clr:'green', rdy:true };
     const {h,m} = t;
     let txt = h > 0 ? (m > 0 ? `${h}h ${m}m` : `${h}h`) : (m > 0 ? `${m}m` : '< 1m');
@@ -2206,7 +2206,7 @@
         storeTravel({ cd:0, canNormal:true, at:Date.now() });
         console.log('[JB][TRAVEL] Ready to travel');
       } else {
-        console.log('[JB][TRAVEL] Could not parse â€” keeping existing timer');
+        console.log('[JB][TRAVEL] Could not parse — keeping existing timer');
       }
       updateTimers();
     } catch(e) { console.error(APP_TAG,'Travel fetch err',e); }
@@ -2226,7 +2226,7 @@
   }
 
   function fmtTravel(ts) {
-    if (!ts) return { txt:'â€”', clr:'gray' };
+    if (!ts) return { txt:'—', clr:'gray' };
     if (ts.ready) return { txt:'Ready', clr:'green' };
     const m = Math.floor(ts.remaining / 60);
     const s = ts.remaining % 60;
@@ -2299,7 +2299,7 @@
       const last = localStorage.getItem('cbDtmReadyState');
       if (rdy && last !== 'ready') {
         localStorage.setItem('cbDtmReadyState','ready');
-        tgMsg('dtmReady', `âœ… <b>DTM READY</b>\n${st.player||'?'} | ${fmtDate()}`);
+        tgMsg('dtmReady', `✅ <b>DTM READY</b>\n${st.player||'?'} | ${fmtDate()}`);
       } else if (!rdy && last === 'ready') localStorage.setItem('cbDtmReadyState','cd');
     }
     const oc = getOc();
@@ -2308,7 +2308,7 @@
       const last = localStorage.getItem('cbOcReadyState');
       if (rdy && last !== 'ready') {
         localStorage.setItem('cbOcReadyState','ready');
-        tgMsg('ocReady', `âœ… <b>OC READY</b>\n${st.player||'?'} | ${fmtDate()}`);
+        tgMsg('ocReady', `✅ <b>OC READY</b>\n${st.player||'?'} | ${fmtDate()}`);
         if (st.createOC && getCreateOCState() === 'idle') try { triggerCreateOC(); } catch(e){}
       } else if (!rdy && last === 'ready') localStorage.setItem('cbOcReadyState','cd');
     }
@@ -2326,11 +2326,11 @@
     const hrs = rem / 3600000;
     if (!localStorage.getItem('cbProtW12') && hrs <= 12 && hrs > 11) {
       localStorage.setItem('cbProtW12','1');
-      tgMsg('protection', `âš ï¸ <b>Protection ~12h</b>\n${st.player||'?'} | ${Math.floor(hrs)}h left`);
+      tgMsg('protection', `⚠️ <b>Protection ~12h</b>\n${st.player||'?'} | ${Math.floor(hrs)}h left`);
     }
     if (!localStorage.getItem('cbProtW6') && hrs <= 6 && hrs > 5) {
       localStorage.setItem('cbProtW6','1');
-      tgMsg('protection', `ðŸš¨ <b>Protection ~6h</b>\n${st.player||'?'} | ${Math.floor(hrs)}h left`);
+      tgMsg('protection', `🚨 <b>Protection ~6h</b>\n${st.player||'?'} | ${Math.floor(hrs)}h left`);
     }
   }
 
@@ -2376,13 +2376,13 @@
       if (el && _timerCache[key] !== html) { _timerCache[key] = html; GM_setValue('cbCache'+key.charAt(0).toUpperCase()+key.slice(1), html); el.innerHTML = html; }
     };
 
-    setEl(_timerEls.dtm, 'dtm', `<span style="color:${clrForTimer(dtm.clr)}">â—</span> ${dtm.txt}`);
-    setEl(_timerEls.oc, 'oc', `<span style="color:${clrForTimer(oc.clr)}">â—</span> ${oc.txt}`);
-    setEl(_timerEls.travel, 'travel', `<span style="color:${clrForTimer(trv.clr)}">â—</span> ${trv.txt}`);
+    setEl(_timerEls.dtm, 'dtm', `<span style="color:${clrForTimer(dtm.clr)}">●</span> ${dtm.txt}`);
+    setEl(_timerEls.oc, 'oc', `<span style="color:${clrForTimer(oc.clr)}">●</span> ${oc.txt}`);
+    setEl(_timerEls.travel, 'travel', `<span style="color:${clrForTimer(trv.clr)}">●</span> ${trv.txt}`);
 
     if (bar) {
       const hp = bar.hp||0;
-      setEl(_timerEls.hp, 'hp', `<span style="color:${hpColor(hp)}">â—</span> ${hp}%`);
+      setEl(_timerEls.hp, 'hp', `<span style="color:${hpColor(hp)}">●</span> ${hp}%`);
       // Capture rank for the Experience panel + stats page. Rank-up is detected by
       // the NAME changing (model-independent), which also marks the XP charts.
       try {
@@ -2401,7 +2401,7 @@
         }
       } catch(_){}
     }
-    if (prt) setEl(_timerEls.prot, 'prot', `<span style="color:${prt.clr}">â—</span> ${prt.txt}`);
+    if (prt) setEl(_timerEls.prot, 'prot', `<span style="color:${prt.clr}">●</span> ${prt.txt}`);
 
     // Hot city display
     if (!_timerEls.hotCity) _timerEls.hotCity = _shadow.querySelector('#jb-hot-display');
@@ -2410,8 +2410,8 @@
       const inHot = isInHot();
       const cur = getCurCity();
       const clr = inHot ? 'var(--jb-success)' : hot ? 'var(--jb-danger)' : 'var(--jb-text-ter)';
-      const label = hot ? (inHot ? `âœ… ${hot}` : `${hot} (in ${cur||'?'})`) : 'â€”';
-      const newHtml = `<span style="color:${clr}">â—</span> ${label}`;
+      const label = hot ? (inHot ? `✅ ${hot}` : `${hot} (in ${cur||'?'})`) : '—';
+      const newHtml = `<span style="color:${clr}">●</span> ${label}`;
       if (_timerCache.hotCity !== newHtml) { _timerCache.hotCity = newHtml; _timerEls.hotCity.innerHTML = newHtml; }
     }
 
@@ -2701,9 +2701,9 @@
             try {
               const body = await fetchMailBody(href);
               const preview = body ? `\n<pre>${esc(body.substring(0,300))}</pre>` : '';
-              tgMsg('newmail', `ðŸ“¬ <b>New Mail</b>\n${st.player||'?'} | From: ${esc(sender)}\n${esc(subject)}${preview}`);
+              tgMsg('newmail', `📬 <b>New Mail</b>\n${st.player||'?'} | From: ${esc(sender)}\n${esc(subject)}${preview}`);
             } catch(_) {
-              tgMsg('newmail', `ðŸ“¬ <b>New Mail</b>\n${st.player||'?'} | From: ${esc(sender)}\n${esc(subject)}`);
+              tgMsg('newmail', `📬 <b>New Mail</b>\n${st.player||'?'} | From: ${esc(sender)}\n${esc(subject)}`);
             }
           }
         }
@@ -2717,18 +2717,18 @@
       localStorage.setItem(LS_LAST_DTM_MAIL, mailId);
       if (!wasAlerted('DTM', mailId)) {
         markAlerted('DTM', mailId);
-        tgMsg('dtmInvite', `ðŸ“¬ <b>DTM Invite</b>\n${st.player||'?'} | ${fmtDate()}\n${st.inJail ? 'â›“ In jail' : 'ðŸšš Accepting...'}`);
+        tgMsg('dtmInvite', `📬 <b>DTM Invite</b>\n${st.player||'?'} | ${fmtDate()}\n${st.inJail ? '⛓ In jail' : '🚚 Accepting...'}`);
       }
       const url = await getAcceptUrl(href, 'dtm');
       if (st.whitelist && st.wlNames.length > 0) {
         const inv = await extractInviter(href);
         const ok = inv && st.wlNames.some(n => n && n.toLowerCase().trim() === inv.toLowerCase().trim());
         if (!ok) {
-          tgMsg('blocked', `ðŸš« <b>DTM Blocked</b>\n${st.player||'?'} | ${inv||'Unknown'} not whitelisted`);
+          tgMsg('blocked', `🚫 <b>DTM Blocked</b>\n${st.player||'?'} | ${inv||'Unknown'} not whitelisted`);
           return;
         }
       }
-      if (!url) { tgMsg('dtmInvite', `âš ï¸ <b>DTM</b> â€” no accept link found`); return; }
+      if (!url) { tgMsg('dtmInvite', `⚠️ <b>DTM</b> — no accept link found`); return; }
       localStorage.setItem(LS_PEND_DTM, url);
     } catch(e) { console.warn(APP_TAG, 'DTM invite err:', e); }
   }
@@ -2741,7 +2741,7 @@
         const inv = await extractInviter(href);
         const ok = inv && st.wlNames.some(n => n && n.toLowerCase().trim() === inv.toLowerCase().trim());
         if (!ok) {
-          tgMsg('blocked', `ðŸš« <b>OC Blocked</b>\n${st.player||'?'} | ${inv||'Unknown'} not whitelisted`);
+          tgMsg('blocked', `🚫 <b>OC Blocked</b>\n${st.player||'?'} | ${inv||'Unknown'} not whitelisted`);
           return;
         }
       }
@@ -2749,9 +2749,9 @@
         markAlerted('OC', mailId);
         let role = '';
         if (url) try { const u = new URL(url); const p = u.searchParams.get('pos'); if(p) role = ` (${p})`; } catch(_){}
-        tgMsg('ocInvite', `ðŸ“¬ <b>OC Invite</b>${role}\n${st.player||'?'} | ${fmtDate()}\n${st.inJail ? 'â›“ In jail' : 'ðŸ•µï¸ Accepting...'}`);
+        tgMsg('ocInvite', `📬 <b>OC Invite</b>${role}\n${st.player||'?'} | ${fmtDate()}\n${st.inJail ? '⛓ In jail' : '🕵️ Accepting...'}`);
       }
-      if (!url) { tgMsg('ocInvite', `âš ï¸ <b>OC</b> â€” no accept link found`); return; }
+      if (!url) { tgMsg('ocInvite', `⚠️ <b>OC</b> — no accept link found`); return; }
       localStorage.setItem(LS_PEND_OC, url);
     } catch(e) { console.warn(APP_TAG, 'OC invite err:', e); }
   }
@@ -2802,8 +2802,8 @@
     for (const id of btnIds) {
       const btn = document.getElementById(id);
       if (btn && !btn.disabled) {
-        setTimeout(() => { btn.click(); localStorage.removeItem('cbPendOcHandle'); st.acting = false; setStatus('âœ… OC role selected');
-          tgMsg('ocCreate', `ðŸ•µï¸ <b>OC Role Set</b>\n${st.player||'?'}`); }, 2000);
+        setTimeout(() => { btn.click(); localStorage.removeItem('cbPendOcHandle'); st.acting = false; setStatus('✅ OC role selected');
+          tgMsg('ocCreate', `🕵️ <b>OC Role Set</b>\n${st.player||'?'}`); }, 2000);
         return true;
       }
     }
@@ -2813,7 +2813,7 @@
 
     const bt = (document.body.textContent||'').toLowerCase();
     if (/you cannot do an organized crime|you have to wait/.test(bt)) { localStorage.removeItem('cbPendOcHandle'); localStorage.removeItem('cbPendOcHandleTs'); localStorage.setItem(LS_LAST_OC_ACC, String(Date.now())); st.acting = false; return true; }
-    if (/invalid request|invalid invite|expired|no longer/i.test(bt)) { localStorage.removeItem('cbPendOcHandle'); localStorage.removeItem('cbPendOcHandleTs'); localStorage.removeItem(LS_PEND_OC); localStorage.removeItem(LS_LAST_OC_MAIL); st.acting = false; tgMsg('invalid', `âŒ <b>OC Invalid</b>\n${st.player||'?'}`); return true; }
+    if (/invalid request|invalid invite|expired|no longer/i.test(bt)) { localStorage.removeItem('cbPendOcHandle'); localStorage.removeItem('cbPendOcHandleTs'); localStorage.removeItem(LS_PEND_OC); localStorage.removeItem(LS_LAST_OC_MAIL); st.acting = false; tgMsg('invalid', `❌ <b>OC Invalid</b>\n${st.player||'?'}`); return true; }
     return true;
   }
 
@@ -2821,7 +2821,7 @@
     if (localStorage.getItem('cbPendDtmHandle') !== 'true') return false;
 
     // Guard: if we just acted (clicked buy/complete) in the last 30s, the page we're
-    // now seeing is the postback result â€” don't re-process or re-alert.
+    // now seeing is the postback result — don't re-process or re-alert.
     const guard = parseInt(localStorage.getItem('cbDtmJustActed')||'0',10);
     if (guard > 0 && Date.now()-guard < 30000) {
       clearDtmHandle(); st.acting = false; st.action = ''; GM_setValue('cbActStart',0);
@@ -2839,7 +2839,7 @@
     // Block other actions while on the DTM page
     st.acting = true; st.action = 'dtm'; GM_setValue('cbActStart', Date.now());
 
-    // On cooldown? (normal â€” the 2h timer already tracks this) Just clear the flag and walk away.
+    // On cooldown? (normal — the 2h timer already tracks this) Just clear the flag and walk away.
     const bt = (document.body.textContent||'').toLowerCase();
     if (/you cannot do a dtm|you have to wait/.test(bt)) {
       clearDtmHandle(); st.acting = false; st.action = ''; GM_setValue('cbActStart',0);
@@ -2847,7 +2847,7 @@
     }
     if (/invalid request|invalid invite|expired|no longer/i.test(bt)) {
       clearDtmHandle(); localStorage.removeItem(LS_PEND_DTM); localStorage.removeItem(LS_LAST_DTM_MAIL);
-      st.acting = false; tgMsg('invalid', `âŒ <b>DTM Invalid</b>\n${st.player||'?'}`); return true;
+      st.acting = false; tgMsg('invalid', `❌ <b>DTM Invalid</b>\n${st.player||'?'}`); return true;
     }
 
     // Complete DTM button present?
@@ -2858,7 +2858,7 @@
       localStorage.setItem('cbDtmJustActed', String(Date.now()));
       localStorage.setItem(LS_LAST_DTM_ACC, String(Date.now()));
       storeDtm({ready:false,total:7200,h:2,m:0,s:0,at:Date.now()});
-      tgMsg('dtmBuy', `ðŸšš <b>DTM Done</b>\n${st.player||'?'} | 2h cooldown`);
+      tgMsg('dtmBuy', `🚚 <b>DTM Done</b>\n${st.player||'?'} | 2h cooldown`);
       // Persistent lock survives the postback reload; checkStuck respects it
       localStorage.setItem('cbActionLockUntil', String(Date.now() + 8000));
       setTimeout(() => { compBtn.click(); }, 1500);
@@ -2886,11 +2886,11 @@
     }
 
     // If we found the form but couldn't parse the max, fall back to the input's own max attribute,
-    // or a high number the game will cap â€” so we never miss a buy just because the text didn't match.
+    // or a high number the game will cap — so we never miss a buy just because the text didn't match.
     if (maxAmt === 0 && drugIn && buyBtn && !buyBtn.disabled) {
       const attrMax = parseInt(drugIn.getAttribute('max') || drugIn.getAttribute('maxlength') || '0', 10);
       maxAmt = attrMax > 0 && attrMax < 100000 ? attrMax : 99999;
-      console.log('[JB][DTM] maxAmt not parsed from text â€” using fallback', maxAmt);
+      console.log('[JB][DTM] maxAmt not parsed from text — using fallback', maxAmt);
     }
 
     if (maxAmt > 0 && drugIn && buyBtn && !buyBtn.disabled) {
@@ -2904,7 +2904,7 @@
       localStorage.setItem('cbDtmJustActed', String(Date.now()));
       localStorage.setItem(LS_LAST_DTM_ACC, String(Date.now()));
       storeDtm({ready:false,total:7200,h:2,m:0,s:0,at:Date.now()});
-      tgMsg('dtmBuy', `ðŸšš <b>DTM Bought ${maxAmt}</b>\n${st.player||'?'} | 2h cooldown`);
+      tgMsg('dtmBuy', `🚚 <b>DTM Bought ${maxAmt}</b>\n${st.player||'?'} | 2h cooldown`);
       // Persistent lock survives the postback reload; checkStuck respects it
       localStorage.setItem('cbActionLockUntil', String(Date.now() + 8000));
       setTimeout(() => { buyBtn.click(); }, 900 + Math.floor(Math.random()*400));
@@ -3018,14 +3018,14 @@
 
   let _navigating = false;
   function safeNav(url) {
-    if (st.inJail && !url.includes('jail.aspx')) { setStatus('Blocked â€” in jail'); return true; }
-    if (_navigating) return true; // already navigating â€” don't stack redirects
+    if (st.inJail && !url.includes('jail.aspx')) { setStatus('Blocked — in jail'); return true; }
+    if (_navigating) return true; // already navigating — don't stack redirects
     _navigating = true;
     if (st.acting) {
       setTimeout(() => { st.acting = false; st.action = ''; st.refresh = false; GM_setValue('cbActStart',0); saveSt(); window.location.href = url; }, 600 + Math.floor(Math.random()*400));
       return true;
     }
-    // Fast navigation â€” human clicks a link quickly
+    // Fast navigation — human clicks a link quickly
     setTimeout(() => { window.location.href = url; }, 150 + Math.floor(Math.random()*350));
     return false;
   }
@@ -3034,35 +3034,35 @@
 
   /* === GAME ACTIONS === */
 
-  // Cooldown jitter: adds Â±1-4 seconds to any interval check
+  // Cooldown jitter: adds ±1-4 seconds to any interval check
   /* === HUMAN ACTION CADENCE (max camouflage) ===
-   * The old jitteredCooldown returned interval Â± 1â€“4s and was re-rolled on EVERY
-   * loop tick, so the action fired on the first low roll â€” collapsing the spread to
-   * ~intervalâˆ’4s every time (a needle-sharp, slightly-early, very botty pattern).
+   * The old jitteredCooldown returned interval ± 1–4s and was re-rolled on EVERY
+   * loop tick, so the action fired on the first low roll — collapsing the spread to
+   * ~interval−4s every time (a needle-sharp, slightly-early, very botty pattern).
    * Instead we now pick ONE delay per action cycle from a heavily right-skewed
    * distribution floored at the game cooldown (never early), persist it so it
    * survives page reloads, and only re-roll it after the action actually fires.
-   * Result: most actions land a few seconds after ready, many drift to 30sâ€“2.5min,
-   * some wander off for several minutes, a few go properly AFK â€” a human curve, not
-   * a metronome. Throughput drops (by design â€” you chose max camouflage).
+   * Result: most actions land a few seconds after ready, many drift to 30s–2.5min,
+   * some wander off for several minutes, a few go properly AFK — a human curve, not
+   * a metronome. Throughput drops (by design — you chose max camouflage).
    */
   function humanCooldownMs(intervalSec) {
-    const floor = Math.max(0, intervalSec * 1000); // game cooldown â€” never act before this
+    const floor = Math.max(0, intervalSec * 1000); // game cooldown — never act before this
     const r = Math.random();
     let extra;
-    if      (r < 0.45) extra = 3000   + Math.random() * 22000;   // 3â€“25s: still at the screen
-    else if (r < 0.80) extra = 25000  + Math.random() * 125000;  // 25sâ€“2.5min: half-watching
-    else if (r < 0.95) extra = 150000 + Math.random() * 330000;  // 2.5â€“8min: wandered off
-    else               extra = 480000 + Math.random() * 720000;  // 8â€“20min: properly AFK
+    if      (r < 0.45) extra = 3000   + Math.random() * 22000;   // 3–25s: still at the screen
+    else if (r < 0.80) extra = 25000  + Math.random() * 125000;  // 25s–2.5min: half-watching
+    else if (r < 0.95) extra = 150000 + Math.random() * 330000;  // 2.5–8min: wandered off
+    else               extra = 480000 + Math.random() * 720000;  // 8–20min: properly AFK
     extra += (Math.random() - 0.5) * 6000; // soften the band edges
     return floor + Math.max(0, extra);
   }
 
   // At-PC / high-throughput mode ("how it was", minus the bugs): fire shortly after
-  // the cooldown with small jitter â€” never early, computed once (not per-tick).
+  // the cooldown with small jitter — never early, computed once (not per-tick).
   function fastCooldownMs(intervalSec) {
     const floor = Math.max(0, intervalSec * 1000);
-    return floor + 500 + Math.random() * 4000; // 0.5â€“4.5s after ready
+    return floor + 500 + Math.random() * 4000; // 0.5–4.5s after ready
   }
 
   // Pick the delay for the current cadence mode (toggled by the Away switch).
@@ -3071,7 +3071,7 @@
   }
 
   // True once the action's chosen (persisted) delay has elapsed since lastTs.
-  // The delay is stable between fires â€” only markActed() re-rolls it.
+  // The delay is stable between fires — only markActed() re-rolls it.
   function cooldownElapsed(action, lastTs, intervalSec) {
     let dly = GM_getValue('cbDly_' + action, 0);
     if (!dly) { dly = nextCooldownMs(intervalSec); GM_setValue('cbDly_' + action, dly); }
@@ -3083,7 +3083,7 @@
     GM_setValue('cbDly_' + action, nextCooldownMs(intervalSec));
   }
 
-  // Re-roll all pending action delays under the current mode â€” used when the Away
+  // Re-roll all pending action delays under the current mode — used when the Away
   // switch flips, so toggling to At-PC takes effect immediately instead of waiting
   // out a long camouflage delay that was already rolled (and vice-versa).
   function rerollCadence() {
@@ -3108,11 +3108,11 @@
       localStorage.removeItem(rk); st.acting = false; st.action = ''; GM_setValue('cbActStart',0); return;
     }
     localStorage.removeItem('cbCrimeRetry');
-    // Click immediately â€” humans click fast, the delay is in the cooldown
+    // Click immediately — humans click fast, the delay is in the cooldown
     snapshotXP('crime');
     avail[Math.floor(Math.random()*avail.length)].click();
     st.lastCrime = now; markActed('crime', cfg.crimeInt); st.refresh = true; donePending('crime'); saveSt();
-    // Short reset â€” just enough for the page to process the click
+    // Short reset — just enough for the page to process the click
     setTimeout(() => { st.acting = false; st.action = ''; GM_setValue('cbActStart',0); }, 400 + Math.floor(Math.random()*300));
   }
 
@@ -3194,7 +3194,7 @@
     const today = gameDayStr();
     const storedDay = GM_getValue('cbJailCountDay', '');
     if (storedDay !== today) {
-      // New game-day â€” reset counter
+      // New game-day — reset counter
       GM_setValue('cbJailCountDay', today);
       GM_setValue('cbJailCount', 0);
       // Re-enable jail if it was auto-disabled by the limit
@@ -3202,8 +3202,8 @@
         GM_setValue('cbJailAutoOff', false);
         st.jail = GM_getValue('cbJailWasOn', true);
         saveSt();
-        console.log('[JB][JAIL] New game-day â€” counter reset, jail re-enabled');
-        tgMsg('jail', `â›“ï¸ <b>Jail Reset</b>\n${st.player||'?'} | New day, counter cleared`);
+        console.log('[JB][JAIL] New game-day — counter reset, jail re-enabled');
+        tgMsg('jail', `⛓️ <b>Jail Reset</b>\n${st.player||'?'} | New day, counter cleared`);
       }
       return 0;
     }
@@ -3222,8 +3222,8 @@
       GM_setValue('cbJailWasOn', st.jail);
       GM_setValue('cbJailAutoOff', true);
       st.jail = false; saveSt();
-      console.log(`[JB][JAIL] Daily limit ${cfg.jailDailyLimit} reached â€” jail disabled`);
-      tgMsg('jail', `ðŸ›‘ <b>Jail Limit</b>\n${st.player||'?'} | ${n}/${cfg.jailDailyLimit} reached, jail OFF`);
+      console.log(`[JB][JAIL] Daily limit ${cfg.jailDailyLimit} reached — jail disabled`);
+      tgMsg('jail', `🛑 <b>Jail Limit</b>\n${st.player||'?'} | ${n}/${cfg.jailDailyLimit} reached, jail OFF`);
       updateJailCountUI();
     }
     return n;
@@ -3268,12 +3268,12 @@
     const sessEl  = _shadow.querySelector('#jb-xp-session');
     const rateEl  = _shadow.querySelector('#jb-xp-rate');
     const lastEl  = _shadow.querySelector('#jb-xp-last');
-    if (totalEl) totalEl.textContent = xpState.total > 0 ? xpState.total.toFixed(2) : 'â€”';
-    if (sessEl)  sessEl.textContent  = xpState.sessionGain > 0 ? `+${xpState.sessionGain}` : 'â€”';
-    if (rateEl)  { const r = _xpRate(); rateEl.textContent = r ? `${r}/hr` : 'â€¦'; }
+    if (totalEl) totalEl.textContent = xpState.total > 0 ? xpState.total.toFixed(2) : '—';
+    if (sessEl)  sessEl.textContent  = xpState.sessionGain > 0 ? `+${xpState.sessionGain}` : '—';
+    if (rateEl)  { const r = _xpRate(); rateEl.textContent = r ? `${r}/hr` : '…'; }
     if (lastEl) {
       const h = xpState.history[0];
-      lastEl.textContent = h ? (h.rankUp ? 'â­ rank up' : `${h.icon} +${h.gained}`) : 'â€”';
+      lastEl.textContent = h ? (h.rankUp ? '⭐ rank up' : `${h.icon} +${h.gained}`) : '—';
     }
 
     // Rank line + progress bar (from the status bar, enriched by perRankReq)
@@ -3282,8 +3282,8 @@
     const pctEl  = _shadow.querySelector('#jb-rank-pct');
     const nextEl = _shadow.querySelector('#jb-rank-tonext');
     const barEl  = _shadow.querySelector('#jb-rank-bar');
-    if (nameEl) nameEl.textContent = r.name || 'â€”';
-    if (pctEl)  pctEl.textContent = r.pct > 0 ? `${r.pct.toFixed(1)}% to next` : 'â€”';
+    if (nameEl) nameEl.textContent = r.name || '—';
+    if (pctEl)  pctEl.textContent = r.pct > 0 ? `${r.pct.toFixed(1)}% to next` : '—';
     if (nextEl) {
       if (r.toNext != null) nextEl.textContent = `${r.withinXp}/${(r.withinXp + r.toNext).toFixed(r.confident?2:1)} XP${r.confident?'':' ~'}`;
       else nextEl.textContent = '';
@@ -3301,31 +3301,31 @@
     const rate = _xpRate();
 
     const setTxt = (sel, txt) => { const e = _shadow.querySelector(sel); if (e) e.textContent = txt; };
-    setTxt('#jb-xpm-total', xpState.total > 0 ? xpState.total.toFixed(2) : 'â€”');
-    setTxt('#jb-xpm-session', xpState.sessionGain > 0 ? `+${xpState.sessionGain}` : 'â€”');
-    setTxt('#jb-xpm-rate', rate ? `${rate}/hr` : 'â€¦');
+    setTxt('#jb-xpm-total', xpState.total > 0 ? xpState.total.toFixed(2) : '—');
+    setTxt('#jb-xpm-session', xpState.sessionGain > 0 ? `+${xpState.sessionGain}` : '—');
+    setTxt('#jb-xpm-rate', rate ? `${rate}/hr` : '…');
     setTxt('#jb-xpm-age', _fmtAge(Date.now() - xpState.sessionStart));
 
-    // â”€â”€ Rank progress + ladder â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ── Rank progress + ladder ──────────────────────────────────────
     const rankHost = _shadow.querySelector('#jb-xp-rank');
     if (rankHost) {
       const r = resolveRank();
       const pct = Math.max(0, Math.min(100, r.pct || 0));
       const absLine = (r.toNext != null)
-        ? `<div style="font-size:10px;color:var(--jb-text-sec);margin-top:3px">${r.withinXp} / ${(r.withinXp + r.toNext).toFixed(r.confident?2:1)} XP this rank Â· <b>${r.toNext}${r.confident?'':'~'}</b> to next${r.confident?'':' <span style="color:var(--jb-text-ter)">(approx)</span>'}</div>`
-        : `<div style="font-size:10px;color:var(--jb-text-ter);margin-top:3px">Collecting XP data to estimate XP-to-nextâ€¦</div>`;
+        ? `<div style="font-size:10px;color:var(--jb-text-sec);margin-top:3px">${r.withinXp} / ${(r.withinXp + r.toNext).toFixed(r.confident?2:1)} XP this rank · <b>${r.toNext}${r.confident?'':'~'}</b> to next${r.confident?'':' <span style="color:var(--jb-text-ter)">(approx)</span>'}</div>`
+        : `<div style="font-size:10px;color:var(--jb-text-ter);margin-top:3px">Collecting XP data to estimate XP-to-next…</div>`;
       // Ladder: each rank step, its XP cost + cumulative total; highlight current step
       const ladder = perRankReq.map((req, i) => {
         const isCur = i === r.idx;
         const cum = cumRankReq[i];
         return `<div style="display:flex;justify-content:space-between;font-size:9px;padding:1px 4px;border-radius:2px;${isCur?'background:var(--jb-accent);color:#fff;font-weight:600':'color:var(--jb-text-ter)'}">
-          <span>Step ${i+1}${isCur?' â—„':''}</span>
-          <span>${req} XP <span style="opacity:.6">(Î£ ${cum})</span></span>
+          <span>Step ${i+1}${isCur?' ◄':''}</span>
+          <span>${req} XP <span style="opacity:.6">(Σ ${cum})</span></span>
         </div>`;
       }).join('');
       rankHost.innerHTML =
         `<div style="display:flex;justify-content:space-between;align-items:baseline">
-           <span style="font-weight:600">${r.name || 'â€”'}</span>
+           <span style="font-weight:600">${r.name || '—'}</span>
            <span style="font-size:10px;color:var(--jb-text-sec)">${r.pct>0?pct.toFixed(1)+'% to next':''}</span>
          </div>
          <div style="background:var(--jb-border);border-radius:3px;height:8px;overflow:hidden;margin-top:4px">
@@ -3335,12 +3335,12 @@
          <div style="margin-top:6px;max-height:120px;overflow-y:auto">${ladder}</div>`;
     }
 
-    // â”€â”€ Cumulative XP line chart (SVG) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ── Cumulative XP line chart (SVG) ──────────────────────────────
     const lineHost = _shadow.querySelector('#jb-xp-line');
     if (lineHost) {
       const s = xpState.samples;
       if (s.length < 2) {
-        lineHost.innerHTML = `<div class="jb-sub" style="text-align:center;padding:30px 0;color:var(--jb-text-ter)">Collecting dataâ€¦ (need a couple of XP reads)</div>`;
+        lineHost.innerHTML = `<div class="jb-sub" style="text-align:center;padding:30px 0;color:var(--jb-text-ter)">Collecting data… (need a couple of XP reads)</div>`;
       } else {
         const W = 312, H = 88, pad = 4;
         const xs = s.map(p => p.t), ys = s.map(p => p.total);
@@ -3365,7 +3365,7 @@
       }
     }
 
-    // â”€â”€ XP by action (horizontal bars) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ── XP by action (horizontal bars) ──────────────────────────────
     const barsHost = _shadow.querySelector('#jb-xp-bars');
     if (barsHost) {
       const entries = XP_ACTIONS
@@ -3381,7 +3381,7 @@
         barsHost.innerHTML = entries.map(e => {
           const pct = max > 0 ? (e.v / max) * 100 : 0;
           return `<div style="display:flex;align-items:center;gap:6px;margin-bottom:3px;font-size:10px">
-            <span style="width:54px;flex:0 0 auto">${ACTION_ICON[e.a]||'âš¡'} ${e.a}</span>
+            <span style="width:54px;flex:0 0 auto">${ACTION_ICON[e.a]||'⚡'} ${e.a}</span>
             <span style="flex:1;background:var(--jb-border);border-radius:3px;height:11px;position:relative;overflow:hidden">
               <span style="position:absolute;left:0;top:0;bottom:0;width:${pct.toFixed(1)}%;background:var(--jb-accent);border-radius:3px"></span>
             </span>
@@ -3391,7 +3391,7 @@
       }
     }
 
-    // â”€â”€ Recent gains list â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ── Recent gains list ───────────────────────────────────────────
     const histHost = _shadow.querySelector('#jb-xp-hist');
     if (histHost) {
       if (!xpState.history.length) {
@@ -3401,7 +3401,7 @@
           const t = new Date(h.t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
           if (h.rankUp) {
             return `<div style="display:flex;justify-content:space-between;padding:2px 0;border-top:1px solid var(--jb-border)">
-              <span>â­ <b style="color:var(--jb-accent)">RANK UP</b> <span style="color:var(--jb-text-sec)">${esc(h.label||'')}</span></span>
+              <span>⭐ <b style="color:var(--jb-accent)">RANK UP</b> <span style="color:var(--jb-text-sec)">${esc(h.label||'')}</span></span>
               <span style="color:var(--jb-text-ter)">${t}</span>
             </div>`;
           }
@@ -3429,7 +3429,7 @@
       st.acting = true; st.action = 'jailbreak'; GM_setValue('cbActStart', now);
       snapshotXP('jail');
       links[Math.floor(Math.random()*links.length)].click();
-      // This is a real attempt (success or fail) â€” count it
+      // This is a real attempt (success or fail) — count it
       incJailCount();
       updateJailCountUI();
       st.lastJail = now; markActed('jail', cfg.jailInt); saveSt();
@@ -3527,7 +3527,7 @@
   function disableCrusher(reason) {
     st.crusherOwned = false; st.crusher = false; saveSt();
     localStorage.removeItem(LS_CRUSH_NAME); localStorage.removeItem(LS_CRUSH_LOOP);
-    tgMsg('crusher', `âš™ï¸ <b>Crusher Off</b>\n${st.player||'?'} | ${reason}`);
+    tgMsg('crusher', `⚙️ <b>Crusher Off</b>\n${st.player||'?'} | ${reason}`);
   }
 
   function doGarage() {
@@ -3574,7 +3574,7 @@
               if (st.crusherOwned !== true) { st.crusherOwned = true; saveSt(); }
               localStorage.removeItem(LS_CRUSH_LOOP);
               markGifted(pendName);
-              tgMsg('crusher', `ðŸš« <b>Crusher Reject</b>\n${st.player||'?'} | ${pendName} (gifted)`);
+              tgMsg('crusher', `🚫 <b>Crusher Reject</b>\n${st.player||'?'} | ${pendName} (gifted)`);
             } else if (msgTxt) {
               const isErr = errMsg && errMsg.classList.contains('TMNErrorFont') && /crusher/i.test(msgTxt);
               if (isErr && st.crusherOwned !== true) {
@@ -3729,11 +3729,11 @@
     const retry = parseInt(localStorage.getItem(LS_OC_RETRY)||'0',10);
     if (retry && Date.now() < retry) return;
     if (!getHot()) { fetchHot(); return; }
-    if (!isInHot()) { tgOnce('oc_skip_city', 3600, `âš ï¸ <b>OC Skip</b>\n${st.player||'?'} | Not in hot city (${getCurCity()} vs ${getHot()})`); return; }
-    if (!st.ocTrans.trim() || !st.ocWeapon.trim() || !st.ocExplo.trim()) { tgOnce('oc_no_team', 3600, `âš ï¸ <b>OC</b> â€” team not set`); return; }
+    if (!isInHot()) { tgOnce('oc_skip_city', 3600, `⚠️ <b>OC Skip</b>\n${st.player||'?'} | Not in hot city (${getCurCity()} vs ${getHot()})`); return; }
+    if (!st.ocTrans.trim() || !st.ocWeapon.trim() || !st.ocExplo.trim()) { tgOnce('oc_no_team', 3600, `⚠️ <b>OC</b> — team not set`); return; }
     localStorage.removeItem('cbTgOnce_oc_skip_city');
     localStorage.removeItem('cbTgOnce_oc_no_team');
-    tgMsg('ocCreate', `ðŸ¢ <b>OC Setup</b>\n${st.player||'?'} | ${getCurCity()}\nTeam: ${st.ocTrans}, ${st.ocWeapon}, ${st.ocExplo}`);
+    tgMsg('ocCreate', `🏢 <b>OC Setup</b>\n${st.player||'?'} | ${getCurCity()}\nTeam: ${st.ocTrans}, ${st.ocWeapon}, ${st.ocExplo}`);
     localStorage.setItem(LS_OC_ST, 'setup'); localStorage.setItem(LS_OC_STEP, '0'); localStorage.setItem(LS_OC_NEXT, String(Date.now()));
     const onOc = /\/authenticated\/organizedcrime\.aspx/i.test(location.pathname) && !/p=dtm/i.test(location.search);
     if (onOc) setTimeout(() => handleCreateOC(), 600);
@@ -3768,7 +3768,7 @@
           if (mode === 'continuous') willRepeat = true;
           else if (mode === 'once') willRepeat = false;
           else { const left = (st.ocLeft||0)-1; if(left>0){st.ocLeft=left;willRepeat=true;}else willRepeat=false; }
-          tgMsg('ocCommit', `âœ… <b>OC Committed</b>\n${st.player||'?'}`);
+          tgMsg('ocCommit', `✅ <b>OC Committed</b>\n${st.player||'?'}`);
           resetCreateOC();
           if (!willRepeat) { st.createOC = false; st.ocSched = ''; st.ocLeft = 0; }
           saveSt();
@@ -3784,7 +3784,7 @@
         const hasStart = !!(document.getElementById('ctl00_main_btnStartOCRobCasino')?.disabled===false || document.getElementById('ctl00_main_btnStartOCRobArmoury')?.disabled===false || document.getElementById('ctl00_main_btnStartOCRobBank')?.disabled===false);
         const hasCommit = !!document.getElementById('ctl00_main_btnCommitOC');
         const hasBuy = !!document.getElementById('ctl00_main_btnBuySecurity');
-        if (!hasForm && !hasCommit && !hasBuy && hasStart) { tgMsg('ocCreate', `âš ï¸ <b>OC Cancelled</b>\n${st.player||'?'}`); resetCreateOC(); return false; }
+        if (!hasForm && !hasCommit && !hasBuy && hasStart) { tgMsg('ocCreate', `⚠️ <b>OC Cancelled</b>\n${st.player||'?'}`); resetCreateOC(); return false; }
       }
 
       if (step === 0) {
@@ -3822,7 +3822,7 @@
         roleIn.value = role;
         try { roleIn.dispatchEvent(new Event('change', {bubbles:true})); } catch(_){}
         await wait(rndDelay(DLY.normal));
-        tgMsg('ocCreate', `ðŸ¢ <b>OC ${step+1}/5</b>\n${st.player||'?'} | Invited ${member} as ${role}`);
+        tgMsg('ocCreate', `🏢 <b>OC ${step+1}/5</b>\n${st.player||'?'} | Invited ${member} as ${role}`);
         localStorage.setItem(LS_OC_STEP, String(step+1));
         localStorage.setItem(LS_OC_NEXT, String(Date.now()+(step===3?60000:10000)));
         invBtn.click(); return true;
@@ -3833,7 +3833,7 @@
         const buyBtn = document.getElementById('ctl00_main_btnBuySecurity');
         if (!secSel||!buyBtn) { localStorage.setItem(LS_OC_NEXT, String(Date.now()+5000)); return true; }
         secSel.value = '6'; await wait(rndDelay(DLY.normal));
-        tgMsg('ocCreate', `ðŸ¢ <b>OC 5/5</b>\n${st.player||'?'} | Laptop bought, waiting for commits`);
+        tgMsg('ocCreate', `🏢 <b>OC 5/5</b>\n${st.player||'?'} | Laptop bought, waiting for commits`);
         localStorage.setItem(LS_OC_STEP,'5'); localStorage.setItem(LS_OC_ST,'polling');
         localStorage.setItem(LS_OC_POLL, String(Date.now()));
         localStorage.setItem(LS_OC_NEXT, String(Date.now()+60000));
@@ -3978,10 +3978,10 @@
       <div class="jb-header" id="jb-drag">
         <span>${APP_NAME} ${APP_VERSION}</span>
         <div class="jb-header-btns">
-          <button class="jb-hbtn" id="jb-theme-btn" title="Theme">â—‘</button>
-          <button class="jb-hbtn" id="jb-lock-btn" title="Lock">ðŸ”’</button>
-          <button class="jb-hbtn" id="jb-settings-btn" title="Settings">âš™</button>
-          <button class="jb-hbtn" id="jb-min-btn" title="Minimize">â€”</button>
+          <button class="jb-hbtn" id="jb-theme-btn" title="Theme">◑</button>
+          <button class="jb-hbtn" id="jb-lock-btn" title="Lock">🔒</button>
+          <button class="jb-hbtn" id="jb-settings-btn" title="Settings">⚙</button>
+          <button class="jb-hbtn" id="jb-min-btn" title="Minimize">—</button>
         </div>
       </div>
 
@@ -4001,7 +4001,7 @@
           <div class="jb-sect">
             <div class="jb-sect-title">Status</div>
             <div class="jb-grid" style="grid-template-columns: 1fr 1fr;">
-              <div class="jb-flex"><span class="jb-timer-label">Player:</span> <span id="jb-player-badge">${esc(st.player||'â€”')}</span></div>
+              <div class="jb-flex"><span class="jb-timer-label">Player:</span> <span id="jb-player-badge">${esc(st.player||'—')}</span></div>
               <div class="jb-flex">
                 <label class="jb-switch"><input type="checkbox" id="jb-all-toggle"> <span style="font-weight:600" id="jb-all-label">ALL</span></label>
               </div>
@@ -4012,40 +4012,40 @@
             <div class="jb-sect-title">Timers</div>
             <div class="jb-timer-grid">
               <span class="jb-timer-label">HP:</span>
-              <span class="jb-timer-val" id="jb-hp">${_timerCache.hp||'â€”'}</span>
+              <span class="jb-timer-val" id="jb-hp">${_timerCache.hp||'—'}</span>
               <span class="jb-timer-label">Travel:</span>
-              <span class="jb-timer-val" id="jb-travel">${_timerCache.travel||'â€”'}</span>
+              <span class="jb-timer-val" id="jb-travel">${_timerCache.travel||'—'}</span>
               <span class="jb-timer-label">OC:</span>
-              <span class="jb-timer-val" id="jb-oc">${_timerCache.oc||'â€”'}</span>
+              <span class="jb-timer-val" id="jb-oc">${_timerCache.oc||'—'}</span>
               <span class="jb-timer-label">DTM:</span>
-              <span class="jb-timer-val" id="jb-dtm">${_timerCache.dtm||'â€”'}</span>
+              <span class="jb-timer-val" id="jb-dtm">${_timerCache.dtm||'—'}</span>
               <span class="jb-timer-label">Prot:</span>
-              <span class="jb-timer-val" id="jb-prot">${_timerCache.prot||'â€”'}</span>
+              <span class="jb-timer-val" id="jb-prot">${_timerCache.prot||'—'}</span>
               <span class="jb-timer-label">Hot:</span>
-              <span class="jb-timer-val" id="jb-hot-display" style="font-size:10px">${getHot()||'â€”'}</span>
+              <span class="jb-timer-val" id="jb-hot-display" style="font-size:10px">${getHot()||'—'}</span>
             </div>
           </div>
 
           <div class="jb-sect">
             <div class="jb-sect-title" style="display:flex;justify-content:space-between;align-items:center">
               <span>Experience</span>
-              <span id="jb-xp-charts-link" style="cursor:pointer;text-decoration:underline;color:var(--jb-accent);font-size:10px;font-weight:500">ðŸ“ˆ Charts</span>
+              <span id="jb-xp-charts-link" style="cursor:pointer;text-decoration:underline;color:var(--jb-accent);font-size:10px;font-weight:500">📈 Charts</span>
             </div>
             <div class="jb-timer-grid">
               <span class="jb-timer-label">Rank:</span>
-              <span class="jb-timer-val" id="jb-rank-name" style="font-size:11px">â€”</span>
+              <span class="jb-timer-val" id="jb-rank-name" style="font-size:11px">—</span>
               <span class="jb-timer-label">Total:</span>
-              <span class="jb-timer-val" id="jb-xp-total">â€”</span>
+              <span class="jb-timer-val" id="jb-xp-total">—</span>
               <span class="jb-timer-label">Session:</span>
-              <span class="jb-timer-val" id="jb-xp-session">â€”</span>
+              <span class="jb-timer-val" id="jb-xp-session">—</span>
               <span class="jb-timer-label">Rate:</span>
-              <span class="jb-timer-val" id="jb-xp-rate">â€”</span>
+              <span class="jb-timer-val" id="jb-xp-rate">—</span>
               <span class="jb-timer-label">Last:</span>
-              <span class="jb-timer-val" id="jb-xp-last" style="font-size:10px">â€”</span>
+              <span class="jb-timer-val" id="jb-xp-last" style="font-size:10px">—</span>
             </div>
             <div style="margin-top:5px">
               <div style="display:flex;justify-content:space-between;font-size:9px;color:var(--jb-text-ter);margin-bottom:2px">
-                <span id="jb-rank-pct">â€”</span>
+                <span id="jb-rank-pct">—</span>
                 <span id="jb-rank-tonext"></span>
               </div>
               <div style="background:var(--jb-border);border-radius:3px;height:7px;overflow:hidden">
@@ -4056,22 +4056,22 @@
 
           <div class="jb-sect">
             <div class="jb-grid">
-              <label class="jb-switch" title="ON = Away: max camouflage, slow human cadence. OFF = At PC: fast, high throughput."><input type="checkbox" id="jb-away-mode" ${cfg.awayMode?'checked':''}> ðŸ•µï¸ <span id="jb-away-label">${cfg.awayMode?'Away (camo)':'At PC (fast)'}</span></label>
+              <label class="jb-switch" title="ON = Away: max camouflage, slow human cadence. OFF = At PC: fast, high throughput."><input type="checkbox" id="jb-away-mode" ${cfg.awayMode?'checked':''}> 🕵️ <span id="jb-away-label">${cfg.awayMode?'Away (camo)':'At PC (fast)'}</span></label>
               <label class="jb-switch"><input type="checkbox" id="jb-crusher"> Crusher</label>
               <div class="jb-switch"><input type="checkbox" id="jb-wl-on"> <span id="jb-wl-link" style="cursor:pointer;text-decoration:underline;color:var(--jb-accent)">Whitelist</span></div>
               <div class="jb-switch"><input type="checkbox" id="jb-create-oc"> <span id="jb-oc-link" style="cursor:pointer;text-decoration:underline;color:var(--jb-accent)">Create OC</span></div>
               <div class="jb-switch"><input type="checkbox" id="jb-create-dtm"> <span id="jb-dtm-link" style="cursor:pointer;text-decoration:underline;color:var(--jb-accent)">Create DTM</span></div>
-              <div class="jb-switch"><input type="checkbox" id="jb-ow-on"> <span id="jb-ow-link" style="cursor:pointer;text-decoration:underline;color:var(--jb-accent)">ðŸŸ¢ Watch</span></div>
-              <label class="jb-switch"><input type="checkbox" id="jb-notify-ready"> ðŸ”” Alerts</label>
-              <label class="jb-switch"><input type="checkbox" id="jb-auto-travel" ${st.autoTravel?'checked':''}> âœˆï¸ Auto Travel</label>
-              <label class="jb-switch"><input type="checkbox" id="jb-auto-dtmlist" ${st.autoDtmList?'checked':''}> ðŸ“‹ DTM List</label>
+              <div class="jb-switch"><input type="checkbox" id="jb-ow-on"> <span id="jb-ow-link" style="cursor:pointer;text-decoration:underline;color:var(--jb-accent)">🟢 Watch</span></div>
+              <label class="jb-switch"><input type="checkbox" id="jb-notify-ready"> 🔔 Alerts</label>
+              <label class="jb-switch"><input type="checkbox" id="jb-auto-travel" ${st.autoTravel?'checked':''}> ✈️ Auto Travel</label>
+              <label class="jb-switch"><input type="checkbox" id="jb-auto-dtmlist" ${st.autoDtmList?'checked':''}> 📋 DTM List</label>
             </div>
           </div>
         </div>
       </div>
 
       <div class="jb-jail-counter" id="jb-jail-counter-row" style="display:flex;justify-content:space-between;align-items:center;padding:3px 10px;font-size:10px;border-top:1px solid var(--jb-border);color:var(--jb-text-ter)">
-        <span>â›“ï¸ Jail attempts today:</span>
+        <span>⛓️ Jail attempts today:</span>
         <span id="jb-jail-count" style="font-weight:600">0/2000</span>
       </div>
 
@@ -4082,7 +4082,7 @@
         <div class="jb-modal-content">
           <div class="jb-modal-head">
             <span>Settings</span>
-            <button class="jb-hbtn" id="jb-modal-close">âœ•</button>
+            <button class="jb-hbtn" id="jb-modal-close">✕</button>
           </div>
           <div class="jb-modal-body" id="jb-settings-body">
             <div class="jb-sect-title">Login</div>
@@ -4132,9 +4132,9 @@
             <div class="jb-row">
               <label class="jb-label">Daily limit:</label>
               <input class="jb-input jb-input-sm" type="number" id="jb-jail-limit" value="${cfg.jailDailyLimit}" min="50" max="4000" step="50">
-              <span class="jb-sub">(50â€“4000)</span>
+              <span class="jb-sub">(50–4000)</span>
             </div>
-            <div class="jb-sub jb-mb">Today: <span id="jb-jail-count-settings">${getJailCount()}/${cfg.jailDailyLimit}</span> Â· resets 00:00 game time
+            <div class="jb-sub jb-mb">Today: <span id="jb-jail-count-settings">${getJailCount()}/${cfg.jailDailyLimit}</span> · resets 00:00 game time
               <button class="jb-btn jb-btn-outline" id="jb-jail-reset" style="margin-left:6px;padding:1px 6px;font-size:9px">Reset now</button>
             </div>
 
@@ -4157,7 +4157,7 @@
               <button class="jb-btn jb-btn-outline" id="jb-crush-reset" style="margin-left:6px;padding:2px 6px;font-size:10px;">Reset</button>
             </div>
 
-            <div class="jb-sub jb-mb">Per-car category â€” choose what happens to each car:</div>
+            <div class="jb-sub jb-mb">Per-car category — choose what happens to each car:</div>
             <div style="background:var(--jb-surface-alt);border-radius:3px;padding:6px;max-height:200px;overflow-y:auto;">
               <div style="display:grid;grid-template-columns:1fr auto auto auto;gap:3px 8px;align-items:center;font-size:10px;">
                 <div style="color:var(--jb-text-sec);font-weight:600">Car</div>
@@ -4166,10 +4166,10 @@
                 <div style="color:var(--jb-danger);font-weight:600;text-align:center" title="Sell immediately">Sell</div>
                 ${CARS.map(car => {
                   const sid = car.name.replace(/[^A-Za-z0-9]/g,'');
-                  if (car.manual) return `<div style="color:var(--jb-text-ter);font-style:italic">${car.name} ðŸ”§</div><div style="grid-column:2/span 3;text-align:center;color:var(--jb-text-ter);font-size:9px">Manual only</div>`;
+                  if (car.manual) return `<div style="color:var(--jb-text-ter);font-style:italic">${car.name} 🔧</div><div style="grid-column:2/span 3;text-align:center;color:var(--jb-text-ter);font-size:9px">Manual only</div>`;
                   const cat = car.locked ? car.def : ((st.carCats && st.carCats[car.name]) || car.def);
                   const dis = car.locked ? 'disabled' : '';
-                  const lock = car.locked ? ' ðŸ”’' : '';
+                  const lock = car.locked ? ' 🔒' : '';
                   const sty = car.locked ? 'color:var(--jb-text-ter);font-style:italic' : 'color:var(--jb-text)';
                   return `<div style="${sty}">${car.name}${lock}</div>
                     <div style="text-align:center"><input type="radio" name="jb-cc-${sid}" data-car="${car.name}" value="OC" ${cat==='OC'?'checked':''} ${dis}></div>
@@ -4245,7 +4245,7 @@
             <div class="jb-sect-title">Advanced</div>
             <label class="jb-switch jb-mb"><input type="checkbox" id="jb-resume" ${resume.on?'checked':''}> Auto-Resume</label>
             <label class="jb-switch jb-mb"><input type="checkbox" id="jb-stats-on" ${stats.on?'checked':''}> Stats Collection</label>
-            <label class="jb-switch jb-mb"><input type="checkbox" id="jb-noxp-on" ${cfg.noXpLimiterOn?'checked':''}> ðŸ“‰ No-XP daily limiter</label>
+            <label class="jb-switch jb-mb"><input type="checkbox" id="jb-noxp-on" ${cfg.noXpLimiterOn?'checked':''}> 📉 No-XP daily limiter</label>
             <div class="jb-row jb-mb">
               <label class="jb-label">No-XP streak limit:</label>
               <input class="jb-input jb-input-sm" type="number" id="jb-noxp-streak" value="${cfg.noXpStreakLimit}" min="2" max="20">
@@ -4255,7 +4255,7 @@
             <hr class="jb-sep">
             <div class="jb-sect-title">Breaks (Human Simulation)</div>
 
-            <label class="jb-switch jb-mb"><input type="checkbox" id="jb-coffee-on" ${breaks.coffeeOn?'checked':''}> â˜• Coffee Breaks</label>
+            <label class="jb-switch jb-mb"><input type="checkbox" id="jb-coffee-on" ${breaks.coffeeOn?'checked':''}> ☕ Coffee Breaks</label>
             <div class="jb-row">
               <label class="jb-label">Every:</label>
               <input class="jb-input jb-input-sm" type="number" id="jb-coffee-min" value="${breaks.coffeeMinGap}" min="10" max="180">
@@ -4269,7 +4269,7 @@
               <span class="jb-sub">min</span>
             </div>
 
-            <label class="jb-switch jb-mb"><input type="checkbox" id="jb-lunch-on" ${breaks.lunchOn?'checked':''}> ðŸ” Lunch Break</label>
+            <label class="jb-switch jb-mb"><input type="checkbox" id="jb-lunch-on" ${breaks.lunchOn?'checked':''}> 🍔 Lunch Break</label>
             <div class="jb-row">
               <label class="jb-label">Time:</label>
               <input class="jb-input jb-input-sm" type="time" id="jb-lunch-time" value="${breaks.lunchTime}" style="width:90px">
@@ -4278,7 +4278,7 @@
               <span class="jb-sub">min</span>
             </div>
             <div class="jb-row jb-mb">
-              <label class="jb-label">Jitter Â±</label>
+              <label class="jb-label">Jitter ±</label>
               <input class="jb-input jb-input-sm" type="number" id="jb-lunch-jitter" value="${breaks.lunchJitter}" min="0" max="30">
               <span class="jb-sub">min</span>
               <select class="jb-input" id="jb-lunch-mode" style="width:80px">
@@ -4287,7 +4287,7 @@
               </select>
             </div>
 
-            <label class="jb-switch jb-mb"><input type="checkbox" id="jb-sleep-on" ${breaks.sleepOn?'checked':''}> ðŸ˜´ Sleep / Wake</label>
+            <label class="jb-switch jb-mb"><input type="checkbox" id="jb-sleep-on" ${breaks.sleepOn?'checked':''}> 😴 Sleep / Wake</label>
             <div class="jb-row">
               <label class="jb-label">Sleep:</label>
               <input class="jb-input jb-input-sm" type="time" id="jb-sleep-time" value="${breaks.sleepTime}" style="width:90px">
@@ -4295,7 +4295,7 @@
               <input class="jb-input jb-input-sm" type="time" id="jb-wake-time" value="${breaks.wakeTime}" style="width:90px">
             </div>
             <div class="jb-row jb-mb">
-              <label class="jb-label">Jitter Â±</label>
+              <label class="jb-label">Jitter ±</label>
               <input class="jb-input jb-input-sm" type="number" id="jb-sleep-jitter" value="${breaks.sleepJitter}" min="0" max="30">
               <span class="jb-sub">min</span>
               <select class="jb-input" id="jb-sleep-mode" style="width:90px">
@@ -4305,7 +4305,7 @@
               </select>
             </div>
             <label class="jb-switch jb-mb"><input type="checkbox" id="jb-sleep-logout" ${breaks.sleepLogout?'checked':''}> Logout on sleep</label>
-            <div class="jb-sub jb-mb" style="color:var(--jb-warning)">âš ï¸ Health is monitored during coffee/lunch breaks. With "Logout on sleep" ON, no health monitoring while logged out overnight.</div>
+            <div class="jb-sub jb-mb" style="color:var(--jb-warning)">⚠️ Health is monitored during coffee/lunch breaks. With "Logout on sleep" ON, no health monitoring while logged out overnight.</div>
             <div class="jb-sub jb-mb" id="jb-break-status">Break status: ${getBreakStatus().msg||'None active'}</div>
 
             <hr class="jb-sep">
@@ -4319,7 +4319,7 @@
 
       <div class="jb-modal" id="jb-wl-modal">
         <div class="jb-modal-content" style="width:280px">
-          <div class="jb-modal-head"><span>OC/DTM Whitelist</span><button class="jb-hbtn" id="jb-wl-close">âœ•</button></div>
+          <div class="jb-modal-head"><span>OC/DTM Whitelist</span><button class="jb-hbtn" id="jb-wl-close">✕</button></div>
           <div class="jb-modal-body">
             <div class="jb-sub jb-mb">Only accept invites from these players. Empty = accept all.</div>
             <div id="jb-wl-entries"></div>
@@ -4331,7 +4331,7 @@
 
       <div class="jb-modal" id="jb-ow-modal">
         <div class="jb-modal-content" style="width:320px">
-          <div class="jb-modal-head"><span>ðŸŸ¢ Online Watch</span><button class="jb-hbtn" id="jb-ow-close">âœ•</button></div>
+          <div class="jb-modal-head"><span>🟢 Online Watch</span><button class="jb-hbtn" id="jb-ow-close">✕</button></div>
           <div class="jb-modal-body">
             <div class="jb-sub jb-mb">Watch up to 10 players. Alerts when they come online.</div>
             <label class="jb-switch jb-mb"><input type="checkbox" id="jb-ow-modal-on" ${ow.on?'checked':''}> Enabled</label>
@@ -4362,7 +4362,7 @@
 
       <div class="jb-modal" id="jb-oc-modal">
         <div class="jb-modal-content" style="width:320px">
-          <div class="jb-modal-head"><span>ðŸ¢ OC Team (Leader)</span><button class="jb-hbtn" id="jb-oc-close">âœ•</button></div>
+          <div class="jb-modal-head"><span>🏢 OC Team (Leader)</span><button class="jb-hbtn" id="jb-oc-close">✕</button></div>
           <div class="jb-modal-body">
             <div class="jb-sub jb-mb">Team members for auto OC creation. You are Leader.</div>
             <div class="jb-row jb-mb">
@@ -4408,7 +4408,7 @@
 
       <div class="jb-modal" id="jb-dtm-modal">
         <div class="jb-modal-content" style="width:300px">
-          <div class="jb-modal-head"><span>ðŸšš DTM Team (Leader)</span><button class="jb-hbtn" id="jb-dtm-close">âœ•</button></div>
+          <div class="jb-modal-head"><span>🚚 DTM Team (Leader)</span><button class="jb-hbtn" id="jb-dtm-close">✕</button></div>
           <div class="jb-modal-body">
             <div class="jb-sub jb-mb">Set your DTM partner. You are the leader.</div>
             <div class="jb-mb">
@@ -4436,17 +4436,17 @@
 
       <div class="jb-modal" id="jb-xp-modal">
         <div class="jb-modal-content" style="width:340px">
-          <div class="jb-modal-head"><span>ðŸ“ˆ XP Charts</span><button class="jb-hbtn" id="jb-xp-close">âœ•</button></div>
+          <div class="jb-modal-head"><span>📈 XP Charts</span><button class="jb-hbtn" id="jb-xp-close">✕</button></div>
           <div class="jb-modal-body" id="jb-xp-modal-body">
             <div class="jb-timer-grid" style="margin-bottom:8px">
               <span class="jb-timer-label">Total XP:</span>
-              <span class="jb-timer-val" id="jb-xpm-total">â€”</span>
+              <span class="jb-timer-val" id="jb-xpm-total">—</span>
               <span class="jb-timer-label">Session:</span>
-              <span class="jb-timer-val" id="jb-xpm-session">â€”</span>
+              <span class="jb-timer-val" id="jb-xpm-session">—</span>
               <span class="jb-timer-label">Rate:</span>
-              <span class="jb-timer-val" id="jb-xpm-rate">â€”</span>
+              <span class="jb-timer-val" id="jb-xpm-rate">—</span>
               <span class="jb-timer-label">Session age:</span>
-              <span class="jb-timer-val" id="jb-xpm-age">â€”</span>
+              <span class="jb-timer-val" id="jb-xpm-age">—</span>
             </div>
 
             <div class="jb-sect-title">Rank progress</div>
@@ -4479,7 +4479,7 @@
     const gtaEl = _shadow.querySelector('#jb-gta-opts');
     gtaEl.innerHTML = GTAS.map(g => `<label class="jb-switch"><input type="checkbox" class="jb-gta-cb" value="${g.id}" ${st.gtas.includes(g.id)?'checked':''}> ${g.name}</label>`).join('');
 
-    // Ribbon toggles â€” use CSS vars for theme-aware colours
+    // Ribbon toggles — use CSS vars for theme-aware colours
     const ribbonMap = { 'jb-r-crime':'crime','jb-r-gta':'gta','jb-r-booze':'booze','jb-r-jail':'jail','jb-r-health':'health','jb-r-garage':'garage','jb-r-oc':'autoOC','jb-r-dtm':'autoDTM' };
     for (const [id, key] of Object.entries(ribbonMap)) {
       const btn = _shadow.querySelector(`#${id}`);
@@ -4528,7 +4528,7 @@
       rerollCadence();
       const lbl = _shadow.querySelector('#jb-away-label');
       if (lbl) lbl.textContent = cfg.awayMode ? 'Away (camo)' : 'At PC (fast)';
-      setStatus(cfg.awayMode ? 'Away mode â€” max camouflage' : 'At-PC mode â€” fast');
+      setStatus(cfg.awayMode ? 'Away mode — max camouflage' : 'At-PC mode — fast');
     });
 
     // Other checkboxes
@@ -4553,26 +4553,26 @@
 
     _shadow.querySelector('#jb-auto-travel').addEventListener('change', e => {
       st.autoTravel = e.target.checked; saveSt();
-      setStatus('âœˆï¸ Auto Travel ' + (st.autoTravel ? 'ON' : 'OFF'));
+      setStatus('✈️ Auto Travel ' + (st.autoTravel ? 'ON' : 'OFF'));
       if (st.autoTravel && !getHot()) fetchHot();
     });
 
     _shadow.querySelector('#jb-auto-dtmlist').addEventListener('change', e => {
       st.autoDtmList = e.target.checked; saveSt();
-      setStatus('ðŸ“‹ DTM List ' + (st.autoDtmList ? 'ON' : 'OFF'));
+      setStatus('📋 DTM List ' + (st.autoDtmList ? 'ON' : 'OFF'));
       if (st.autoDtmList && !getHot()) fetchHot();
     });
 
-    // Theme toggle â€” cycles: dark â†’ light â†’ classic â†’ dark
+    // Theme toggle — cycles: dark → light → classic → dark
     const THEME_ORDER = ['dark', 'light', 'classic'];
-    const THEME_ICONS = { dark: 'â—‘', light: 'â˜€', classic: 'ðŸŸ¢' };
+    const THEME_ICONS = { dark: '◑', light: '☀', classic: '🟢' };
     const themeBtn = _shadow.querySelector('#jb-theme-btn');
-    themeBtn.textContent = THEME_ICONS[activeTheme] || 'â—‘';
+    themeBtn.textContent = THEME_ICONS[activeTheme] || '◑';
     themeBtn.addEventListener('click', () => {
       const idx = THEME_ORDER.indexOf(activeTheme);
       const next = THEME_ORDER[(idx + 1) % THEME_ORDER.length];
       setTheme(next);
-      themeBtn.textContent = THEME_ICONS[next] || 'â—‘';
+      themeBtn.textContent = THEME_ICONS[next] || '◑';
       // Re-apply ribbon button colours
       for (const [id, key] of Object.entries(ribbonMap)) {
         const btn = _shadow.querySelector(`#${id}`);
@@ -4649,7 +4649,7 @@
       updateJailCountUI();
       const sEl = _shadow.querySelector('#jb-jail-count-settings');
       if (sEl) sEl.textContent = `0/${cfg.jailDailyLimit}`;
-      setStatus('â›“ï¸ Jail counter reset');
+      setStatus('⛓️ Jail counter reset');
     });
     _shadow.querySelector('#jb-min-hp').addEventListener('change', e => { cfg.minHealth = Math.max(1,Math.min(99,parseInt(e.target.value))); GM_setValue('cbMinHealth',cfg.minHealth); });
     _shadow.querySelector('#jb-target-hp').addEventListener('change', e => { cfg.targetHealth = Math.max(10,Math.min(100,parseInt(e.target.value))); GM_setValue('cbTargetHealth',cfg.targetHealth); });
@@ -4678,7 +4678,7 @@
         if (!st.carCats) st.carCats = {};
         st.carCats[carName] = category;
         saveSt();
-        setStatus(`${carName} â†’ ${category}`);
+        setStatus(`${carName} → ${category}`);
       });
     });
 
@@ -4770,7 +4770,7 @@
       const webhookKeys = TG_MSGS.map(m => 'cbWebhookMsg_'+m.key);
       webhookKeys.forEach(k => keys.push(k));
         keys.forEach(k => GM_setValue(k, undefined));
-        alert('Reset complete â€” refreshing');
+        alert('Reset complete — refreshing');
         setTimeout(() => window.location.reload(), 500);
       }
     });
@@ -4808,7 +4808,7 @@
     function closeModal2(id) { const m = _shadow.querySelector(id); const bg = _shadow.querySelector('#jb-backdrop'); if(m)m.classList.remove('open'); if(bg)bg.style.display='none'; }
 
     _shadow.querySelector('#jb-wl-on').addEventListener('click', e => {
-      // Checkbox only â€” no label wrapping, so no conflict
+      // Checkbox only — no label wrapping, so no conflict
     });
     // Open whitelist modal from the text link (single click)
     _shadow.querySelector('#jb-wl-link').addEventListener('click', e => {
@@ -4839,7 +4839,7 @@
       const el = _shadow.querySelector('#jb-wl-entries');
       if (!el) return;
       el.innerHTML = '';
-      if (!st.wlNames.length) { el.innerHTML = '<div class="jb-sub">No players â€” all invites accepted.</div>'; return; }
+      if (!st.wlNames.length) { el.innerHTML = '<div class="jb-sub">No players — all invites accepted.</div>'; return; }
       st.wlNames.forEach((name, i) => {
         const row = document.createElement('div');
         row.className = 'jb-row';
@@ -4847,7 +4847,7 @@
         inp.className = 'jb-input'; inp.value = name; inp.placeholder = `Player ${i+1}`; inp.style.flex = '1';
         inp.addEventListener('change', () => { st.wlNames[i] = inp.value.trim(); saveSt(); });
         const btn = document.createElement('button');
-        btn.className = 'jb-btn jb-btn-danger'; btn.textContent = 'âœ•'; btn.style.padding = '2px 6px';
+        btn.className = 'jb-btn jb-btn-danger'; btn.textContent = '✕'; btn.style.padding = '2px 6px';
         btn.addEventListener('click', () => { st.wlNames.splice(i,1); saveSt(); renderWl(); });
         row.appendChild(inp); row.appendChild(btn);
         el.appendChild(row);
@@ -4898,9 +4898,9 @@
           listEl.innerHTML = ow.list.map(name => {
             const k = normName(name), on = !!ow.lastOn[k];
             return `<div class="jb-row" style="font-size:11px;padding:3px;background:var(--jb-surface-alt);border-radius:2px;margin-bottom:3px">
-              <span style="color:${on?'var(--jb-success)':'var(--jb-text-ter)'}">â—</span>
+              <span style="color:${on?'var(--jb-success)':'var(--jb-text-ter)'}">●</span>
               <span style="flex:1">${esc(name)} <span class="jb-sub">(${on?'Online':'Offline'})</span></span>
-              <button class="jb-btn jb-btn-danger jb-ow-rm" data-name="${esc(name)}" style="padding:1px 5px;font-size:10px">âœ•</button>
+              <button class="jb-btn jb-btn-danger jb-ow-rm" data-name="${esc(name)}" style="padding:1px 5px;font-size:10px">✕</button>
             </div>`;
           }).join('');
           listEl.querySelectorAll('.jb-ow-rm').forEach(btn => btn.addEventListener('click', () => owRemove(btn.getAttribute('data-name'))));
@@ -4946,7 +4946,7 @@
     _shadow.querySelector('#jb-create-dtm').checked = st.createDTM;
     _shadow.querySelector('#jb-create-dtm').addEventListener('change', e => {
       st.createDTM = e.target.checked; saveSt();
-      setStatus('ðŸšš Create DTM ' + (st.createDTM ? 'ON' : 'OFF'));
+      setStatus('🚚 Create DTM ' + (st.createDTM ? 'ON' : 'OFF'));
       if (st.createDTM && !getHot()) fetchHot();
     });
     _shadow.querySelector('#jb-dtm-link').addEventListener('click', e => {
@@ -4978,7 +4978,7 @@
     if (posX !== null && posY !== null) { host.style.right = 'auto'; host.style.left = posX+'px'; host.style.top = posY+'px'; }
     const lockBtn = _shadow.querySelector('#jb-lock-btn');
     const dragH = _shadow.querySelector('#jb-drag');
-    function updLock() { lockBtn.textContent = locked ? 'ðŸ”’' : 'ðŸ”“'; dragH.style.cursor = locked ? 'default' : 'grab'; }
+    function updLock() { lockBtn.textContent = locked ? '🔒' : '🔓'; dragH.style.cursor = locked ? 'default' : 'grab'; }
     updLock();
     lockBtn.addEventListener('click', e => { e.stopPropagation(); locked = !locked; GM_setValue('cbLocked', locked); updLock(); });
     let dragging = false, dx, dy, hx, hy;
@@ -5022,16 +5022,16 @@
     if (pg !== 'travel') {
       console.log('[JB][TRAVEL] Navigating to travel page for auto-travel to', getHot());
       localStorage.setItem(LS_TRAVEL_PENDING, '1');
-      setStatus(`âœˆï¸ Traveling to ${getHot()}...`);
+      setStatus(`✈️ Traveling to ${getHot()}...`);
       safeNav('/authenticated/travel.aspx?' + Date.now());
       return true;
     }
 
-    // On travel page â€” select hot city radio and click travel
+    // On travel page — select hot city radio and click travel
     if (localStorage.getItem(LS_TRAVEL_PENDING) === '1') {
       const hotCity = getHot();
       const hotLower = hotCity.toLowerCase();
-      console.log('[JB][TRAVEL] On travel page â€” looking for radio matching', hotCity);
+      console.log('[JB][TRAVEL] On travel page — looking for radio matching', hotCity);
 
       // Find the radio button matching the hot city by label text
       const radios = [...document.querySelectorAll('input[type=radio][name="ctl00$main$citieslist"]')];
@@ -5051,7 +5051,7 @@
       try { cityRadio.dispatchEvent(new Event('change', {bubbles:true})); } catch(_){}
       console.log('[JB][TRAVEL] Selected city radio:', cityRadio.id, '(value:', cityRadio.value, ')');
 
-      // Wait briefly, then click travel button â€” jet if DTM is close to ready, otherwise normal
+      // Wait briefly, then click travel button — jet if DTM is close to ready, otherwise normal
       setTimeout(() => {
         // Decide jet vs normal: if DTM cooldown < 40 min, use jet (20 min cooldown vs 45 min)
         const dtm = getDtm();
@@ -5065,7 +5065,7 @@
                            : [...document.querySelectorAll('input[type="submit"]')].find(b => /^travel\s*\(normal\)/i.test(b.value||'')));
 
         if (travelBtn && !travelBtn.disabled) {
-          console.log(`[JB][TRAVEL] DTM in ${dtmMinsLeft}m â€” using ${useJet?'JET (20m cd)':'NORMAL (45m cd)'}`);
+          console.log(`[JB][TRAVEL] DTM in ${dtmMinsLeft}m — using ${useJet?'JET (20m cd)':'NORMAL (45m cd)'}`);
           st.acting = true; st.action = 'travel';
           GM_setValue('cbActStart', Date.now());
           travelBtn.click();
@@ -5078,9 +5078,9 @@
             const cooldown = useJet ? 20*60 : 45*60;
             storeTravel({ cd: cooldown, canNormal: false, at: Date.now() });
             saveSt();
-            const mode = useJet ? 'ðŸ›©ï¸ Jet' : 'âœˆï¸ Plane';
-            tgMsg('travel', `${mode} <b>Traveled</b>\n${st.player||'?'} â†’ ${hotCity}${useJet?` | DTM in ${dtmMinsLeft}m`:''}`);
-            setStatus(`${mode} â†’ ${hotCity}`);
+            const mode = useJet ? '🛩️ Jet' : '✈️ Plane';
+            tgMsg('travel', `${mode} <b>Traveled</b>\n${st.player||'?'} → ${hotCity}${useJet?` | DTM in ${dtmMinsLeft}m`:''}`);
+            setStatus(`${mode} → ${hotCity}`);
             // Navigate away after travel completes
             setTimeout(() => {
               window.location.href = '/authenticated/crimes.aspx?' + Date.now();
@@ -5111,10 +5111,10 @@
       return false;
     }
 
-    // Check if we already added today (or recently) â€” don't spam
+    // Check if we already added today (or recently) — don't spam
     const lastDone = parseInt(localStorage.getItem(LS_DTM_LIST_DONE) || '0', 10);
     if (lastDone > 0 && (Date.now() - lastDone) < 30 * 60 * 1000) {
-      // Added within last 30 min â€” skip
+      // Added within last 30 min — skip
       return false;
     }
 
@@ -5124,12 +5124,12 @@
     // Navigate to ocads page if not there
     if (!onOcads) {
       console.log('[JB][DTMLIST] Navigating to DTM list page');
-      setStatus('ðŸ“‹ Adding to DTM list...');
+      setStatus('📋 Adding to DTM list...');
       safeNav(OCADS_PATH + '?' + Date.now());
       return true;
     }
 
-    // On ocads page â€” find and click "Add me!" button
+    // On ocads page — find and click "Add me!" button
     const addBtn = document.getElementById('ctl00_main_btnAddDTM') ||
                    document.querySelector('input[value="Add me!"]') ||
                    [...document.querySelectorAll('input[type="submit"]')].find(b => /add me/i.test(b.value||''));
@@ -5142,8 +5142,8 @@
       setTimeout(() => {
         addBtn.click();
         localStorage.setItem(LS_DTM_LIST_DONE, String(Date.now()));
-        tgMsg('dtmList', `ðŸ“‹ <b>DTM List</b>\n${st.player||'?'} | Added to DTM list in ${getCurCity()}`);
-        setStatus('ðŸ“‹ Added to DTM list');
+        tgMsg('dtmList', `📋 <b>DTM List</b>\n${st.player||'?'} | Added to DTM list in ${getCurCity()}`);
+        setStatus('📋 Added to DTM list');
 
         setTimeout(() => {
           st.acting = false; st.action = '';
@@ -5156,12 +5156,12 @@
 
       return true;
     } else {
-      // Button not found or disabled â€” maybe already on list or not eligible
+      // Button not found or disabled — maybe already on list or not eligible
       const bodyTxt = (document.body.textContent || '').toLowerCase();
       if (bodyTxt.includes('already') || bodyTxt.includes('on the list')) {
         console.log('[JB][DTMLIST] Already on DTM list');
         localStorage.setItem(LS_DTM_LIST_DONE, String(Date.now()));
-        setStatus('ðŸ“‹ Already on DTM list');
+        setStatus('📋 Already on DTM list');
       } else if (bodyTxt.includes('cooldown') || bodyTxt.includes('wait')) {
         console.log('[JB][DTMLIST] DTM on cooldown');
       } else {
@@ -5179,7 +5179,7 @@
   function checkDtmListReset() {
     const dtm = getDtm();
     if (dtm && !dtm.ready && dtm.total > 60) {
-      // DTM is on cooldown â€” clear the "added" flag so we re-add when it's ready again
+      // DTM is on cooldown — clear the "added" flag so we re-add when it's ready again
       localStorage.removeItem(LS_DTM_LIST_DONE);
     }
   }
@@ -5189,7 +5189,7 @@
    * (hndlr.ashx?m=pst), attributes each gain to the action that fired just
    * before it, keeps a rolling history + per-action session totals for the
    * charts, and (optionally) disables an action that yields no XP N times in
-   * a row â€” the game's daily cap, detected rather than hard-coded.
+   * a row — the game's daily cap, detected rather than hard-coded.
    */
 
   const XP_ACTIONS = ['crime','gta','booze','jail','garage','oc','dtm'];
@@ -5203,7 +5203,7 @@
   };
   XP_ACTIONS.forEach(a => { if (typeof xpState.perAction[a] !== 'number') xpState.perAction[a] = 0; });
 
-  const ACTION_ICON = { crime:'ðŸ‘œ', gta:'ðŸŽï¸', booze:'ðŸº', jail:'â›“ï¸', garage:'ðŸª', oc:'ðŸŽ¯', dtm:'ðŸ’Š', other:'âš¡' };
+  const ACTION_ICON = { crime:'👜', gta:'🏎️', booze:'🍺', jail:'⛓️', garage:'🏪', oc:'🎯', dtm:'💊', other:'⚡' };
 
   /* === RANK TABLE (per-rank XP requirements) ===
    * perRankReq[i] = XP needed WITHIN rank-step i to advance to the next rank.
@@ -5229,9 +5229,9 @@
   // Resolve which perRankReq index the player is on, plus absolute XP into/to-next.
   // Strategy: if we have a cumulative Experience value, find the step whose cumulative
   // window contains it, then VALIDATE the implied within-rank % against the status-bar
-  // %. If they agree (Â±6%), we're confident (cumulative-XP model). Otherwise we fall
+  // %. If they agree (±6%), we're confident (cumulative-XP model). Otherwise we fall
   // back to deriving the step from the status %: the step whose size best matches
-  // Experience / (pct/100) â€” but only mark confident when a cross-check passes.
+  // Experience / (pct/100) — but only mark confident when a cross-check passes.
   function resolveRank() {
     const pct = rankState.pct;
     const xp = xpState.total;
@@ -5255,7 +5255,7 @@
         }
         cumBefore = cumRankReq[i];
       }
-      if (idx === -1) idx = perRankReq.length - 1; // past the table â€” max rank
+      if (idx === -1) idx = perRankReq.length - 1; // past the table — max rank
     }
 
     // If not confident from cumulative XP but we have a % and an idx guess, still
@@ -5271,20 +5271,20 @@
     return { idx, withinXp, toNext, confident, pct, name: rankState.name };
   }
 
-  // Fired when the status-bar rank NAME changes â€” an unambiguous rank-up signal,
+  // Fired when the status-bar rank NAME changes — an unambiguous rank-up signal,
   // independent of how Experience is counted. Logs it, alerts (gated), and drops a
   // marker into the XP history so it shows on the charts.
   function onRankUp(fromName, toName) {
-    console.log(`${APP_TAG}[RANK] Ranked up: ${fromName} â†’ ${toName}`);
+    console.log(`${APP_TAG}[RANK] Ranked up: ${fromName} → ${toName}`);
     try {
       xpState.history.unshift({
-        t: Date.now(), gained: 0, action: 'rankup', icon: 'â­',
-        total: xpState.total, rankUp: true, label: `${fromName} â†’ ${toName}`
+        t: Date.now(), gained: 0, action: 'rankup', icon: '⭐',
+        total: xpState.total, rankUp: true, label: `${fromName} → ${toName}`
       });
       if (xpState.history.length > 40) xpState.history.pop();
       saveXpState();
     } catch(_){}
-    tgMsg('rankup', `â­ <b>RANK UP</b>\n${st.player||'?'} | ${esc(fromName)} â†’ <b>${esc(toName)}</b>`);
+    tgMsg('rankup', `⭐ <b>RANK UP</b>\n${st.player||'?'} | ${esc(fromName)} → <b>${esc(toName)}</b>`);
     try { updateXpUI(); } catch(_){}
   }
 
@@ -5347,7 +5347,7 @@
     if (typeof xpState.perAction[action] !== 'number') xpState.perAction[action] = 0;
     xpState.perAction[action] = parseFloat((xpState.perAction[action] + gained).toFixed(4));
 
-    xpState.history.unshift({ t: Date.now(), gained, action, icon: ACTION_ICON[action] || 'âš¡', total: xp });
+    xpState.history.unshift({ t: Date.now(), gained, action, icon: ACTION_ICON[action] || '⚡', total: xp });
     if (xpState.history.length > 40) xpState.history.pop();
 
     xpState.samples.push({ t: Date.now(), total: xp });
@@ -5358,7 +5358,7 @@
     updateXpUI();
 
     const mins = (Date.now() - xpState.sessionStart) / 60000;
-    const rate = mins >= 2 ? ((xpState.sessionGain / mins) * 60).toFixed(1) : 'â€¦';
+    const rate = mins >= 2 ? ((xpState.sessionGain / mins) * 60).toFixed(1) : '…';
     console.log(`${APP_TAG}[XP] +${gained} [${ACTION_ICON[action]||''}${action}] | session +${xpState.sessionGain} | total ${xp.toFixed(2)} | ${rate}/hr`);
   }
 
@@ -5387,8 +5387,8 @@
     GM_setValue('cbXpCapDay_'+action, gameDayStr());
     GM_setValue('cbXpCapWasOn_'+action, !!st[action]);
     if (action in st) { st[action] = false; saveSt(); }
-    console.log(`${APP_TAG}[XP] ${action} hit no-XP cap â€” disabled until next game-day`);
-    tgMsg('jail', `ðŸ›‘ <b>${(ACTION_ICON[action]||'')+action.toUpperCase()} capped</b>\n${st.player||'?'} | no XP Ã—${cfg.noXpStreakLimit}, off till tomorrow`);
+    console.log(`${APP_TAG}[XP] ${action} hit no-XP cap — disabled until next game-day`);
+    tgMsg('jail', `🛑 <b>${(ACTION_ICON[action]||'')+action.toUpperCase()} capped</b>\n${st.player||'?'} | no XP ×${cfg.noXpStreakLimit}, off till tomorrow`);
   }
 
   function checkXpCapResets() {
@@ -5400,14 +5400,14 @@
         GM_setValue('cbXpCapDay_'+action, '');
         const wasOn = GM_getValue('cbXpCapWasOn_'+action, true);
         if (action in st && wasOn) { st[action] = true; saveSt(); }
-        console.log(`${APP_TAG}[XP] ${action} no-XP cap reset â€” re-enabled (new game-day)`);
+        console.log(`${APP_TAG}[XP] ${action} no-XP cap reset — re-enabled (new game-day)`);
       }
     });
   }
 
   /* === XP API INTERCEPTOR ===
-   * The game refreshes the status bar via XHR to hndlr.ashx?m=pst&t=â€¦, whose JSON
-   * carries the current Experience. We hook XMLHttpRequest to read it passively â€”
+   * The game refreshes the status bar via XHR to hndlr.ashx?m=pst&t=…, whose JSON
+   * carries the current Experience. We hook XMLHttpRequest to read it passively —
    * no extra requests, just observing the game's own traffic.
    */
   let _xpInterceptorInstalled = false;
@@ -5434,7 +5434,7 @@
               if (!d) return;
               const xp = d.Experience ?? d.experience ?? d.XP ?? d.xp;
               if (xp !== undefined && xp !== null) onExperienceRead(xp);
-            } catch (e) { /* non-JSON / partial â€” ignore */ }
+            } catch (e) { /* non-JSON / partial — ignore */ }
           }
         });
       }
@@ -5443,7 +5443,7 @@
     console.log(`${APP_TAG}[XP] API interceptor installed`);
   }
 
-  /* === WATCHDOG â€” self-healing main loop === */
+  /* === WATCHDOG — self-healing main loop === */
 
   const WATCHDOG_TIMEOUT = 60000; // restart only if loop hasn't ticked in 60s (well beyond any normal interval)
   let _lastLoopTick = Date.now();
@@ -5465,14 +5465,14 @@
       // Only restart if genuinely stalled well beyond any normal loop interval
       if (elapsed > WATCHDOG_TIMEOUT) {
         _watchdogRestarts++;
-        console.warn(`[JB][WATCHDOG] Loop stalled ${Math.round(elapsed/1000)}s â€” restart #${_watchdogRestarts}`);
+        console.warn(`[JB][WATCHDOG] Loop stalled ${Math.round(elapsed/1000)}s — restart #${_watchdogRestarts}`);
         if (_watchdogRestarts <= 3) {
           st.acting = false; st.action = ''; GM_setValue('cbActStart', 0); saveSt();
           _lastLoopTick = Date.now(); // mark so we don't immediately re-fire
           setTimeout(mainLoop, 500);
         } else {
           console.error('[JB][WATCHDOG] Too many restarts, reloading');
-          tgMsg('watchdog', `âš ï¸ <b>Watchdog</b>\n${st.player||'?'} | reloading`);
+          tgMsg('watchdog', `⚠️ <b>Watchdog</b>\n${st.player||'?'} | reloading`);
           _watchdogRestarts = 0;
           setTimeout(() => window.location.reload(), 2000);
         }
@@ -5482,7 +5482,7 @@
     }, 15000); // check every 15s
   }
 
-  /* === KEEP-ALIVE PING â€” prevent session timeout === */
+  /* === KEEP-ALIVE PING — prevent session timeout === */
 
   const KEEPALIVE_INTERVAL = 5 * 60 * 1000; // 5 minutes
   let _keepAliveIv = null;
@@ -5525,11 +5525,11 @@
       const amsHour = parseInt(new Intl.DateTimeFormat('en-US', {
         timeZone: 'Europe/Amsterdam', hour: '2-digit', hour12: false
       }).format(tryCEST), 10);
-      // Intl may format midnight as 24 â€” normalise to 0 for comparison
+      // Intl may format midnight as 24 — normalise to 0 for comparison
       const normHour = amsHour === 24 ? 0 : amsHour;
       return (normHour === (HH % 24)) ? tryCEST.getTime() : new Date(iso + '+01:00').getTime();
     } catch (e) {
-      // Intl/timezone unavailable â€” fall back to CET
+      // Intl/timezone unavailable — fall back to CET
       return new Date(iso + '+01:00').getTime();
     }
   }
@@ -5628,18 +5628,18 @@
     if (!isDtmSchedReady()) return;
     if (!getHot()) { fetchHot(); return; }
     if (!isInHot()) {
-      tgOnce('dtm_skip_city', 3600, `âš ï¸ <b>DTM Skip</b>\n${st.player||'?'} | Not in hot city`);
+      tgOnce('dtm_skip_city', 3600, `⚠️ <b>DTM Skip</b>\n${st.player||'?'} | Not in hot city`);
       return;
     }
     if (!st.dtmPartner.trim()) {
-      tgOnce('dtm_no_partner', 3600, `âš ï¸ <b>DTM</b> â€” partner not set`);
+      tgOnce('dtm_no_partner', 3600, `⚠️ <b>DTM</b> — partner not set`);
       return;
     }
     // Clear throttle flags once we actually proceed
     localStorage.removeItem('cbTgOnce_dtm_skip_city');
     localStorage.removeItem('cbTgOnce_dtm_no_partner');
 
-    tgMsg('dtmCreate', `ðŸšš <b>DTM Setup</b>\n${st.player||'?'} | Partner: ${st.dtmPartner}`);
+    tgMsg('dtmCreate', `🚚 <b>DTM Setup</b>\n${st.player||'?'} | Partner: ${st.dtmPartner}`);
     localStorage.setItem(LS_CREATE_DTM_STATE, 'setup');
     localStorage.setItem(LS_CREATE_DTM_STEP, '0');
     localStorage.setItem(LS_CREATE_DTM_NEXT, String(Date.now()));
@@ -5662,8 +5662,8 @@
     const started = parseInt(localStorage.getItem('cbCreateDtmStartedAt')||'0',10);
     if (started === 0) { localStorage.setItem('cbCreateDtmStartedAt', String(Date.now())); }
     else if (Date.now() - started > 600000) {
-      console.warn('[JB][CreateDTM] Aborting â€” stuck >10min');
-      tgMsg('dtmCreate', `âš ï¸ <b>DTM Create Aborted</b>\n${st.player||'?'} | Stuck >10min, check manually`);
+      console.warn('[JB][CreateDTM] Aborting — stuck >10min');
+      tgMsg('dtmCreate', `⚠️ <b>DTM Create Aborted</b>\n${st.player||'?'} | Stuck >10min, check manually`);
       resetCreateDTM();
       localStorage.removeItem('cbCreateDtmStartedAt');
       st.acting = false; st.action = ''; GM_setValue('cbActStart',0);
@@ -5671,7 +5671,7 @@
     }
 
     const next = parseInt(localStorage.getItem(LS_CREATE_DTM_NEXT) || '0', 10);
-    // Still waiting for a scheduled retry â€” hold position on this page, don't fall through
+    // Still waiting for a scheduled retry — hold position on this page, don't fall through
     if (next > Date.now()) { st.acting = true; st.action = 'dtm-create'; return true; }
 
     const step = getCreateDtmStep();
@@ -5689,7 +5689,7 @@
         if (compBtn && !compBtn.disabled) {
           await wait(rndDelay(DLY.normal));
           formSubmit(compBtn);
-          tgMsg('dtmBuy', `âœ… <b>DTM Committed</b>\n${st.player||'?'}`);
+          tgMsg('dtmBuy', `✅ <b>DTM Committed</b>\n${st.player||'?'}`);
           resetCreateDTM();
           // Handle repeat logic
           const mode = st.dtmRepeat || 'once';
@@ -5720,7 +5720,7 @@
           drugIn.value = String(maxAmt);
           await wait(rndDelay(DLY.quick));
           buyBtn.click();
-          tgMsg('dtmBuy', `ðŸšš <b>DTM Bought ${maxAmt}</b>\n${st.player||'?'}`);
+          tgMsg('dtmBuy', `🚚 <b>DTM Bought ${maxAmt}</b>\n${st.player||'?'}`);
           storeDtm({ ready: false, total: 7200, h: 2, m: 0, s: 0, at: Date.now() });
           resetCreateDTM();
           if (st.dtmRepeat === 'once') { st.createDTM = false; st.dtmSched = ''; }
@@ -5728,7 +5728,7 @@
           return true;
         }
 
-        // Not ready â€” check back in 60s
+        // Not ready — check back in 60s
         localStorage.setItem(LS_CREATE_DTM_NEXT, String(Date.now() + 60000));
         window.location.href = '/authenticated/crimes.aspx?' + Date.now();
         return true;
@@ -5740,23 +5740,23 @@
           document.getElementById('ctl00_main_btnStartDTMRob') ||
           [...document.querySelectorAll('input[type="submit"],button')].find(b => /start.*dtm|begin.*dtm/i.test((b.value||b.textContent||'')));
         if (!startBtn || startBtn.disabled) {
-          // Button not present yet â€” could still be loading, or DTM already started.
+          // Button not present yet — could still be loading, or DTM already started.
           // Check if we're actually already past the start (invite field present)
           const inviteField = document.getElementById('ctl00_main_tbParticipant');
           if (inviteField) {
-            // Already started â€” jump to invite step
-            console.log('[JB][CreateDTM] Start button gone but invite field present â€” advancing to step 1');
+            // Already started — jump to invite step
+            console.log('[JB][CreateDTM] Start button gone but invite field present — advancing to step 1');
             localStorage.setItem(LS_CREATE_DTM_STEP, '1');
             localStorage.setItem(LS_CREATE_DTM_NEXT, String(Date.now()));
             return true;
           }
-          console.log('[JB][CreateDTM] Start DTM button not found yet â€” waiting');
+          console.log('[JB][CreateDTM] Start DTM button not found yet — waiting');
           localStorage.setItem(LS_CREATE_DTM_NEXT, String(Date.now() + 5000));
           return true; // hold position, don't fall through to crime navigation
         }
         await wait(rndDelay(DLY.normal));
         console.log('[JB][CreateDTM] Clicking Start DTM:', startBtn.id||startBtn.value);
-        tgMsg('dtmCreate', `ðŸšš <b>DTM 1/3</b>\n${st.player||'?'} | Started DTM`);
+        tgMsg('dtmCreate', `🚚 <b>DTM 1/3</b>\n${st.player||'?'} | Started DTM`);
         localStorage.setItem(LS_CREATE_DTM_STATE, 'setup');
         localStorage.setItem(LS_CREATE_DTM_STEP, '1');
         localStorage.setItem(LS_CREATE_DTM_NEXT, String(Date.now() + 10000));
@@ -5777,7 +5777,7 @@
                        document.getElementById('ctl00_main_btnAddParticipant') ||
                        [...document.querySelectorAll('input[type="submit"],button')].find(b => /invite\s*member|invite|add\s*participant|add\s*member/i.test((b.value||b.textContent||'').trim()));
         if (!nameIn || !invBtn) {
-          console.log('[JB][CreateDTM] Invite form not ready â€” field:', !!nameIn, 'btn:', !!invBtn);
+          console.log('[JB][CreateDTM] Invite form not ready — field:', !!nameIn, 'btn:', !!invBtn);
           localStorage.setItem(LS_CREATE_DTM_NEXT, String(Date.now() + 5000));
           return true;
         }
@@ -5788,8 +5788,8 @@
         // Fire events so ASP.NET registers the typed value before postback
         try { nameIn.dispatchEvent(new Event('input', {bubbles:true})); nameIn.dispatchEvent(new Event('change', {bubbles:true})); nameIn.dispatchEvent(new Event('keyup', {bubbles:true})); } catch(_){}
         await wait(rndDelay(DLY.normal));
-        console.log('[JB][CreateDTM] Entered partner:', partner, 'in', nameIn.id, 'â€” clicking', invBtn.id||invBtn.value);
-        tgMsg('dtmCreate', `ðŸšš <b>DTM 2/3</b>\n${st.player||'?'} | Invited ${partner}`);
+        console.log('[JB][CreateDTM] Entered partner:', partner, 'in', nameIn.id, '— clicking', invBtn.id||invBtn.value);
+        tgMsg('dtmCreate', `🚚 <b>DTM 2/3</b>\n${st.player||'?'} | Invited ${partner}`);
         localStorage.setItem(LS_CREATE_DTM_STEP, '2');
         localStorage.setItem(LS_CREATE_DTM_NEXT, String(Date.now() + 60000));
         invBtn.click();
@@ -5803,7 +5803,7 @@
         if (secSel && buyBtn) {
           secSel.value = '6'; // Laptop
           await wait(rndDelay(DLY.normal));
-          tgMsg('dtmCreate', `ðŸšš <b>DTM 3/3</b>\n${st.player||'?'} | Laptop bought, waiting`);
+          tgMsg('dtmCreate', `🚚 <b>DTM 3/3</b>\n${st.player||'?'} | Laptop bought, waiting`);
           localStorage.setItem(LS_CREATE_DTM_STEP, '3');
           localStorage.setItem(LS_CREATE_DTM_STATE, 'polling');
           localStorage.setItem(LS_CREATE_DTM_POLL, String(Date.now()));
@@ -5811,7 +5811,7 @@
           buyBtn.click();
           return true;
         }
-        // No buy form â€” maybe already bought, switch to polling
+        // No buy form — maybe already bought, switch to polling
         localStorage.setItem(LS_CREATE_DTM_STATE, 'polling');
         localStorage.setItem(LS_CREATE_DTM_NEXT, String(Date.now() + 30000));
         return true;
@@ -5823,7 +5823,7 @@
         resetCreateDTM();
         localStorage.removeItem('cbCreateDtmStartedAt');
         st.acting = false; st.action = ''; GM_setValue('cbActStart',0);
-        return false; // genuine cooldown â€” resume normal automation
+        return false; // genuine cooldown — resume normal automation
       }
     } catch (e) {
       console.error('[JB][CreateDTM] Error:', e);
@@ -5847,13 +5847,13 @@
 
     if (!tabs.isMaster) {
       if (wasMaster) console.log(APP_TAG, 'Lost master');
-      setStatus('â¸ Secondary tab');
+      setStatus('⏸ Secondary tab');
       setTimeout(mainLoop, 3000); return;
     }
 
     if (paused) { setTimeout(mainLoop, 1800+Math.floor(Math.random()*1400)); return; }
 
-    // HEALTH MONITORING â€” runs at all times, bypasses every break.
+    // HEALTH MONITORING — runs at all times, bypasses every break.
     // Always check low-HP alerting, and if HP is critically low let health auto-buy
     // run even during a coffee/lunch/sleep break (we don't want to die while resting).
     checkLowHp();
@@ -5865,14 +5865,14 @@
       const _hp = getHp();
       if (_hp > 0 && _hp < cfg.minHealth) {
         // Critical: bypass the break to top up health, then resume the break next tick
-        console.log(`[JB][HEALTH] HP ${_hp}% < ${cfg.minHealth}% during break â€” buying health (bypassing break)`);
-        setStatus(`ðŸ’Š Emergency health (${_hp}%) â€” break paused`);
+        console.log(`[JB][HEALTH] HP ${_hp}% < ${cfg.minHealth}% during break — buying health (bypassing break)`);
+        setStatus(`💊 Emergency health (${_hp}%) — break paused`);
         checkHealth();
         setTimeout(mainLoop, 2500); return;
       }
     }
 
-    // Break system checks â€” highest priority (health already handled above)
+    // Break system checks — highest priority (health already handled above)
     if (handleSleep()) {
       setStatus(getBreakStatus().msg);
       setTimeout(mainLoop, 30000); return;
@@ -5892,19 +5892,19 @@
     checkCaptcha(); checkNewMsgs(); checkLogout();
 
     if (checkSoftBan()) {
-      setStatus('â›” Soft ban detected â€” paused');
+      setStatus('⛔ Soft ban detected — paused');
       setTimeout(mainLoop, 10000); return;
     }
     if (checkSqlCheck()) {
-      paused = true; setStatus('âš ï¸ STAFF CHECK â€” paused');
+      paused = true; setStatus('⚠️ STAFF CHECK — paused');
       setTimeout(mainLoop, 10000); return;
     }
 
     checkStuck();
 
     if (isOnCaptcha()) {
-      if (resume.on) { setStatus('Script Check â€” monitoring...'); localStorage.setItem('cbScriptCheck','1'); startScMonitor(); }
-      else setStatus('Script Check â€” paused');
+      if (resume.on) { setStatus('Script Check — monitoring...'); localStorage.setItem('cbScriptCheck','1'); startScMonitor(); }
+      else setStatus('Script Check — paused');
       setTimeout(mainLoop, 1800+Math.floor(Math.random()*1400)); return;
     } else {
       if (localStorage.getItem('cbScriptCheck') === '1') { localStorage.removeItem('cbScriptCheck'); _scActive = false; }
@@ -5977,10 +5977,10 @@
       const pendDtm = localStorage.getItem(LS_PEND_DTM);
       if (pendDtm && st.autoDTM) {
         localStorage.removeItem(LS_PEND_DTM);
-        localStorage.removeItem('cbDtmJustActed'); // fresh invite â€” clear any stale guard
+        localStorage.removeItem('cbDtmJustActed'); // fresh invite — clear any stale guard
         localStorage.setItem('cbPendDtmHandle','true');
         localStorage.setItem('cbPendDtmHandleTs', String(Date.now()));
-        tgMsg('dtmAccept', `ðŸšš <b>DTM Accepted</b>\n${st.player||'?'}`);
+        tgMsg('dtmAccept', `🚚 <b>DTM Accepted</b>\n${st.player||'?'}`);
         st.acting = true; st.action = 'dtm-invite'; GM_setValue('cbActStart', Date.now()); saveSt();
         try { const u = new URL(pendDtm); window.location.href = u.pathname+u.search; } catch(_) { window.location.href = pendDtm.replace(/^https?:\/\/[^/]+/,''); }
         return;
@@ -5990,7 +5990,7 @@
         localStorage.removeItem(LS_PEND_OC);
         localStorage.setItem('cbPendOcHandle','true');
         localStorage.setItem('cbPendOcHandleTs', String(Date.now()));
-        tgMsg('ocAccept', `ðŸ•µï¸ <b>OC Accepted</b>\n${st.player||'?'}`);
+        tgMsg('ocAccept', `🕵️ <b>OC Accepted</b>\n${st.player||'?'}`);
         st.acting = true; st.action = 'oc-invite'; GM_setValue('cbActStart', Date.now()); saveSt();
         try { const u = new URL(pendOc); window.location.href = u.pathname+u.search; } catch(_) { window.location.href = pendOc.replace(/^https?:\/\/[^/]+/,''); }
         return;
@@ -6096,8 +6096,8 @@
     initServerTime();
     try { initHot(); } catch(_){}
 
-    if (tabs.isMaster) setStatus(`${APP_NAME} ${APP_VERSION} â€” Master tab`);
-    else setStatus('â¸ Secondary tab');
+    if (tabs.isMaster) setStatus(`${APP_NAME} ${APP_VERSION} — Master tab`);
+    else setStatus('⏸ Secondary tab');
 
     checkJailAny();
 
@@ -6116,4 +6116,3 @@
   init();
 
 })();
-
