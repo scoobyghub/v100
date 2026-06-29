@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Jarvis Bot 2000.187
+// @name         Jarvis Bot 2000.188
 // @namespace    http://tampermonkey.net/
-// @version      2000.187
-// @description  Jarvis Bot 2000.187 — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
+// @version      2000.188
+// @description  Jarvis Bot 2000.188 — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
 // @match        *://www.tmn2010.net/authenticated/*
@@ -32,7 +32,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.187
+/*  Jarvis Bot 2000.188
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -120,7 +120,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.187';
+  const APP_VERSION = '2000.188';
   const APP_TAG     = '[JB]';
 
   // Known staff accounts (profile IDs)
@@ -6062,6 +6062,14 @@
         const garageOd = st.garage && (now - st.lastGarage >= cfg.garageInt*1000);
         if (garageOd && pg === 'garage') doGarage();
 
+        // When already on jail page: attempt jailbreak BEFORE evaluating other priorities.
+        // Without this, a crime/gta/booze cadence expiring during the jail.aspx page load
+        // causes the loop to immediately redirect away before doJailbreak() is ever called.
+        if (pg === 'jail' && st.jail && !st.inJail) {
+          doJailbreak();
+          if (st.acting) { setTimeout(mainLoop, 1800+Math.floor(Math.random()*1400)); return; }
+        }
+
         // Use cooldownElapsed() (cadence-aware) not raw interval, so an action waiting for
         // its human-cadence delay doesn't block lower-priority actions (especially jail).
         const crimeRdy = st.crime && cooldownElapsed('crime', st.lastCrime, cfg.crimeInt);
@@ -6077,7 +6085,7 @@
         } else if (crimeRdy) { if(pg==='crimes') doCrime(); else safeNav('/authenticated/crimes.aspx?'+Date.now()); }
         else if (gtaRdy) { if(pg==='gta') doGta(); else safeNav('/authenticated/crimes.aspx?p=g&'+Date.now()); }
         else if (boozeRdy) { if(pg==='booze') doBooze(); else safeNav('/authenticated/crimes.aspx?p=b&'+Date.now()); }
-        else if (jailRdy) { if(pg==='jail') doJailbreak(); else safeNav('/authenticated/jail.aspx?'+Date.now()); }
+        else if (jailRdy && pg !== 'jail') { safeNav('/authenticated/jail.aspx?'+Date.now()); }
         else if (garageRdy) { if(pg==='garage') doGarage(); else safeNav('/authenticated/playerproperty.aspx?p=g&'+Date.now()); }
         else {
           const cr = Math.max(0, Math.ceil((cfg.crimeInt*1000-(now-st.lastCrime))/1000));
