@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Jarvis Bot 2000.184
+// @name         Jarvis Bot 2000.185
 // @namespace    http://tampermonkey.net/
-// @version      2000.184
-// @description  Jarvis Bot 2000.184 — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
+// @version      2000.185
+// @description  Jarvis Bot 2000.185 — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
 // @match        *://www.tmn2010.net/authenticated/*
@@ -32,7 +32,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.184
+/*  Jarvis Bot 2000.185
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -120,7 +120,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.184';
+  const APP_VERSION = '2000.185';
   const APP_TAG     = '[JB]';
 
   // Known staff accounts (profile IDs)
@@ -2979,7 +2979,7 @@
     }
     if (!inJail) {
       const txt = document.body.textContent.toLowerCase();
-      if (txt.includes('you are in jail') || txt.includes('you have been jailed') || txt.includes('time remaining') || txt.includes('bail amount')) inJail = true;
+      if (txt.includes('you are in jail') || txt.includes('you have been jailed')) inJail = true;
     }
     const was = st.inJail;
     st.inJail = inJail;
