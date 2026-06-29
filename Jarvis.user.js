@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Jarvis Bot 2000.194
+// @name         Jarvis Bot 2000.195
 // @namespace    http://tampermonkey.net/
-// @version      2000.194
-// @description  Jarvis Bot 2000.194 — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
+// @version      2000.195
+// @description  Jarvis Bot 2000.195 — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
 // @match        *://www.tmn2010.net/authenticated/*
@@ -27,12 +27,11 @@
 // @grant        GM_xmlhttpRequest
 // @connect      api.telegram.org
 // @connect      raw.githubusercontent.com
-// @connect      *
 // @updateURL    https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.meta.js
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.194
+/*  Jarvis Bot 2000.195
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -98,14 +97,6 @@
     } catch (e) {}
 })();
 
-/* === LOGOUT URL BLOCKER (standalone) ===
- * If anything navigates to login.aspx?act=out (sleep system, accidental click)
- * this fires immediately at document-idle and bounces the tab to the
- * authenticated home page before the logout page renders.
- * The server has already destroyed the session by this point, so the redirect
- * falls through to the login page → auto-login flow. The primary prevention is
- * in handleSleep(), which no longer navigates to act=out at all.
- */
 (function blockLogoutRedirect() {
   try {
     if (!window.location.search.includes('act=out')) return;
@@ -120,7 +111,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.194';
+  const APP_VERSION = '2000.195';
   const APP_TAG     = '[JB]';
 
   // Known staff accounts (profile IDs)
@@ -740,19 +731,17 @@
   /* === TELEGRAM === */
 
   const tg = {
-    token:          GM_getValue('cbTgToken', ''),
-    chat:           GM_getValue('cbTgChat', ''),
-    enabled:        GM_getValue('cbTgEnabled', false),
-    captcha:        GM_getValue('cbNotifyCaptcha', true),
-    messages:       GM_getValue('cbNotifyMessages', true),
-    scriptTest:     GM_getValue('cbNotifyScriptTest', true),
-    staffMail:      GM_getValue('cbNotifyStaffMail', true),
-    sqlCheck:       GM_getValue('cbNotifySqlCheck', true),
-    logout:         GM_getValue('cbNotifyLogout', true),
-    webhook:        GM_getValue('cbTgWebhook', ''),
-    webhookEnabled: GM_getValue('cbTgWebhookEnabled', false),
-    lastMsgCheck:   GM_getValue('cbLastMsgCheck', 0),
-    msgCheckInt:    GM_getValue('cbMsgCheckInt', 60)
+    token:       GM_getValue('cbTgToken', ''),
+    chat:        GM_getValue('cbTgChat', ''),
+    enabled:     GM_getValue('cbTgEnabled', false),
+    captcha:     GM_getValue('cbNotifyCaptcha', true),
+    messages:    GM_getValue('cbNotifyMessages', true),
+    scriptTest:  GM_getValue('cbNotifyScriptTest', true),
+    staffMail:   GM_getValue('cbNotifyStaffMail', true),
+    sqlCheck:    GM_getValue('cbNotifySqlCheck', true),
+    logout:      GM_getValue('cbNotifyLogout', true),
+    lastMsgCheck:GM_getValue('cbLastMsgCheck', 0),
+    msgCheckInt: GM_getValue('cbMsgCheckInt', 60)
   };
 
   function saveTg() {
@@ -761,7 +750,6 @@
     GM_setValue('cbNotifyMessages', tg.messages); GM_setValue('cbNotifyScriptTest', tg.scriptTest);
     GM_setValue('cbNotifyStaffMail', tg.staffMail); GM_setValue('cbMsgCheckInt', tg.msgCheckInt);
     GM_setValue('cbNotifySqlCheck', tg.sqlCheck); GM_setValue('cbNotifyLogout', tg.logout);
-    GM_setValue('cbTgWebhook', tg.webhook); GM_setValue('cbTgWebhookEnabled', tg.webhookEnabled);
   }
 
   // Per-message Telegram toggles. Each sendTg now carries a key; if its toggle is
@@ -791,7 +779,6 @@
     { key:'blocked',     label:'Invite blocked',        def:true  },
     { key:'invalid',     label:'Invalid invite',        def:true  },
     { key:'travel',      label:'Auto travel',           def:true  },
-    { key:'softban',     label:'Soft-ban / block',      def:true  },
     { key:'dtmList',     label:'DTM list add',          def:true  },
     { key:'jail',        label:'Jail limit/reset',      def:true  },
     { key:'crusher',     label:'Crusher events',        def:true  },
@@ -800,120 +787,16 @@
   ];
 
   const tgMsgOn = {};
-  const webhookMsgOn = {};
-  TG_MSGS.forEach(m => {
-    tgMsgOn[m.key] = GM_getValue('cbTgMsg_'+m.key, m.def);
-    webhookMsgOn[m.key] = GM_getValue('cbWebhookMsg_'+m.key, m.def);
-  });
+  TG_MSGS.forEach(m => { tgMsgOn[m.key] = GM_getValue('cbTgMsg_'+m.key, m.def); });
 
   function saveTgMsgs() {
     TG_MSGS.forEach(m => GM_setValue('cbTgMsg_'+m.key, tgMsgOn[m.key]));
   }
 
-  function saveWebhookMsgs() {
-    TG_MSGS.forEach(m => GM_setValue('cbWebhookMsg_'+m.key, webhookMsgOn[m.key]));
-  }
-
-  // Wrapper: only sends if this message category is enabled for the target.
+  // Wrapper: only sends if this message category is enabled
   function tgMsg(key, message) {
-    if (tgMsgOn[key] === false && webhookMsgOn[key] === false) return;
-    if (tgMsgOn[key] !== false && tg.enabled && tg.token && tg.chat) sendTg(message);
-    if (tg.webhookEnabled && tg.webhook && webhookMsgOn[key] !== false) sendWebhook(message);
-  }
-
-  function hasNotifyTarget() {
-    return (tg.enabled && tg.token && tg.chat) || (tg.webhookEnabled && tg.webhook);
-  }
-
-  let webhookStatus = 'Webhook disabled';
-  function updateWebhookStatus(msg) {
-    webhookStatus = msg;
-    if (_shadow) {
-      const el = _shadow.querySelector('#jb-tg-webhook-status');
-      if (el) el.textContent = msg;
-    }
-  }
-
-  const LS_WEBQ = 'cbWebhookSendQueue';
-  let _webInFlight = {};
-
-  function _loadWebQ() {
-    try { const q = JSON.parse(localStorage.getItem(LS_WEBQ) || '[]'); return Array.isArray(q) ? q : []; }
-    catch(_) { return []; }
-  }
-  function _saveWebQ(q) { try { localStorage.setItem(LS_WEBQ, JSON.stringify(q)); } catch(_){} }
-  function _removeWebQ(id) { _saveWebQ(_loadWebQ().filter(i => i.id !== id)); }
-  function _deferWebQ(id, at) { const q = _loadWebQ(); const it = q.find(i => i.id === id); if (it) { it.nextAt = at; _saveWebQ(q); } }
-  function _backoffOrDropWebQ(id, attempts) {
-    if (attempts >= 8) { _removeWebQ(id); console.error(APP_TAG, 'Webhook give up after', attempts, 'tries'); return; }
-    _deferWebQ(id, Date.now() + Math.min(60000, 2000 * attempts));
-  }
-
-  function stripTgHtml(s) {
-    return String(s || '')
-      .replace(/<b>(.*?)<\/b>/gi, '$1')
-      .replace(/<i>(.*?)<\/i>/gi, '$1')
-      .replace(/<pre>([\s\S]*?)<\/pre>/gi, '$1')
-      .replace(/<[^>]+>/g, '');
-  }
-
-  function sendWebhook(msg) {
-    if (!tg.webhookEnabled || !tg.webhook) return;
-    const plain = stripTgHtml(msg);
-    const q = _loadWebQ();
-    q.push({ id: Date.now() + '_' + Math.random().toString(36).slice(2, 7), msg: plain, attempts: 0, nextAt: 0 });
-    if (q.length > 50) q.splice(0, q.length - 50);
-    _saveWebQ(q);
-    pumpWebhookQueue();
-  }
-
-  let _webPumpTimer = null;
-
-  function pumpWebhookQueue() {
-    if (!tg.webhookEnabled || !tg.webhook) return;
-    const q = _loadWebQ();
-    if (!q.length) return;
-    const now = Date.now();
-    for (const item of q) {
-      if (_webInFlight[item.id]) continue;
-      if (now < (item.nextAt || 0)) continue;
-      _webInFlight[item.id] = true;
-      item.attempts = (item.attempts || 0) + 1;
-      _saveWebQ(q);
-      GM_xmlhttpRequest({
-        method: 'POST',
-        url: tg.webhook,
-        timeout: TG_SEND_TIMEOUT,
-        headers: { 'Content-Type': 'application/json' },
-        data: JSON.stringify({ content: item.msg }),
-        onload: r => {
-          delete _webInFlight[item.id];
-          if (r.status === 204 || r.status === 200) {
-            _removeWebQ(item.id);
-            console.log(APP_TAG, 'Webhook sent');
-            updateWebhookStatus('Webhook sent');
-          } else if (r.status === 429) {
-            let retryMs = 5000;
-            try { const j = JSON.parse(r.responseText); if (j.retry_after) retryMs = Math.ceil(j.retry_after * 1000) + 500; } catch(_){}
-            console.warn(APP_TAG, 'Webhook 429 — retry in', retryMs, 'ms');
-            updateWebhookStatus(`Webhook rate-limited, retry in ${Math.ceil(retryMs/1000)}s`);
-            _deferWebQ(item.id, Date.now() + retryMs);
-          } else {
-            console.error(APP_TAG, 'Webhook failed', r.status, r.statusText);
-            updateWebhookStatus(`Webhook failed: ${r.status}`);
-            _backoffOrDropWebQ(item.id, item.attempts);
-          }
-        },
-        onerror: () => { delete _webInFlight[item.id]; console.error(APP_TAG, 'Webhook error'); updateWebhookStatus('Webhook error'); _backoffOrDropWebQ(item.id, item.attempts); },
-        ontimeout: () => { delete _webInFlight[item.id]; console.error(APP_TAG, 'Webhook timeout'); updateWebhookStatus('Webhook timeout'); _backoffOrDropWebQ(item.id, item.attempts); }
-      });
-    }
-  }
-
-  function startWebhookPump() {
-    if (_webPumpTimer) return;
-    pumpWebhookQueue();
-    _webPumpTimer = setInterval(pumpWebhookQueue, 3000);
+    if (tgMsgOn[key] === false) return;
+    sendTg(message);
   }
 
   /* === TELEGRAM DELIVERY QUEUE (reliable send) ===
@@ -992,6 +875,12 @@
     _tgPumpTimer = setInterval(pumpTgQueue, 3000);
   }
 
+  function sendTgRepeat(msg, count=5, gap=1500, label='alert') {
+    const n = Math.max(1, Math.min(10, count));
+    for (let i = 0; i < n; i++)
+      setTimeout(() => { console.log(APP_TAG, `${label} ${i+1}/${n}`); sendTg(msg); }, i * gap);
+  }
+
   /* === CRITICAL ALERT QUEUE (reload-proof) ===
    * sendTgRepeat schedules its repeats with setTimeout, which are DESTROYED when
    * Jarvis navigates between pages — so a 5x burst could deliver only 2 before a
@@ -1040,7 +929,7 @@
     const now = Date.now();
     for (const a of q) {
       if (a.remaining > 0 && now >= a.nextAt) {
-        tgMsg(a.key, a.msg);
+        sendTg(a.msg);
         a.remaining--;
         if (a.remaining > 0) {
           a.nextAt = now + a.gapMs;                 // continue the quick burst
@@ -1107,56 +996,8 @@
 
   function testTg() {
     if (!tg.token || !tg.chat) return alert('Set Bot Token and Chat ID first');
-    sendTg(`🤖 <b>${APP_NAME} ${APP_VERSION}</b>\nTelegram working!\nAlerts: captcha, messages, staff, logout, health`);
+    tgMsg('startup', `🤖 <b>${APP_NAME} ${APP_VERSION}</b>\nTelegram working!\nAlerts: captcha, messages, staff, logout, health`);
     alert('Test sent — check Telegram');
-  }
-
-  function testWebhook() {
-    if (!tg.webhook) return alert('Set Webhook URL first');
-    if (!tg.webhookEnabled) return alert('Enable webhook first');
-    updateWebhookStatus('Sending webhook test...');
-    sendWebhook(`🤖 <b>${APP_NAME} ${APP_VERSION}</b>\nWebhook working!`);
-    alert('Webhook test sent — check the target endpoint');
-  }
-
-  function restorePendingAction() {
-    if (!resume.on) return;
-    if (st.acting || st.pending) return;
-    const action = st.action;
-    if (!action) return;
-    if (['crime','gta','booze'].includes(action)) {
-      st.pending = action;
-      st.refresh = true;
-      saveSt();
-      setStatus(`Restoring pending ${action}`);
-    }
-  }
-
-  /* === ANTI-BOT / SOFT BAN DETECTION === */
-
-  let _softBanSent = false;
-  function checkSoftBan() {
-    const txt = (document.body.textContent || '').toLowerCase();
-    const patterns = [
-      /soft[- ]ban/, /softban/, /temporarily (?:blocked|restricted|banned)/,
-      /you have been banned/, /your account has been suspended/, /unusual (?:activity|behaviour)/,
-      /action blocked/, /not allowed to perform this action/, /your action has been blocked/
-    ];
-    if (patterns.some(re => re.test(txt))) {
-      if (!_softBanSent) {
-        tgMsg('softban', `⛔ <b>SOFT-BAN / BLOCKED</b>\n${st.player||'?'} | ${fmtDate()}\nDetected anti-bot/soft-ban text — automation paused`);
-        queueCriticalAlert('softban', `⛔ <b>SOFT-BAN / BLOCKED</b>\n${st.player||'?'} | ${fmtDate()}\nDetected anti-bot/soft-ban text — automation paused`, 5, 2000, 10, 180000);
-        _softBanSent = true;
-      }
-      paused = true;
-      return true;
-    }
-    if (_softBanSent) {
-      _softBanSent = false;
-      clearCriticalAlert('softban');
-      if (paused) { paused = false; setStatus('Soft-ban cleared'); }
-    }
-    return false;
   }
 
   /* === ONLINE WATCH CONFIG === */
@@ -1643,7 +1484,7 @@
   let _lastHealthAlert = 0;
 
   function checkLowHp() {
-    if (!hasNotifyTarget()) return false;
+    if (!tg.enabled) return false;
     const hp = getHp();
     const now = Date.now();
     if (hp < cfg.minHealth) {
@@ -1657,34 +1498,11 @@
   }
 
   let _captchaSent = false;
-  let _scriptBanSent = false;
-
-  function parseScriptCheckBan() {
-    const body = document.body ? document.body.textContent || '' : '';
-    const banMatch = body.match(/unbanned at\s+(\d{1,2})-(\d{1,2})-(\d{4})\s+(\d{1,2}):(\d{2}):(\d{2})/i);
-    if (!banMatch) return null;
-    const [, d, mo, y, h, mi, s] = banMatch;
-    const ts = new Date(Number(y), Number(mo) - 1, Number(d), Number(h), Number(mi), Number(s)).getTime();
-    return Number.isNaN(ts) ? null : ts;
-  }
-
   function checkCaptcha() {
-    const banTs = parseScriptCheckBan();
-    if (banTs) {
-      if (!_scriptBanSent) {
-        const until = new Date(banTs).toLocaleString('en-GB');
-        tgMsg('scriptTest', `🚨 <b>SCRIPT CHECK BANNED</b>\n${st.player||'?'} | ${fmtDate()}\nPaused until ${until}\nDo not auto-submit while banned`);
-        queueCriticalAlert('scriptcheck:ban', `🚨 <b>SCRIPT CHECK BANNED</b>\n${st.player||'?'} | ${fmtDate()}\nPaused until ${until}\nDo not auto-submit while banned`, 5, 2000, 10, 180000);
-        _scriptBanSent = true;
-      }
-      return true;
-    }
-    _scriptBanSent = false;
-
-    if (!tg.scriptTest) return false;
+    if (!tg.enabled || !tg.captcha) return false;
     if (isOnCaptcha()) {
       if (!_captchaSent) {
-        tgMsg('scriptTest', `⚠️ <b>SCRIPT CHECK</b>\n${st.player||'?'} | ${fmtDate()}\nAutomation paused`);
+        sendTg(`⚠️ <b>SCRIPT CHECK</b>\n${st.player||'?'} | ${fmtDate()}\nAutomation paused`);
         _captchaSent = true;
       }
       return true;
@@ -1695,7 +1513,7 @@
 
   let _lastMsgCt = 0;
   function checkNewMsgs() {
-    if (!tg.enabled && !tg.webhookEnabled && !st.autoOC && !st.autoDTM) return false;
+    if (!tg.enabled && !st.autoOC && !st.autoDTM) return false;
     let has = false, ct = 0;
     const sp = document.querySelector('span[id*="imgMessages"]');
     if (sp) {
@@ -1717,7 +1535,7 @@
 
   let _sqlSent = false;
   function checkSqlCheck() {
-    if (!tg.sqlCheck) return false;
+    if (!tg.enabled || !tg.sqlCheck) return false;
     const div = document.querySelector('div.NewGridTitle');
     const hasImp = div && div.textContent.includes('Important message');
     const txt = document.body.textContent;
@@ -1744,12 +1562,9 @@
     }
     if (!hasImp && !hasSql) {
       if (_sqlSent) {
-        // Clear ALL pending sqlcheck alerts — not just the last seen question.
-        // If two distinct questions appeared before the check was answered, each
-        // queued under its own hash key; cbSqlCheckFp only stored the last one,
-        // so a single-key clear would leave earlier questions firing for ~30 min.
-        const q = _loadCrit().filter(a => !a.key.startsWith('sqlcheck:'));
-        _saveCrit(q);
+        // Check has cleared — stop chasing it (whatever the last fingerprint was)
+        const lastSig = localStorage.getItem('cbSqlCheckFp') || '';
+        if (lastSig) clearCriticalAlert('sqlcheck:' + contentHash(lastSig));
       }
       _sqlSent = false;
       localStorage.removeItem('cbSqlCheckFp');
@@ -1760,7 +1575,7 @@
 
   let _logoutSent = false;
   function checkLogout() {
-    if (!tg.logout) return false;
+    if (!tg.enabled || !tg.logout) return false;
     const url = window.location.href.toLowerCase();
     if (!url.includes('login.aspx')) {
       if (url.includes('/authenticated/')) { _logoutSent = false; loClearState(); stopFlash(); }
@@ -3415,42 +3230,26 @@
   }
 
   function doJailbreak() {
-    if (!st.jail) { console.log('[JB][JAIL] blocked: st.jail=false'); return; }
-    if (st.acting) { console.log('[JB][JAIL] blocked: st.acting=true action='+st.action); return; }
-    if (st.inJail) { console.log('[JB][JAIL] blocked: st.inJail=true'); return; }
-    if (paused)    { console.log('[JB][JAIL] blocked: paused'); return; }
+    if (!st.jail || st.acting || st.inJail || paused) return;
     if (jailLimitReached()) {
-      console.log('[JB][JAIL] blocked: daily limit reached');
+      // Safety: should already be off, but double-check
       if (st.jail) { st.jail = false; saveSt(); }
       return;
     }
     const now = Date.now();
+    if (!cooldownElapsed('jail', st.lastJail, cfg.jailInt)) return;
     if (curPage() !== 'jail') { safeNav('/authenticated/jail.aspx?'+Date.now()); return; }
-    // Use href-based selector (matches the game's __doPostBack href pattern).
-    // No cooldown gate here — the 3s jailRdy in the main loop already controls
-    // visit frequency; adding a second gate caused jail to silently stall for minutes.
-    const links = [...document.querySelectorAll('a')].filter(a => {
-      const href = a.getAttribute('href') || '';
-      return href.includes('btnBreak') &&
-             !a.hasAttribute('disabled') &&
-             (a.getAttribute('aria-disabled') || '').toLowerCase() !== 'true' &&
-             a.offsetParent !== null;
-    });
+    const links = [...document.querySelectorAll('a[id*="btnBreak"]')].filter(a => !a.hasAttribute('disabled') && a.href && a.href.includes('javascript:'));
     if (links.length > 0) {
-      console.log(`[JB][JAIL] Clicking — ${links.length} break link(s) found`);
       st.acting = true; st.action = 'jailbreak'; GM_setValue('cbActStart', now);
       snapshotXP('jail');
       links[Math.floor(Math.random()*links.length)].click();
+      // This is a real attempt (success or fail) — count it
       incJailCount();
       updateJailCountUI();
-      st.lastJail = now; saveSt();
+      st.lastJail = now; markActed('jail', cfg.jailInt); saveSt();
       setTimeout(() => { st.acting = false; st.action = ''; GM_setValue('cbActStart',0); safeNav('/authenticated/jail.aspx?'+Date.now()); }, 500 + Math.floor(Math.random()*400));
-    } else {
-      const allJs = document.querySelectorAll('a[href*="javascript:"]').length;
-      const anyBreak = [...document.querySelectorAll('a,button')].filter(e => /break/i.test(e.id+e.textContent)).map(e => e.tagName+'#'+e.id+'['+e.textContent.trim().slice(0,15)+']');
-      console.log(`[JB][JAIL] No break links. JS-href anchors on page: ${allJs}. Break-related els:`, anyBreak);
-      st.lastJail = now; saveSt();
-    }
+    } else { st.lastJail = now; markActed('jail', cfg.jailInt); saveSt(); }
   }
 
   function checkHealth() {
@@ -4215,19 +4014,9 @@
               <label class="jb-switch"><input type="checkbox" id="jb-tg-sql" ${tg.sqlCheck?'checked':''}> SQL/Staff page</label>
               <label class="jb-switch"><input type="checkbox" id="jb-tg-logout" ${tg.logout?'checked':''}> Logout</label>
             </div>
-            <div class="jb-grid jb-mb">
-              <label class="jb-switch"><input type="checkbox" id="jb-tg-webhook-on" ${tg.webhookEnabled?'checked':''}> Webhook</label>
-            </div>
-            <div class="jb-mb">
-              <label class="jb-label">Webhook URL</label>
-              <input class="jb-input" id="jb-tg-webhook" value="${tg.webhook}" placeholder="Webhook URL">
-            </div>
-            <div class="jb-row" style="gap:4px;margin-bottom:4px">
-              <button class="jb-btn" id="jb-tg-test">Test Connection</button>
-              <button class="jb-btn jb-btn-outline" id="jb-webhook-test">Test Webhook</button>
-            </div>
+            <button class="jb-btn" id="jb-tg-test">Test Connection</button>
 
-            <div class="jb-sub" style="margin-top:8px;font-weight:600;color:var(--jb-text-sec)">Per-message Telegram alerts</div>
+            <div class="jb-sub" style="margin-top:8px;font-weight:600;color:var(--jb-text-sec)">Per-message alerts</div>
             <div class="jb-row" style="gap:4px;margin-bottom:4px">
               <button class="jb-btn jb-btn-outline" id="jb-tgmsg-all" style="flex:1;padding:2px;font-size:9px">All On</button>
               <button class="jb-btn jb-btn-outline" id="jb-tgmsg-none" style="flex:1;padding:2px;font-size:9px">All Off</button>
@@ -4237,18 +4026,6 @@
                 ${TG_MSGS.map(m => `<label class="jb-switch" style="font-size:10px"><input type="checkbox" class="jb-tgmsg-cb" data-key="${m.key}" ${tgMsgOn[m.key]?'checked':''}> ${m.label}</label>`).join('')}
               </div>
             </div>
-
-            <div class="jb-sub" style="margin-top:12px;font-weight:600;color:var(--jb-text-sec)">Per-message Webhook alerts</div>
-            <div class="jb-row" style="gap:4px;margin-bottom:4px">
-              <button class="jb-btn jb-btn-outline" id="jb-webhookmsg-all" style="flex:1;padding:2px;font-size:9px">Webhook All On</button>
-              <button class="jb-btn jb-btn-outline" id="jb-webhookmsg-none" style="flex:1;padding:2px;font-size:9px">Webhook All Off</button>
-            </div>
-            <div style="background:var(--jb-surface-alt);border-radius:3px;padding:6px;max-height:180px;overflow-y:auto">
-              <div class="jb-grid" id="jb-webhookmsg-grid">
-                ${TG_MSGS.map(m => `<label class="jb-switch" style="font-size:10px"><input type="checkbox" class="jb-webhookmsg-cb" data-key="${m.key}" ${webhookMsgOn[m.key]?'checked':''}> ${m.label}</label>`).join('')}
-              </div>
-            </div>
-            <div class="jb-sub jb-mb" id="jb-tg-webhook-status" style="font-size:10px;color:var(--jb-text-ter);margin-top:4px">${webhookStatus}</div>
 
             <hr class="jb-sep">
             <div class="jb-sect-title">Logout Alerts</div>
@@ -4333,6 +4110,7 @@
         </div>
       </div>
 
+      <div class="jb-modal-bg" id="jb-wl-backdrop" style="display:none"></div>
       <div class="jb-modal" id="jb-wl-modal">
         <div class="jb-modal-content" style="width:280px">
           <div class="jb-modal-head"><span>OC/DTM Whitelist</span><button class="jb-hbtn" id="jb-wl-close">✕</button></div>
@@ -4618,10 +4396,7 @@
     function closeModal() { modal.classList.remove('open'); backdrop.style.display = 'none'; paused = false; saveSt(); }
     _shadow.querySelector('#jb-settings-btn').addEventListener('click', openModal);
     _shadow.querySelector('#jb-modal-close').addEventListener('click', closeModal);
-    backdrop.addEventListener('click', () => {
-      closeModal();
-      ['#jb-wl-modal','#jb-ow-modal','#jb-oc-modal','#jb-dtm-modal','#jb-xp-modal'].forEach(id => closeModal2(id));
-    });
+    backdrop.addEventListener('click', closeModal);
 
     // Settings inputs
     _shadow.querySelector('#jb-login-user').addEventListener('input', e => { LOGIN.user = e.target.value.trim(); GM_setValue('cbLoginUser', LOGIN.user); });
@@ -4719,10 +4494,7 @@
     _shadow.querySelector('#jb-tg-staff').addEventListener('change', e => { tg.staffMail = e.target.checked; saveTg(); });
     _shadow.querySelector('#jb-tg-sql').addEventListener('change', e => { tg.sqlCheck = e.target.checked; saveTg(); });
     _shadow.querySelector('#jb-tg-logout').addEventListener('change', e => { tg.logout = e.target.checked; saveTg(); });
-    _shadow.querySelector('#jb-tg-webhook-on').addEventListener('change', e => { tg.webhookEnabled = e.target.checked; saveTg(); updateWebhookStatus(tg.webhookEnabled ? 'Webhook enabled' : 'Webhook disabled'); });
-    _shadow.querySelector('#jb-tg-webhook').addEventListener('input', e => { tg.webhook = e.target.value.trim(); saveTg(); updateWebhookStatus(tg.webhook ? 'Webhook ready' : 'Webhook URL missing'); });
     _shadow.querySelector('#jb-tg-test').addEventListener('click', testTg);
-    _shadow.querySelector('#jb-webhook-test').addEventListener('click', testWebhook);
 
     // Per-message Telegram toggles
     _shadow.querySelectorAll('.jb-tgmsg-cb').forEach(cb => {
@@ -4745,27 +4517,6 @@
       setStatus('All TG messages off');
     });
 
-    // Per-message Webhook toggles
-    _shadow.querySelectorAll('.jb-webhookmsg-cb').forEach(cb => {
-      cb.addEventListener('change', e => {
-        const key = e.target.getAttribute('data-key');
-        webhookMsgOn[key] = e.target.checked;
-        saveWebhookMsgs();
-      });
-    });
-    _shadow.querySelector('#jb-webhookmsg-all').addEventListener('click', () => {
-      TG_MSGS.forEach(m => { webhookMsgOn[m.key] = true; });
-      saveWebhookMsgs();
-      _shadow.querySelectorAll('.jb-webhookmsg-cb').forEach(cb => { cb.checked = true; });
-      setStatus('All webhook messages on');
-    });
-    _shadow.querySelector('#jb-webhookmsg-none').addEventListener('click', () => {
-      TG_MSGS.forEach(m => { webhookMsgOn[m.key] = false; });
-      saveWebhookMsgs();
-      _shadow.querySelectorAll('.jb-webhookmsg-cb').forEach(cb => { cb.checked = false; });
-      setStatus('All webhook messages off');
-    });
-
     // Logout alerts
     _shadow.querySelector('#jb-lo-flash').addEventListener('change', e => { logoutAlert.tabFlash = e.target.checked; saveLogoutAlert(); });
     _shadow.querySelector('#jb-lo-notify').addEventListener('change', e => { logoutAlert.notify = e.target.checked; saveLogoutAlert(); if(e.target.checked) askNotifyPerm(); });
@@ -4782,9 +4533,7 @@
     _shadow.querySelector('#jb-reset-all').addEventListener('click', () => {
       if (confirm('Reset ALL settings?')) {
         localStorage.removeItem('cbMaster'); localStorage.removeItem('cbHeartbeat');
-        const keys = ['cbAutoCrime','cbAutoGta','cbAutoJail','cbAutoBooze','cbLastCrime','cbLastGta','cbLastJail','cbLastBooze','cbSelCrimes','cbSelGtas','cbPlayer','cbInJail','cbAction','cbPending','cbAutoOC','cbAutoDTM','cbAutoHealth','cbAutoGarage','cbAutoCrusher','cbCrusherOwned','cbLastGarage','cbLastHealth','cbLastJailCk','cbBuyHealth','cbMinimized','cbRefresh','cbTheme','cbNotifyReady','cbWhitelist','cbWlNames','cbCarCats','cbCreateOC','cbOcTrans','cbOcWeapon','cbOcExplo','cbOcSched','cbOcType','cbOcRepeat','cbOcLeft','cbTgWebhook','cbTgWebhookEnabled'];
-      const webhookKeys = TG_MSGS.map(m => 'cbWebhookMsg_'+m.key);
-      webhookKeys.forEach(k => keys.push(k));
+        const keys = ['cbAutoCrime','cbAutoGta','cbAutoJail','cbAutoBooze','cbLastCrime','cbLastGta','cbLastJail','cbLastBooze','cbSelCrimes','cbSelGtas','cbPlayer','cbInJail','cbAction','cbPending','cbAutoOC','cbAutoDTM','cbAutoHealth','cbAutoGarage','cbAutoCrusher','cbCrusherOwned','cbLastGarage','cbLastHealth','cbLastJailCk','cbBuyHealth','cbMinimized','cbRefresh','cbTheme','cbNotifyReady','cbWhitelist','cbWlNames','cbCarCats','cbCreateOC','cbOcTrans','cbOcWeapon','cbOcExplo','cbOcSched','cbOcType','cbOcRepeat','cbOcLeft'];
         keys.forEach(k => GM_setValue(k, undefined));
         alert('Reset complete — refreshing');
         setTimeout(() => window.location.reload(), 500);
@@ -5014,6 +4763,15 @@
   const OCADS_PATH = '/authenticated/ocads.aspx';
   const LS_DTM_LIST_DONE = 'cbDtmListDone';
   const LS_TRAVEL_PENDING = 'cbTravelPending';
+
+  // Check if we're currently in the hot city
+  function isInHot() {
+    const hot = getHot();
+    if (!hot) return false;
+    const cur = getCurCity();
+    if (!cur) return false;
+    return cur.toLowerCase().includes(hot.toLowerCase()) || hot.toLowerCase().includes(cur.toLowerCase());
+  }
 
   // Auto-travel to hot city via the travel page
   async function doAutoTravel() {
@@ -5562,22 +5320,18 @@
       const txt = (el.textContent || '').trim();
       if (!txt) return;
 
-      // TMN format: "DD-MM-YYYY HH:MM:SS" or "DD.MM.YYYY HH:MM:SS" or time-only "HH:MM:SS"
+      // TMN format: "DD-MM-YYYY HH:MM:SS" or "DD.MM.YYYY HH:MM:SS"
+      // Also handles time-only "HH:MM:SS" when the element shows just the time
       let dd, mm, yyyy, HH, MM, SS;
-      const mFull = txt.match(/(\d{1,2})[-.\/ ](\d{1,2})[-.\/ ](\d{4})\s+(\d{1,2}):(\d{2}):?(\d{2})?/);
-      if (mFull) {
-        [, dd, mm, yyyy, HH, MM, SS] = mFull;
+      const m = txt.match(/(\d{1,2})[-.\/ ](\d{1,2})[-.\/ ](\d{4})\s+(\d{1,2}):(\d{2}):?(\d{2})?/);
+      if (m) {
+        [, dd, mm, yyyy, HH, MM, SS] = m;
       } else {
         const mTime = txt.match(/^(\d{1,2}):(\d{2}):(\d{2})$/);
-        if (!mTime) {
-          console.log('[JB][TIME] Could not parse server time from:', txt);
-          return;
-        }
+        if (!mTime) { console.log('[JB][TIME] Could not parse server time from:', txt); return; }
         [, HH, MM, SS] = mTime;
-        // Derive the current Amsterdam date to pair with the parsed time
         const parts = new Intl.DateTimeFormat('en-GB', {
-          timeZone: 'Europe/Amsterdam',
-          year: 'numeric', month: '2-digit', day: '2-digit'
+          timeZone: 'Europe/Amsterdam', year: 'numeric', month: '2-digit', day: '2-digit'
         }).formatToParts(new Date());
         dd   = parts.find(p => p.type === 'day').value;
         mm   = parts.find(p => p.type === 'month').value;
@@ -5920,10 +5674,6 @@
 
     checkCaptcha(); checkNewMsgs(); checkLogout();
 
-    if (checkSoftBan()) {
-      setStatus('⛔ Soft ban detected — paused');
-      setTimeout(mainLoop, 10000); return;
-    }
     if (checkSqlCheck()) {
       paused = true; setStatus('⚠️ STAFF CHECK — paused');
       setTimeout(mainLoop, 10000); return;
@@ -6048,17 +5798,12 @@
       const now = Date.now();
       const pg = curPage();
 
-      // Diagnostic: log action-block state every tick so we can see what is blocking jail
-      console.log(`[JB][DIAG] act=${st.acting} inJail=${st.inJail} jail=${st.jail} crime=${st.crime} gta=${st.gta} booze=${st.booze} pend=${st.pending||'-'} pg=${pg}`);
-
       if (!st.crime && !st.gta && !st.booze && !st.jail && !st.garage && !st.health && !st.autoOC && !st.autoDTM) {
-        console.log('[JB][DIAG] → IDLE branch (all flags off)');
         if (now % 30000 < 2000) setStatus('Idle');
         setTimeout(mainLoop, 5000); return;
       }
 
       if (st.inJail) {
-        console.log('[JB][DIAG] → JAILED branch');
         if (now - st.lastJailCk > cfg.jailCheckInt*1000) {
           st.lastJailCk = now; saveSt();
           safeNav('/authenticated/jail.aspx?'+Date.now());
@@ -6077,16 +5822,11 @@
         const garageOd = st.garage && (now - st.lastGarage >= cfg.garageInt*1000);
         if (garageOd && pg === 'garage') doGarage();
 
-        // crime/gta/booze use cooldownElapsed() so they only win the priority chain
-        // when they will actually fire (raw interval + human cadence delay both elapsed).
-        // This gives jail its window: jailRdy stays true during the cadence dead-time
-        // between actions. jailRdy stays raw so the script checks jail every 3 seconds.
-        const crimeRdy = st.crime && cooldownElapsed('crime', st.lastCrime, cfg.crimeInt);
-        const gtaRdy   = st.gta   && cooldownElapsed('gta',   st.lastGta,   cfg.gtaInt);
-        const boozeRdy = st.booze && cooldownElapsed('booze', st.lastBooze, cfg.boozeInt);
-        const jailRdy  = st.jail  && (now - st.lastJail  >= cfg.jailInt*1000);
+        const crimeRdy = st.crime && (now - st.lastCrime >= cfg.crimeInt*1000);
+        const gtaRdy   = st.gta   && (now - st.lastGta >= cfg.gtaInt*1000);
+        const boozeRdy = st.booze && (now - st.lastBooze >= cfg.boozeInt*1000);
+        const jailRdy  = st.jail  && (now - st.lastJail >= cfg.jailInt*1000);
         const garageRdy= st.garage && (now - st.lastGarage >= cfg.garageInt*1000);
-        if (st.jail) console.log(`[JB][JAIL] chain: crimeRdy=${crimeRdy} gtaRdy=${gtaRdy} boozeRdy=${boozeRdy} jailRdy=${jailRdy} pg=${pg} inJail=${st.inJail} acting=${st.acting}`);
 
         if (crimeRdy && gtaRdy) {
           const ct = st.lastCrime+cfg.crimeInt*1000, gt = st.lastGta+cfg.gtaInt*1000;
@@ -6117,17 +5857,10 @@
     if (document.readyState === 'loading') { document.addEventListener('DOMContentLoaded', init); return; }
     tabs.check();
     buildUI();
-    updateWebhookStatus(tg.webhookEnabled ? (tg.webhook ? 'Webhook ready' : 'Webhook URL missing') : 'Webhook disabled');
     try { updateXpUI(); } catch(_){} // paint saved XP/rank straight away so it doesn't blank on load
     installXpInterceptor();
     startTgPump();
-    startWebhookPump();
     startCriticalPump();
-    restorePendingAction();
-    if (localStorage.getItem('cbScriptCheck') === '1' && resume.on) {
-      setStatus('Script Check resumed');
-      startScMonitor();
-    }
     startTimers();
     owStart();
     startWatchdog();
