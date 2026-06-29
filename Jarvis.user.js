@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Jarvis Bot 2000.193
+// @name         Jarvis Bot 2000.194
 // @namespace    http://tampermonkey.net/
-// @version      2000.193
-// @description  Jarvis Bot 2000.193 — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
+// @version      2000.194
+// @description  Jarvis Bot 2000.194 — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
 // @match        *://www.tmn2010.net/authenticated/*
@@ -32,7 +32,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.193
+/*  Jarvis Bot 2000.194
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -120,7 +120,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.193';
+  const APP_VERSION = '2000.194';
   const APP_TAG     = '[JB]';
 
   // Known staff accounts (profile IDs)
@@ -6048,12 +6048,17 @@
       const now = Date.now();
       const pg = curPage();
 
+      // Diagnostic: log action-block state every tick so we can see what is blocking jail
+      console.log(`[JB][DIAG] act=${st.acting} inJail=${st.inJail} jail=${st.jail} crime=${st.crime} gta=${st.gta} booze=${st.booze} pend=${st.pending||'-'} pg=${pg}`);
+
       if (!st.crime && !st.gta && !st.booze && !st.jail && !st.garage && !st.health && !st.autoOC && !st.autoDTM) {
+        console.log('[JB][DIAG] → IDLE branch (all flags off)');
         if (now % 30000 < 2000) setStatus('Idle');
         setTimeout(mainLoop, 5000); return;
       }
 
       if (st.inJail) {
+        console.log('[JB][DIAG] → JAILED branch');
         if (now - st.lastJailCk > cfg.jailCheckInt*1000) {
           st.lastJailCk = now; saveSt();
           safeNav('/authenticated/jail.aspx?'+Date.now());
