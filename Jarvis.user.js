@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Jarvis Bot 2000.189
+// @name         Jarvis Bot 2000.190
 // @namespace    http://tampermonkey.net/
-// @version      2000.189
-// @description  Jarvis Bot 2000.189 — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
+// @version      2000.190
+// @description  Jarvis Bot 2000.190 — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
 // @match        *://www.tmn2010.net/authenticated/*
@@ -32,7 +32,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.189
+/*  Jarvis Bot 2000.190
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -120,7 +120,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.189';
+  const APP_VERSION = '2000.190';
   const APP_TAG     = '[JB]';
 
   // Known staff accounts (profile IDs)
@@ -6062,21 +6062,10 @@
         const garageOd = st.garage && (now - st.lastGarage >= cfg.garageInt*1000);
         if (garageOd && pg === 'garage') doGarage();
 
-        // When already on jail page: attempt jailbreak BEFORE evaluating other priorities.
-        // Without this, a crime/gta/booze cadence expiring during the jail.aspx page load
-        // causes the loop to immediately redirect away before doJailbreak() is ever called.
-        if (pg === 'jail' && st.jail && !st.inJail) {
-          doJailbreak();
-          if (st.acting) { setTimeout(mainLoop, 1800+Math.floor(Math.random()*1400)); return; }
-        }
-
-        // Crime/GTA/booze use cooldownElapsed() so they don't block jail during their
-        // cadence wait window. Jail uses the raw 3-second interval so the script visits
-        // jail.aspx frequently; doJailbreak() handles its own cadence gate internally.
-        const crimeRdy = st.crime && cooldownElapsed('crime', st.lastCrime, cfg.crimeInt);
-        const gtaRdy   = st.gta   && cooldownElapsed('gta',   st.lastGta,   cfg.gtaInt);
-        const boozeRdy = st.booze && cooldownElapsed('booze', st.lastBooze, cfg.boozeInt);
-        const jailRdy  = st.jail  && (now - st.lastJail >= cfg.jailInt * 1000);
+        const crimeRdy = st.crime && (now - st.lastCrime >= cfg.crimeInt*1000);
+        const gtaRdy   = st.gta   && (now - st.lastGta   >= cfg.gtaInt*1000);
+        const boozeRdy = st.booze && (now - st.lastBooze >= cfg.boozeInt*1000);
+        const jailRdy  = st.jail  && (now - st.lastJail  >= cfg.jailInt*1000);
         const garageRdy= st.garage && (now - st.lastGarage >= cfg.garageInt*1000);
 
         if (crimeRdy && gtaRdy) {
@@ -6086,7 +6075,7 @@
         } else if (crimeRdy) { if(pg==='crimes') doCrime(); else safeNav('/authenticated/crimes.aspx?'+Date.now()); }
         else if (gtaRdy) { if(pg==='gta') doGta(); else safeNav('/authenticated/crimes.aspx?p=g&'+Date.now()); }
         else if (boozeRdy) { if(pg==='booze') doBooze(); else safeNav('/authenticated/crimes.aspx?p=b&'+Date.now()); }
-        else if (jailRdy && pg !== 'jail') { safeNav('/authenticated/jail.aspx?'+Date.now()); }
+        else if (jailRdy) { if(pg==='jail') doJailbreak(); else safeNav('/authenticated/jail.aspx?'+Date.now()); }
         else if (garageRdy) { if(pg==='garage') doGarage(); else safeNav('/authenticated/playerproperty.aspx?p=g&'+Date.now()); }
         else {
           const cr = Math.max(0, Math.ceil((cfg.crimeInt*1000-(now-st.lastCrime))/1000));
@@ -6130,6 +6119,11 @@
     else setStatus('⏸ Secondary tab');
 
     checkJailAny();
+
+    // Clear any excessively large jail cadence delay left by a misconfigured version.
+    // nextCooldownMs(3) for away mode peaks at ~23 min (1380 s). Anything above 25 min
+    // is definitely stale — reset to 0 so cooldownElapsed re-rolls a fresh value.
+    { const jd = GM_getValue('cbDly_jail', 0); if (jd > 1500000) GM_setValue('cbDly_jail', 0); }
 
     window.addEventListener('beforeunload', () => {
       tabs.release(); owStop();
