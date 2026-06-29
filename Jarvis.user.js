@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Jarvis Bot 2000.192
+// @name         Jarvis Bot 2000.193
 // @namespace    http://tampermonkey.net/
-// @version      2000.192
-// @description  Jarvis Bot 2000.192 — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
+// @version      2000.193
+// @description  Jarvis Bot 2000.193 — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
 // @match        *://www.tmn2010.net/authenticated/*
@@ -32,7 +32,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.192
+/*  Jarvis Bot 2000.193
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -120,7 +120,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.192';
+  const APP_VERSION = '2000.193';
   const APP_TAG     = '[JB]';
 
   // Known staff accounts (profile IDs)
@@ -3415,8 +3415,12 @@
   }
 
   function doJailbreak() {
-    if (!st.jail || st.acting || st.inJail || paused) return;
+    if (!st.jail) { console.log('[JB][JAIL] blocked: st.jail=false'); return; }
+    if (st.acting) { console.log('[JB][JAIL] blocked: st.acting=true action='+st.action); return; }
+    if (st.inJail) { console.log('[JB][JAIL] blocked: st.inJail=true'); return; }
+    if (paused)    { console.log('[JB][JAIL] blocked: paused'); return; }
     if (jailLimitReached()) {
+      console.log('[JB][JAIL] blocked: daily limit reached');
       if (st.jail) { st.jail = false; saveSt(); }
       return;
     }
@@ -6077,6 +6081,7 @@
         const boozeRdy = st.booze && cooldownElapsed('booze', st.lastBooze, cfg.boozeInt);
         const jailRdy  = st.jail  && (now - st.lastJail  >= cfg.jailInt*1000);
         const garageRdy= st.garage && (now - st.lastGarage >= cfg.garageInt*1000);
+        if (st.jail) console.log(`[JB][JAIL] chain: crimeRdy=${crimeRdy} gtaRdy=${gtaRdy} boozeRdy=${boozeRdy} jailRdy=${jailRdy} pg=${pg} inJail=${st.inJail} acting=${st.acting}`);
 
         if (crimeRdy && gtaRdy) {
           const ct = st.lastCrime+cfg.crimeInt*1000, gt = st.lastGta+cfg.gtaInt*1000;
