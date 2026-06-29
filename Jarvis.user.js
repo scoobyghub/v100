@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Jarvis Bot 2000.186
+// @name         Jarvis Bot 2000.187
 // @namespace    http://tampermonkey.net/
-// @version      2000.186
-// @description  Jarvis Bot 2000.186 — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
+// @version      2000.187
+// @description  Jarvis Bot 2000.187 — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
 // @match        *://www.tmn2010.net/authenticated/*
@@ -32,7 +32,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.186
+/*  Jarvis Bot 2000.187
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -120,7 +120,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.186';
+  const APP_VERSION = '2000.187';
   const APP_TAG     = '[JB]';
 
   // Known staff accounts (profile IDs)
@@ -3426,6 +3426,7 @@
     if (curPage() !== 'jail') { safeNav('/authenticated/jail.aspx?'+Date.now()); return; }
     const links = [...document.querySelectorAll('a[id*="btnBreak"]')].filter(a => !a.hasAttribute('disabled') && a.href && a.href.includes('javascript:'));
     if (links.length > 0) {
+      console.log(`[JB][JAIL] Clicking — ${links.length} break link(s) found`);
       st.acting = true; st.action = 'jailbreak'; GM_setValue('cbActStart', now);
       snapshotXP('jail');
       links[Math.floor(Math.random()*links.length)].click();
@@ -3434,7 +3435,12 @@
       updateJailCountUI();
       st.lastJail = now; markActed('jail', cfg.jailInt); saveSt();
       setTimeout(() => { st.acting = false; st.action = ''; GM_setValue('cbActStart',0); safeNav('/authenticated/jail.aspx?'+Date.now()); }, 500 + Math.floor(Math.random()*400));
-    } else { st.lastJail = now; markActed('jail', cfg.jailInt); saveSt(); }
+    } else {
+      const allJs = document.querySelectorAll('a[href*="javascript:"]').length;
+      const anyBreak = [...document.querySelectorAll('a,button')].filter(e => /break/i.test(e.id+e.textContent)).map(e => e.tagName+'#'+e.id+'['+e.textContent.trim().slice(0,15)+']');
+      console.log(`[JB][JAIL] No break links matched selector. JS-href anchors: ${allJs}. Break-related els:`, anyBreak);
+      st.lastJail = now; markActed('jail', cfg.jailInt); saveSt();
+    }
   }
 
   function checkHealth() {
@@ -6056,10 +6062,12 @@
         const garageOd = st.garage && (now - st.lastGarage >= cfg.garageInt*1000);
         if (garageOd && pg === 'garage') doGarage();
 
-        const crimeRdy = st.crime && (now - st.lastCrime >= cfg.crimeInt*1000);
-        const gtaRdy   = st.gta   && (now - st.lastGta >= cfg.gtaInt*1000);
-        const boozeRdy = st.booze && (now - st.lastBooze >= cfg.boozeInt*1000);
-        const jailRdy  = st.jail  && (now - st.lastJail >= cfg.jailInt*1000);
+        // Use cooldownElapsed() (cadence-aware) not raw interval, so an action waiting for
+        // its human-cadence delay doesn't block lower-priority actions (especially jail).
+        const crimeRdy = st.crime && cooldownElapsed('crime', st.lastCrime, cfg.crimeInt);
+        const gtaRdy   = st.gta   && cooldownElapsed('gta',   st.lastGta,   cfg.gtaInt);
+        const boozeRdy = st.booze && cooldownElapsed('booze', st.lastBooze, cfg.boozeInt);
+        const jailRdy  = st.jail  && cooldownElapsed('jail',  st.lastJail,  cfg.jailInt);
         const garageRdy= st.garage && (now - st.lastGarage >= cfg.garageInt*1000);
 
         if (crimeRdy && gtaRdy) {
