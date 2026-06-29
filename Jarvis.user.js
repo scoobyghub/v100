@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Jarvis Bot 2000.191
+// @name         Jarvis Bot 2000.192
 // @namespace    http://tampermonkey.net/
-// @version      2000.191
-// @description  Jarvis Bot 2000.191 — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
+// @version      2000.192
+// @description  Jarvis Bot 2000.192 — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
 // @match        *://www.tmn2010.net/authenticated/*
@@ -32,7 +32,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.191
+/*  Jarvis Bot 2000.192
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -120,7 +120,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.191';
+  const APP_VERSION = '2000.192';
   const APP_TAG     = '[JB]';
 
   // Known staff accounts (profile IDs)
@@ -6068,9 +6068,13 @@
         const garageOd = st.garage && (now - st.lastGarage >= cfg.garageInt*1000);
         if (garageOd && pg === 'garage') doGarage();
 
-        const crimeRdy = st.crime && (now - st.lastCrime >= cfg.crimeInt*1000);
-        const gtaRdy   = st.gta   && (now - st.lastGta   >= cfg.gtaInt*1000);
-        const boozeRdy = st.booze && (now - st.lastBooze >= cfg.boozeInt*1000);
+        // crime/gta/booze use cooldownElapsed() so they only win the priority chain
+        // when they will actually fire (raw interval + human cadence delay both elapsed).
+        // This gives jail its window: jailRdy stays true during the cadence dead-time
+        // between actions. jailRdy stays raw so the script checks jail every 3 seconds.
+        const crimeRdy = st.crime && cooldownElapsed('crime', st.lastCrime, cfg.crimeInt);
+        const gtaRdy   = st.gta   && cooldownElapsed('gta',   st.lastGta,   cfg.gtaInt);
+        const boozeRdy = st.booze && cooldownElapsed('booze', st.lastBooze, cfg.boozeInt);
         const jailRdy  = st.jail  && (now - st.lastJail  >= cfg.jailInt*1000);
         const garageRdy= st.garage && (now - st.lastGarage >= cfg.garageInt*1000);
 
