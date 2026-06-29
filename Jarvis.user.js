@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Jarvis Bot 2000.188
+// @name         Jarvis Bot 2000.189
 // @namespace    http://tampermonkey.net/
-// @version      2000.188
-// @description  Jarvis Bot 2000.188 — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
+// @version      2000.189
+// @description  Jarvis Bot 2000.189 — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
 // @match        *://www.tmn2010.net/authenticated/*
@@ -32,7 +32,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.188
+/*  Jarvis Bot 2000.189
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -120,7 +120,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.188';
+  const APP_VERSION = '2000.189';
   const APP_TAG     = '[JB]';
 
   // Known staff accounts (profile IDs)
@@ -6070,12 +6070,13 @@
           if (st.acting) { setTimeout(mainLoop, 1800+Math.floor(Math.random()*1400)); return; }
         }
 
-        // Use cooldownElapsed() (cadence-aware) not raw interval, so an action waiting for
-        // its human-cadence delay doesn't block lower-priority actions (especially jail).
+        // Crime/GTA/booze use cooldownElapsed() so they don't block jail during their
+        // cadence wait window. Jail uses the raw 3-second interval so the script visits
+        // jail.aspx frequently; doJailbreak() handles its own cadence gate internally.
         const crimeRdy = st.crime && cooldownElapsed('crime', st.lastCrime, cfg.crimeInt);
         const gtaRdy   = st.gta   && cooldownElapsed('gta',   st.lastGta,   cfg.gtaInt);
         const boozeRdy = st.booze && cooldownElapsed('booze', st.lastBooze, cfg.boozeInt);
-        const jailRdy  = st.jail  && cooldownElapsed('jail',  st.lastJail,  cfg.jailInt);
+        const jailRdy  = st.jail  && (now - st.lastJail >= cfg.jailInt * 1000);
         const garageRdy= st.garage && (now - st.lastGarage >= cfg.garageInt*1000);
 
         if (crimeRdy && gtaRdy) {
