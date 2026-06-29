@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Jarvis Bot 2000.190
+// @name         Jarvis Bot 2000.191
 // @namespace    http://tampermonkey.net/
-// @version      2000.190
-// @description  Jarvis Bot 2000.190 — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
+// @version      2000.191
+// @description  Jarvis Bot 2000.191 — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
 // @match        *://www.tmn2010.net/authenticated/*
@@ -32,7 +32,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.190
+/*  Jarvis Bot 2000.191
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -120,7 +120,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.190';
+  const APP_VERSION = '2000.191';
   const APP_TAG     = '[JB]';
 
   // Known staff accounts (profile IDs)
@@ -3417,29 +3417,35 @@
   function doJailbreak() {
     if (!st.jail || st.acting || st.inJail || paused) return;
     if (jailLimitReached()) {
-      // Safety: should already be off, but double-check
       if (st.jail) { st.jail = false; saveSt(); }
       return;
     }
     const now = Date.now();
-    if (!cooldownElapsed('jail', st.lastJail, cfg.jailInt)) return;
     if (curPage() !== 'jail') { safeNav('/authenticated/jail.aspx?'+Date.now()); return; }
-    const links = [...document.querySelectorAll('a[id*="btnBreak"]')].filter(a => !a.hasAttribute('disabled') && a.href && a.href.includes('javascript:'));
+    // Use href-based selector (matches the game's __doPostBack href pattern).
+    // No cooldown gate here — the 3s jailRdy in the main loop already controls
+    // visit frequency; adding a second gate caused jail to silently stall for minutes.
+    const links = [...document.querySelectorAll('a')].filter(a => {
+      const href = a.getAttribute('href') || '';
+      return href.includes('btnBreak') &&
+             !a.hasAttribute('disabled') &&
+             (a.getAttribute('aria-disabled') || '').toLowerCase() !== 'true' &&
+             a.offsetParent !== null;
+    });
     if (links.length > 0) {
       console.log(`[JB][JAIL] Clicking — ${links.length} break link(s) found`);
       st.acting = true; st.action = 'jailbreak'; GM_setValue('cbActStart', now);
       snapshotXP('jail');
       links[Math.floor(Math.random()*links.length)].click();
-      // This is a real attempt (success or fail) — count it
       incJailCount();
       updateJailCountUI();
-      st.lastJail = now; markActed('jail', cfg.jailInt); saveSt();
+      st.lastJail = now; saveSt();
       setTimeout(() => { st.acting = false; st.action = ''; GM_setValue('cbActStart',0); safeNav('/authenticated/jail.aspx?'+Date.now()); }, 500 + Math.floor(Math.random()*400));
     } else {
       const allJs = document.querySelectorAll('a[href*="javascript:"]').length;
       const anyBreak = [...document.querySelectorAll('a,button')].filter(e => /break/i.test(e.id+e.textContent)).map(e => e.tagName+'#'+e.id+'['+e.textContent.trim().slice(0,15)+']');
-      console.log(`[JB][JAIL] No break links matched selector. JS-href anchors: ${allJs}. Break-related els:`, anyBreak);
-      st.lastJail = now; markActed('jail', cfg.jailInt); saveSt();
+      console.log(`[JB][JAIL] No break links. JS-href anchors on page: ${allJs}. Break-related els:`, anyBreak);
+      st.lastJail = now; saveSt();
     }
   }
 
@@ -6119,11 +6125,6 @@
     else setStatus('⏸ Secondary tab');
 
     checkJailAny();
-
-    // Clear any excessively large jail cadence delay left by a misconfigured version.
-    // nextCooldownMs(3) for away mode peaks at ~23 min (1380 s). Anything above 25 min
-    // is definitely stale — reset to 0 so cooldownElapsed re-rolls a fresh value.
-    { const jd = GM_getValue('cbDly_jail', 0); if (jd > 1500000) GM_setValue('cbDly_jail', 0); }
 
     window.addEventListener('beforeunload', () => {
       tabs.release(); owStop();
