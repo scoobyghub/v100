@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Jarvis Bot 2000.185
+// @name         Jarvis Bot 2000.186
 // @namespace    http://tampermonkey.net/
-// @version      2000.185
-// @description  Jarvis Bot 2000.185 — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
+// @version      2000.186
+// @description  Jarvis Bot 2000.186 — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
 // @match        *://www.tmn2010.net/authenticated/*
@@ -32,7 +32,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.185
+/*  Jarvis Bot 2000.186
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -120,7 +120,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.185';
+  const APP_VERSION = '2000.186';
   const APP_TAG     = '[JB]';
 
   // Known staff accounts (profile IDs)
@@ -5546,14 +5546,27 @@
       const txt = (el.textContent || '').trim();
       if (!txt) return;
 
-      // TMN format: "DD-MM-YYYY HH:MM:SS" or "DD.MM.YYYY HH:MM:SS"
-      const m = txt.match(/(\d{1,2})[-.\/ ](\d{1,2})[-.\/ ](\d{4})\s+(\d{1,2}):(\d{2}):?(\d{2})?/);
-      if (!m) {
-        console.log('[JB][TIME] Could not parse server time from:', txt);
-        return;
+      // TMN format: "DD-MM-YYYY HH:MM:SS" or "DD.MM.YYYY HH:MM:SS" or time-only "HH:MM:SS"
+      let dd, mm, yyyy, HH, MM, SS;
+      const mFull = txt.match(/(\d{1,2})[-.\/ ](\d{1,2})[-.\/ ](\d{4})\s+(\d{1,2}):(\d{2}):?(\d{2})?/);
+      if (mFull) {
+        [, dd, mm, yyyy, HH, MM, SS] = mFull;
+      } else {
+        const mTime = txt.match(/^(\d{1,2}):(\d{2}):(\d{2})$/);
+        if (!mTime) {
+          console.log('[JB][TIME] Could not parse server time from:', txt);
+          return;
+        }
+        [, HH, MM, SS] = mTime;
+        // Derive the current Amsterdam date to pair with the parsed time
+        const parts = new Intl.DateTimeFormat('en-GB', {
+          timeZone: 'Europe/Amsterdam',
+          year: 'numeric', month: '2-digit', day: '2-digit'
+        }).formatToParts(new Date());
+        dd   = parts.find(p => p.type === 'day').value;
+        mm   = parts.find(p => p.type === 'month').value;
+        yyyy = parts.find(p => p.type === 'year').value;
       }
-
-      const [, dd, mm, yyyy, HH, MM, SS] = m;
       // TMN runs on Amsterdam time (Europe/Amsterdam = CET in winter / CEST in summer).
       // Build the timestamp as Amsterdam-local: try +02:00 (CEST), verify it round-trips
       // to the same Amsterdam wall-clock hour, else fall back to +01:00 (CET). This is the
