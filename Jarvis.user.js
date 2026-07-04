@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Jarvis Bot 2000.201
+// @name         Jarvis Bot 2000.195
 // @namespace    http://tampermonkey.net/
-// @version      2000.201
-// @description  Jarvis Bot 2000.201 — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
+// @version      2000.195
+// @description  Jarvis Bot 2000.195 — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
 // @match        *://www.tmn2010.net/authenticated/*
@@ -31,7 +31,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.201
+/*  Jarvis Bot 2000.195
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -111,7 +111,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.201';
+  const APP_VERSION = '2000.195';
   const APP_TAG     = '[JB]';
 
   // Known staff accounts (profile IDs)
@@ -812,40 +812,6 @@
   let _tgInFlight = {};   // in-memory per-page; resets on load so interrupted items retry
   let _tgPumpTimer = null;
 
-  /* === STAFF-CHECK HARD LOCK ===
-   * A staff/script check on screen means: any further usage (including a page
-   * navigation or reload, or even a background fetch) is bannable until you've
-   * replied in-game. So when a check is detected we do NOT keep ticking and
-   * re-checking — we STOP the main loop entirely and every page-touching timer,
-   * leaving only the already-independent Telegram alert pumps running. The lock is
-   * persisted, so a page load won't restart automation. Only the on-panel Restart
-   * button clears it (you decide when the check is genuinely answered).
-   */
-  const LS_STAFF_LOCK = 'cbStaffLock';
-  function isStaffLocked() { return localStorage.getItem(LS_STAFF_LOCK) === '1'; }
-  function engageStaffLock() {
-    localStorage.setItem(LS_STAFF_LOCK, '1');
-    paused = true; _sqlPaused = true;
-    // Stop every page-touching timer so nothing navigates, reloads, or fetches.
-    try { if (_timerDispIv) { clearInterval(_timerDispIv); _timerDispIv = null; } } catch(_){}
-    try { if (_timerFetchIv) { clearInterval(_timerFetchIv); _timerFetchIv = null; } } catch(_){}
-    try { owStop(); } catch(_){}
-    setStatus('🔒 LOCKED — staff check. Reply in-game, then press Restart.');
-    showRestartButton(true);
-    // Telegram alert pumps keep running (independent setInterval) — you still get pinged.
-  }
-  function releaseStaffLock() {
-    localStorage.removeItem(LS_STAFF_LOCK);
-    paused = false; _sqlPaused = false;
-    _sqlSent = false;
-    localStorage.removeItem('cbSqlCheckFp');
-    showRestartButton(false);
-    setStatus('▶️ Restarted by user');
-    try { startTimers(); } catch(_){}
-    try { owStart(); } catch(_){}
-    setTimeout(mainLoop, 800);
-  }
-
   function _loadTgQ() {
     try { const q = JSON.parse(localStorage.getItem(LS_TGQ) || '[]'); return Array.isArray(q) ? q : []; }
     catch(_) { return []; }
@@ -1502,19 +1468,6 @@
 
   let _shadow = null;
 
-  // Show/hide the manual Restart button (used by the staff-check hard lock). Wires
-  // its click to releaseStaffLock on first show (idempotent).
-  function showRestartButton(show) {
-    if (!_shadow) return;
-    const btn = _shadow.querySelector('#jb-restart-btn');
-    if (!btn) return;
-    btn.style.display = show ? 'block' : 'none';
-    if (show && !btn._jbWired) {
-      btn._jbWired = true;
-      btn.addEventListener('click', () => { try { releaseStaffLock(); } catch(_){} });
-    }
-  }
-
   function setStatus(msg) {
     if (_shadow) {
       const el = _shadow.querySelector('#jb-status');
@@ -1581,11 +1534,8 @@
   }
 
   let _sqlSent = false;
-  let _sqlPaused = false; // true only when WE paused specifically for a staff check
   function checkSqlCheck() {
-    // Detection + pause run ALWAYS, independent of Telegram. Gaining any XP after an
-    // unanswered staff check = ban, so the pause must never depend on alerting being
-    // on. Telegram settings only gate whether the ALERT is sent (below).
+    if (!tg.enabled || !tg.sqlCheck) return false;
     const div = document.querySelector('div.NewGridTitle');
     const hasImp = div && div.textContent.includes('Important message');
     const txt = document.body.textContent;
@@ -1601,14 +1551,13 @@
       // between two questions (A→B→A) won't re-alert on A's reappearance — each
       // distinct question alerts exactly once. Borrowed from the moderator script.
       const sig = q.substring(0,120);
-      localStorage.setItem('cbSqlCheckFp', sig); // always record, so clear-on-gone works with TG off
-      if (tg.enabled && tg.sqlCheck && seenOnce('sqlcheck', contentHash(sig), 30)) {
+      if (seenOnce('sqlcheck', contentHash(sig), 30)) {
+        localStorage.setItem('cbSqlCheckFp', sig); // keep for the clear-on-gone logic below
         queueCriticalAlert('sqlcheck:' + contentHash(sig),
           `❗ <b>STAFF CHECK</b>\n${st.player||'?'} | ${fmtDate()}\n${esc(sig)}\n⚠️ Answer in-game to avoid a soft ban`,
           5, 2000, 10, 180000);
       }
       _sqlSent = true;
-      _sqlPaused = true;
       return true; // still pause automation while the check is on screen
     }
     if (!hasImp && !hasSql) {
@@ -1619,7 +1568,7 @@
       }
       _sqlSent = false;
       localStorage.removeItem('cbSqlCheckFp');
-      if (_sqlPaused) { paused = false; _sqlPaused = false; setStatus('Staff check cleared'); }
+      if (paused) { paused = false; setStatus('Staff check cleared'); }
     }
     return false;
   }
@@ -2645,7 +2594,6 @@
   /* === OC/DTM PAGE HANDLERS === */
 
   function handleOcPage() {
-    if (paused) return false; // never advance an XP-earning OC step during a staff check
     if (localStorage.getItem('cbPendOcHandle') !== 'true') return false;
     const pts = parseInt(localStorage.getItem('cbPendOcHandleTs')||'0',10);
     if (pts > 0 && Date.now()-pts > 120000) {
@@ -2685,7 +2633,6 @@
   }
 
   function handleDtmPage() {
-    if (paused) return false; // never advance an XP-earning DTM step during a staff check
     if (localStorage.getItem('cbPendDtmHandle') !== 'true') return false;
 
     // Guard: if we just acted (clicked buy/complete) in the last 30s, the page we're
@@ -3614,7 +3561,6 @@
   }
 
   async function handleCreateOC() {
-    if (paused) return false; // freeze OC creation during a staff check (would earn XP)
     if (!st.createOC) return false;
     const onOc = /\/authenticated\/organizedcrime\.aspx/i.test(location.pathname) && !/p=dtm/i.test(location.search);
     if (!onOc) return false;
@@ -3945,7 +3891,6 @@
       </div>
 
       <div class="jb-footer" id="jb-status">Ready</div>
-      <button id="jb-restart-btn" style="display:none;width:100%;padding:10px;border:none;background:var(--jb-danger);color:#fff;font-weight:700;font-size:13px;cursor:pointer;font-family:inherit;letter-spacing:.3px">🔒 LOCKED — press to RESTART</button>
 
       <div class="jb-modal-bg" id="jb-backdrop"></div>
       <div class="jb-modal" id="jb-settings-modal">
@@ -5488,7 +5433,6 @@
   }
 
   async function handleCreateDTM() {
-    if (paused) return false; // freeze DTM creation during a staff check (would earn XP)
     if (!st.createDTM) return false;
     const onDtm = /\/authenticated\/organizedcrime\.aspx/i.test(location.pathname) && /p=dtm/i.test(location.search);
     if (!onDtm) return false;
@@ -5690,15 +5634,6 @@
       setTimeout(mainLoop, 3000); return;
     }
 
-    // STAFF CHECK — must run BEFORE the paused gate (so its own un-pause is reachable)
-    // and independent of Telegram. Gaining XP after an unanswered check = ban.
-    // STAFF CHECK — the loop must stop entirely (a reload/navigation is itself
-    // bannable while a check is open). Detect, lock, and do NOT re-arm the loop.
-    if (isStaffLocked() || checkSqlCheck()) {
-      engageStaffLock();
-      return; // no setTimeout — automation is frozen until you press Restart
-    }
-
     if (paused) { setTimeout(mainLoop, 1800+Math.floor(Math.random()*1400)); return; }
 
     // HEALTH MONITORING — runs at all times, bypasses every break.
@@ -5738,6 +5673,11 @@
     }
 
     checkCaptcha(); checkNewMsgs(); checkLogout();
+
+    if (checkSqlCheck()) {
+      paused = true; setStatus('⚠️ STAFF CHECK — paused');
+      setTimeout(mainLoop, 10000); return;
+    }
 
     checkStuck();
 
@@ -5918,22 +5858,9 @@
     tabs.check();
     buildUI();
     try { updateXpUI(); } catch(_){} // paint saved XP/rank straight away so it doesn't blank on load
-    // Start the alert pumps FIRST and unconditionally — delivery must never be
-    // hostage to a later step throwing (e.g. the XP interceptor patching XHR).
+    installXpInterceptor();
     startTgPump();
     startCriticalPump();
-    try { installXpInterceptor(); } catch(e) { console.error(APP_TAG, 'XP interceptor failed (non-fatal):', e); }
-
-    // If a staff check locked us on a previous page, do NOT start automation or any
-    // page-touching timers on this load — a reload/navigation is bannable until the
-    // check is answered. Only alerts (already started above) run. Wait for Restart.
-    if (isStaffLocked()) {
-      paused = true; _sqlPaused = true;
-      showRestartButton(true);
-      setStatus('🔒 LOCKED — staff check. Reply in-game, then press Restart.');
-      return;
-    }
-
     startTimers();
     owStart();
     startWatchdog();
