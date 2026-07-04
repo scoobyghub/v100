@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Jarvis Bot 2000.195
+// @name         Jarvis Bot 2000.200
 // @namespace    http://tampermonkey.net/
-// @version      2000.195
-// @description  Jarvis Bot 2000.195 — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
+// @version      2000.200
+// @description  Jarvis Bot 2000.200 — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
 // @match        *://www.tmn2010.net/authenticated/*
@@ -31,7 +31,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.195
+/*  Jarvis Bot 2000.200
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -111,7 +111,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.195';
+  const APP_VERSION = '2000.200';
   const APP_TAG     = '[JB]';
 
   // Known staff accounts (profile IDs)
@@ -835,6 +835,7 @@
 
   function pumpTgQueue() {
     if (!tg.enabled || !tg.token || !tg.chat) return;
+    if (!tabs.isMaster) return; // only the master tab delivers — queue is shared, avoid double-sends
     const q = _loadTgQ();
     if (!q.length) return;
     const now = Date.now();
@@ -924,6 +925,7 @@
 
   let _critPumpTimer = null;
   function pumpCriticalAlerts() {
+    if (!tabs.isMaster) return; // shared queue — only master delivers to avoid double-sends
     const q = _loadCrit();
     if (!q.length) return;
     const now = Date.now();
@@ -1534,8 +1536,11 @@
   }
 
   let _sqlSent = false;
+  let _sqlPaused = false; // true only when WE paused specifically for a staff check
   function checkSqlCheck() {
-    if (!tg.enabled || !tg.sqlCheck) return false;
+    // CRITICAL: detection + pause must run ALWAYS, independent of Telegram. Gaining
+    // any XP after an unanswered staff check = ban, so the pause can never depend on
+    // alerting being enabled. Telegram only gates whether the *alert* is sent.
     const div = document.querySelector('div.NewGridTitle');
     const hasImp = div && div.textContent.includes('Important message');
     const txt = document.body.textContent;
@@ -1546,29 +1551,35 @@
         const t = p.textContent;
         if (/(SQL|Stipe|Marc)/i.test(t) && t.includes('?')) { q = t.trim(); break; }
       }
-      // Persist a content-keyed fingerprint so reloads don't re-alert. Using the
-      // list-based seenOnce (not a single last-value) means a check that cycles
-      // between two questions (A→B→A) won't re-alert on A's reappearance — each
-      // distinct question alerts exactly once. Borrowed from the moderator script.
       const sig = q.substring(0,120);
-      if (seenOnce('sqlcheck', contentHash(sig), 30)) {
-        localStorage.setItem('cbSqlCheckFp', sig); // keep for the clear-on-gone logic below
+      // Always record the fingerprint so the clear-on-gone logic can fire regardless
+      // of Telegram. The ALERT is gated behind TG settings + first-sighting dedup.
+      localStorage.setItem('cbSqlCheckFp', sig);
+      if (tg.enabled && tg.sqlCheck && seenOnce('sqlcheck', contentHash(sig), 30)) {
         queueCriticalAlert('sqlcheck:' + contentHash(sig),
           `❗ <b>STAFF CHECK</b>\n${st.player||'?'} | ${fmtDate()}\n${esc(sig)}\n⚠️ Answer in-game to avoid a soft ban`,
           5, 2000, 10, 180000);
       }
       _sqlSent = true;
-      return true; // still pause automation while the check is on screen
+      return true; // pause automation while the check is on screen (always)
     }
     if (!hasImp && !hasSql) {
       if (_sqlSent) {
-        // Check has cleared — stop chasing it (whatever the last fingerprint was)
+        // Check has cleared (a fresh page no longer shows it = it's been answered).
+        // Stop chasing it and un-pause. Keyed off the persisted fingerprint alone so
+        // this still runs after a reload (in-memory _sqlSent resets on load).
+        const lastSig = localStorage.getItem('cbSqlCheckFp') || '';
+        if (lastSig) clearCriticalAlert('sqlcheck:' + contentHash(lastSig));
+      } else {
+        // Even with no in-memory flag (e.g. just reloaded), clear any stale pending
+        // alert if the check is gone.
         const lastSig = localStorage.getItem('cbSqlCheckFp') || '';
         if (lastSig) clearCriticalAlert('sqlcheck:' + contentHash(lastSig));
       }
       _sqlSent = false;
       localStorage.removeItem('cbSqlCheckFp');
-      if (paused) { paused = false; setStatus('Staff check cleared'); }
+      // Only un-pause if WE paused for a staff check — don't stomp a settings-modal pause.
+      if (_sqlPaused) { paused = false; _sqlPaused = false; setStatus('Staff check cleared'); }
     }
     return false;
   }
@@ -2847,6 +2858,7 @@
 
   function donePending(type) { if (st.pending === type) { st.pending = ''; saveSt(); } }
 
+
   /* === GAME ACTIONS === */
 
   // Cooldown jitter: adds ±1-4 seconds to any interval check
@@ -3059,6 +3071,7 @@
   function jailLimitReached() {
     return getJailCount() >= cfg.jailDailyLimit;
   }
+
 
   /* === XP UI + CHARTS === */
 
@@ -4262,35 +4275,42 @@
     `;
     _shadow.appendChild(root);
 
-    // Apply theme
     applyThemeVars();
     host.classList.add('jb-ready');
 
-    // Wire up crime/gta options
-    const crimeEl = _shadow.querySelector('#jb-crime-opts');
-    crimeEl.innerHTML = CRIMES.map(c => `<label class="jb-switch"><input type="checkbox" class="jb-crime-cb" value="${c.id}" ${st.crimes.includes(c.id)?'checked':''}> ${c.name}</label>`).join('');
+    // ---- Crime options ----
+    const crimeOpts = _shadow.querySelector('#jb-crime-opts');
+    crimeOpts.innerHTML = CRIMES.map(c => `<label class="jb-switch" style="font-size:10px"><input type="checkbox" class="jb-crime-cb" value="${c.id}" ${st.crimes.includes(c.id)?'checked':''}> ${c.name}</label>`).join('');
+    crimeOpts.querySelectorAll('.jb-crime-cb').forEach(cb => cb.addEventListener('change', () => {
+      st.crimes = [...crimeOpts.querySelectorAll('.jb-crime-cb:checked')].map(x => parseInt(x.value));
+      saveSt();
+    }));
 
-    const gtaEl = _shadow.querySelector('#jb-gta-opts');
-    gtaEl.innerHTML = GTAS.map(g => `<label class="jb-switch"><input type="checkbox" class="jb-gta-cb" value="${g.id}" ${st.gtas.includes(g.id)?'checked':''}> ${g.name}</label>`).join('');
+    // ---- GTA options ----
+    const gtaOpts = _shadow.querySelector('#jb-gta-opts');
+    gtaOpts.innerHTML = GTAS.map(g => `<label class="jb-switch" style="font-size:10px"><input type="checkbox" class="jb-gta-cb" value="${g.id}" ${st.gtas.includes(g.id)?'checked':''}> ${g.name}</label>`).join('');
+    gtaOpts.querySelectorAll('.jb-gta-cb').forEach(cb => cb.addEventListener('change', () => {
+      st.gtas = [...gtaOpts.querySelectorAll('.jb-gta-cb:checked')].map(x => parseInt(x.value));
+      saveSt();
+    }));
 
-    // Ribbon toggles — use CSS vars for theme-aware colours
-    const ribbonMap = { 'jb-r-crime':'crime','jb-r-gta':'gta','jb-r-booze':'booze','jb-r-jail':'jail','jb-r-health':'health','jb-r-garage':'garage','jb-r-oc':'autoOC','jb-r-dtm':'autoDTM' };
-    for (const [id, key] of Object.entries(ribbonMap)) {
-      const btn = _shadow.querySelector(`#${id}`);
-      // Set initial colours from theme
-      if (btn) {
-        btn.style.background = st[key] ? 'var(--jb-ribbon-on)' : 'var(--jb-ribbon-off)';
-        btn.style.color = st[key] ? 'var(--jb-ribbon-on-text)' : 'var(--jb-ribbon-off-text)';
-      }
-      btn.addEventListener('click', e => {
-        st[key] = !st[key]; saveSt();
-        e.target.style.background = st[key] ? 'var(--jb-ribbon-on)' : 'var(--jb-ribbon-off)';
-        e.target.style.color = st[key] ? 'var(--jb-ribbon-on-text)' : 'var(--jb-ribbon-off-text)';
-        setStatus(`${key} ${st[key]?'ON':'OFF'}`);
+    // ---- Ribbon toggles ----
+    const ribbonMap = [
+      ['jb-r-crime','crime'], ['jb-r-gta','gta'], ['jb-r-booze','booze'], ['jb-r-jail','jail'],
+      ['jb-r-health','health'], ['jb-r-garage','garage'], ['jb-r-oc','autoOC'], ['jb-r-dtm','autoDTM']
+    ];
+    ribbonMap.forEach(([id, key]) => {
+      const btn = _shadow.querySelector('#'+id);
+      if (!btn) return;
+      btn.addEventListener('click', () => {
+        st[key] = !st[key];
+        btn.classList.toggle('off', !st[key]);
+        saveSt(); syncAll();
+        if (key === 'garage' && st.garage) st.lastGarage = 0;
       });
-    }
+    });
 
-    // ALL toggle
+    // ---- ALL toggle ----
     const allCb = _shadow.querySelector('#jb-all-toggle');
     const allLabel = _shadow.querySelector('#jb-all-label');
     function syncAll() {
@@ -4304,17 +4324,10 @@
       const v = allCb.checked;
       st.crime=v; st.gta=v; st.booze=v; st.jail=v; st.health=v; st.garage=v; st.autoOC=v; st.autoDTM=v;
       saveSt(); syncAll();
-      for (const [id, key] of Object.entries(ribbonMap)) {
-        const btn = _shadow.querySelector(`#${id}`);
-        if (btn) {
-          btn.style.background = st[key] ? 'var(--jb-ribbon-on)' : 'var(--jb-ribbon-off)';
-          btn.style.color = st[key] ? 'var(--jb-ribbon-on-text)' : 'var(--jb-ribbon-off-text)';
-        }
-      }
+      ribbonMap.forEach(([id, key]) => { const btn = _shadow.querySelector('#'+id); if (btn) btn.classList.toggle('off', !st[key]); });
     });
 
-    // Cadence mode switch (Away = camouflage / At PC = fast). Re-rolls pending
-    // delays on flip so the new mode takes effect immediately.
+    // ---- Cadence mode switch (Away = camouflage / At PC = fast) ----
     const awayCb = _shadow.querySelector('#jb-away-mode');
     if (awayCb) awayCb.addEventListener('change', e => {
       cfg.awayMode = e.target.checked;
@@ -4325,7 +4338,7 @@
       setStatus(cfg.awayMode ? 'Away mode — max camouflage' : 'At-PC mode — fast');
     });
 
-    // Other checkboxes
+    // ---- Other checkboxes ----
     _shadow.querySelector('#jb-crusher').checked = st.crusher;
     if (st.crusherOwned === false) { _shadow.querySelector('#jb-crusher').disabled = true; }
     _shadow.querySelector('#jb-crusher').addEventListener('change', e => {
@@ -4337,7 +4350,10 @@
     _shadow.querySelector('#jb-wl-on').addEventListener('change', e => { st.whitelist = e.target.checked; saveSt(); });
 
     _shadow.querySelector('#jb-create-oc').checked = st.createOC;
-    _shadow.querySelector('#jb-create-oc').addEventListener('change', e => { st.createOC = e.target.checked; saveSt(); if(st.createOC && !getHot()) fetchHot(); });
+    _shadow.querySelector('#jb-create-oc').addEventListener('change', e => { st.createOC = e.target.checked; saveSt(); if (e.target.checked) openModal2('jb-oc-modal'); });
+
+    _shadow.querySelector('#jb-create-dtm').checked = st.createDTM;
+    _shadow.querySelector('#jb-create-dtm').addEventListener('change', e => { st.createDTM = e.target.checked; saveSt(); if (e.target.checked) openModal2('jb-dtm-modal'); });
 
     _shadow.querySelector('#jb-ow-on').checked = ow.on;
     _shadow.querySelector('#jb-ow-on').addEventListener('change', e => { ow.on = e.target.checked; saveOw(); owStart(); });
@@ -4345,1042 +4361,596 @@
     _shadow.querySelector('#jb-notify-ready').checked = st.notifyReady;
     _shadow.querySelector('#jb-notify-ready').addEventListener('change', e => { st.notifyReady = e.target.checked; saveSt(); });
 
-    _shadow.querySelector('#jb-auto-travel').addEventListener('change', e => {
-      st.autoTravel = e.target.checked; saveSt();
-      setStatus('✈️ Auto Travel ' + (st.autoTravel ? 'ON' : 'OFF'));
-      if (st.autoTravel && !getHot()) fetchHot();
+    _shadow.querySelector('#jb-auto-travel').addEventListener('change', e => { st.autoTravel = e.target.checked; saveSt(); });
+    _shadow.querySelector('#jb-auto-dtmlist').addEventListener('change', e => { st.autoDtmList = e.target.checked; saveSt(); });
+
+    // ---- Theme cycle ----
+    _shadow.querySelector('#jb-theme-btn').addEventListener('click', () => {
+      const order = ['light','dark','classic'];
+      const idx = order.indexOf(activeTheme);
+      setTheme(order[(idx+1)%order.length]);
     });
 
-    _shadow.querySelector('#jb-auto-dtmlist').addEventListener('change', e => {
-      st.autoDtmList = e.target.checked; saveSt();
-      setStatus('📋 DTM List ' + (st.autoDtmList ? 'ON' : 'OFF'));
-      if (st.autoDtmList && !getHot()) fetchHot();
-    });
+    // ---- Minimize ----
+    const panelBody = _shadow.querySelector('#jb-panel-body');
+    function applyMin() {
+      panelBody.style.display = st.minimized ? 'none' : '';
+      const jc = _shadow.querySelector('#jb-jail-counter-row');
+      if (jc) jc.style.display = st.minimized ? 'none' : 'flex';
+    }
+    applyMin();
+    _shadow.querySelector('#jb-min-btn').addEventListener('click', () => { st.minimized = !st.minimized; saveSt(); applyMin(); });
 
-    // Theme toggle — cycles: dark → light → classic → dark
-    const THEME_ORDER = ['dark', 'light', 'classic'];
-    const THEME_ICONS = { dark: '◑', light: '☀', classic: '🟢' };
-    const themeBtn = _shadow.querySelector('#jb-theme-btn');
-    themeBtn.textContent = THEME_ICONS[activeTheme] || '◑';
-    themeBtn.addEventListener('click', () => {
-      const idx = THEME_ORDER.indexOf(activeTheme);
-      const next = THEME_ORDER[(idx + 1) % THEME_ORDER.length];
-      setTheme(next);
-      themeBtn.textContent = THEME_ICONS[next] || '◑';
-      // Re-apply ribbon button colours
-      for (const [id, key] of Object.entries(ribbonMap)) {
-        const btn = _shadow.querySelector(`#${id}`);
-        if (btn) {
-          const isOn = st[key];
-          btn.style.background = isOn ? 'var(--jb-ribbon-on)' : 'var(--jb-ribbon-off)';
-          btn.style.color = isOn ? 'var(--jb-ribbon-on-text)' : 'var(--jb-ribbon-off-text)';
-        }
-      }
-    });
-
-    // Minimize
-    const body = _shadow.querySelector('#jb-panel-body');
-    const footer = _shadow.querySelector('#jb-status');
-    if (st.minimized) { body.style.display = 'none'; footer.style.display = 'none'; }
-    _shadow.querySelector('#jb-min-btn').addEventListener('click', () => {
-      st.minimized = !st.minimized;
-      body.style.display = st.minimized ? 'none' : '';
-      footer.style.display = st.minimized ? 'none' : '';
-      saveSt();
-    });
-
-    // Settings modal
-    const modal = _shadow.querySelector('#jb-settings-modal');
+    // ---- Settings modal ----
     const backdrop = _shadow.querySelector('#jb-backdrop');
-    function openModal() { paused = true; modal.classList.add('open'); backdrop.style.display = 'block'; }
-    function closeModal() { modal.classList.remove('open'); backdrop.style.display = 'none'; paused = false; saveSt(); }
-    _shadow.querySelector('#jb-settings-btn').addEventListener('click', openModal);
-    _shadow.querySelector('#jb-modal-close').addEventListener('click', closeModal);
-    backdrop.addEventListener('click', closeModal);
+    const settingsModal = _shadow.querySelector('#jb-settings-modal');
+    function openSettings() { backdrop.style.display = 'block'; settingsModal.classList.add('open'); }
+    function closeSettings() { backdrop.style.display = 'none'; settingsModal.classList.remove('open'); }
+    _shadow.querySelector('#jb-settings-btn').addEventListener('click', openSettings);
+    _shadow.querySelector('#jb-modal-close').addEventListener('click', closeSettings);
+    backdrop.addEventListener('click', closeSettings);
 
-    // Settings inputs
-    _shadow.querySelector('#jb-login-user').addEventListener('input', e => { LOGIN.user = e.target.value.trim(); GM_setValue('cbLoginUser', LOGIN.user); });
-    _shadow.querySelector('#jb-login-pass').addEventListener('input', e => { LOGIN.pass = e.target.value.trim(); GM_setValue('cbLoginPass', LOGIN.pass); });
-    _shadow.querySelector('#jb-auto-submit').addEventListener('change', e => { LOGIN.autoSubmit = e.target.checked; GM_setValue('cbAutoSubmit', LOGIN.autoSubmit); });
+    // ---- Settings inputs ----
+    const bind = (id, fn, ev='change') => { const el = _shadow.querySelector('#'+id); if (el) el.addEventListener(ev, fn); };
 
-    _shadow.querySelectorAll('.jb-crime-cb').forEach(cb => cb.addEventListener('change', () => {
-      st.crimes = [..._shadow.querySelectorAll('.jb-crime-cb:checked')].map(c => parseInt(c.value)); saveSt();
-    }));
-    _shadow.querySelectorAll('.jb-gta-cb').forEach(cb => cb.addEventListener('change', () => {
-      st.gtas = [..._shadow.querySelectorAll('.jb-gta-cb:checked')].map(c => parseInt(c.value)); saveSt();
-    }));
+    bind('jb-login-user', e => { LOGIN.user = e.target.value; GM_setValue('cbLoginUser', LOGIN.user); });
+    bind('jb-login-pass', e => { LOGIN.pass = e.target.value; GM_setValue('cbLoginPass', LOGIN.pass); });
+    bind('jb-auto-submit', e => { LOGIN.autoSubmit = e.target.checked; GM_setValue('cbAutoSubmit', LOGIN.autoSubmit); });
 
-    _shadow.querySelector('#jb-crime-int').addEventListener('change', e => { cfg.crimeInt = Math.max(1,Math.min(999,parseInt(e.target.value))); GM_setValue('cbCrimeInt',cfg.crimeInt); });
-    _shadow.querySelector('#jb-gta-int').addEventListener('change', e => { cfg.gtaInt = Math.max(1,Math.min(999,parseInt(e.target.value))); GM_setValue('cbGtaInt',cfg.gtaInt); });
-    _shadow.querySelector('#jb-booze-int').addEventListener('change', e => { cfg.boozeInt = Math.max(1,Math.min(999,parseInt(e.target.value))); GM_setValue('cbBoozeInt',cfg.boozeInt); });
-    _shadow.querySelector('#jb-booze-buy').addEventListener('change', e => { cfg.boozeBuy = Math.max(1,Math.min(300,parseInt(e.target.value))); GM_setValue('cbBoozeBuy',cfg.boozeBuy); });
-    _shadow.querySelector('#jb-booze-sell').addEventListener('change', e => { cfg.boozeSell = Math.max(1,Math.min(300,parseInt(e.target.value))); GM_setValue('cbBoozeSell',cfg.boozeSell); });
-    _shadow.querySelector('#jb-jail-int').addEventListener('change', e => { cfg.jailInt = Math.max(1,Math.min(999,parseInt(e.target.value))); GM_setValue('cbJailInt',cfg.jailInt); });
-    _shadow.querySelector('#jb-jail-limit').addEventListener('change', e => {
-      cfg.jailDailyLimit = Math.max(50, Math.min(4000, parseInt(e.target.value)||2000));
-      e.target.value = cfg.jailDailyLimit;
-      GM_setValue('cbJailDailyLimit', cfg.jailDailyLimit);
-      // If we're now under the new limit and jail was auto-disabled, re-enable
-      if (GM_getValue('cbJailAutoOff', false) && getJailCount() < cfg.jailDailyLimit) {
-        GM_setValue('cbJailAutoOff', false);
-        st.jail = GM_getValue('cbJailWasOn', true); saveSt();
-        syncAll();
-      }
+    bind('jb-crime-int', e => { cfg.crimeInt = parseInt(e.target.value)||125; GM_setValue('cbCrimeInt', cfg.crimeInt); });
+    bind('jb-gta-int', e => { cfg.gtaInt = parseInt(e.target.value)||245; GM_setValue('cbGtaInt', cfg.gtaInt); });
+    bind('jb-booze-int', e => { cfg.boozeInt = parseInt(e.target.value)||120; GM_setValue('cbBoozeInt', cfg.boozeInt); });
+    bind('jb-booze-buy', e => { cfg.boozeBuy = parseInt(e.target.value)||5; GM_setValue('cbBoozeBuy', cfg.boozeBuy); });
+    bind('jb-booze-sell', e => { cfg.boozeSell = parseInt(e.target.value)||1; GM_setValue('cbBoozeSell', cfg.boozeSell); });
+    bind('jb-jail-int', e => { cfg.jailInt = parseInt(e.target.value)||3; GM_setValue('cbJailInt', cfg.jailInt); });
+    bind('jb-jail-limit', e => {
+      let v = parseInt(e.target.value)||2000;
+      v = Math.max(50, Math.min(4000, v));
+      cfg.jailDailyLimit = v; GM_setValue('cbJailDailyLimit', v);
+      e.target.value = v;
+      const s = _shadow.querySelector('#jb-jail-count-settings');
+      if (s) s.textContent = `${getJailCount()}/${v}`;
       updateJailCountUI();
-      const sEl = _shadow.querySelector('#jb-jail-count-settings');
-      if (sEl) sEl.textContent = `${getJailCount()}/${cfg.jailDailyLimit}`;
     });
-    _shadow.querySelector('#jb-jail-reset').addEventListener('click', () => {
+    bind('jb-min-hp', e => { cfg.minHealth = parseInt(e.target.value)||90; GM_setValue('cbMinHealth', cfg.minHealth); });
+    bind('jb-target-hp', e => { cfg.targetHealth = parseInt(e.target.value)||100; GM_setValue('cbTargetHealth', cfg.targetHealth); });
+    bind('jb-garage-int', e => { cfg.garageInt = (parseInt(e.target.value)||5)*60; GM_setValue('cbGarageInt', cfg.garageInt); });
+
+    bind('jb-jail-reset', () => {
       GM_setValue('cbJailCount', 0);
       GM_setValue('cbJailCountDay', gameDayStr());
-      if (GM_getValue('cbJailAutoOff', false)) {
-        GM_setValue('cbJailAutoOff', false);
-        st.jail = GM_getValue('cbJailWasOn', true); saveSt(); syncAll();
-      }
-      updateJailCountUI();
-      const sEl = _shadow.querySelector('#jb-jail-count-settings');
-      if (sEl) sEl.textContent = `0/${cfg.jailDailyLimit}`;
-      setStatus('⛓️ Jail counter reset');
-    });
-    _shadow.querySelector('#jb-min-hp').addEventListener('change', e => { cfg.minHealth = Math.max(1,Math.min(99,parseInt(e.target.value))); GM_setValue('cbMinHealth',cfg.minHealth); });
-    _shadow.querySelector('#jb-target-hp').addEventListener('change', e => { cfg.targetHealth = Math.max(10,Math.min(100,parseInt(e.target.value))); GM_setValue('cbTargetHealth',cfg.targetHealth); });
-    _shadow.querySelector('#jb-garage-int').addEventListener('change', e => { const m = Math.max(1,Math.min(120,parseInt(e.target.value))); cfg.garageInt = m*60; GM_setValue('cbGarageInt',cfg.garageInt); });
+      if (GM_getValue('cbJailAutoOff', false)) { GM_setValue('cbJailAutoOff', false); st.jail = GM_getValue('cbJailWasOn', true); saveSt(); ribbonMap.forEach(([id,key])=>{ if(key==='jail'){ const b=_shadow.querySelector('#'+id); if(b) b.classList.toggle('off',!st.jail); }}); }
+      const s = _shadow.querySelector('#jb-jail-count-settings');
+      if (s) s.textContent = `0/${cfg.jailDailyLimit}`;
+      updateJailCountUI(); setStatus('Jail counter reset');
+    }, 'click');
 
-    _shadow.querySelector('#jb-crush-reset').addEventListener('click', () => {
-      st.crusherOwned = null; saveSt(); localStorage.removeItem(LS_CRUSH_LOOP);
-      const cb = _shadow.querySelector('#jb-crusher'); if(cb) cb.disabled = false;
-      const stEl = _shadow.querySelector('#jb-crush-st'); if(stEl) stEl.textContent = 'Unknown';
-    });
-
-    // Car category radio buttons
-    _shadow.querySelectorAll('input[type="radio"][name^="jb-cc-"]').forEach(radio => {
+    // ---- Car category radios ----
+    _shadow.querySelectorAll('input[type="radio"][data-car]').forEach(radio => {
       radio.addEventListener('change', e => {
         if (!e.target.checked) return;
-        const carName = e.target.getAttribute('data-car');
-        const category = e.target.value;
-        if (!carName || !category) return;
-        const known = CARS.find(c => c.name === carName);
-        if (known && known.locked) {
-          e.target.checked = false;
-          const defR = _shadow.querySelector(`input[type="radio"][name="${e.target.name}"][value="${known.def}"]`);
-          if (defR) defR.checked = true;
-          return;
-        }
+        const car = e.target.getAttribute('data-car');
+        const val = e.target.value;
         if (!st.carCats) st.carCats = {};
-        st.carCats[carName] = category;
-        saveSt();
-        setStatus(`${carName} → ${category}`);
+        st.carCats[car] = val; saveSt();
       });
     });
+    bind('jb-cc-reset', () => { st.carCats = {}; saveSt(); location.reload(); }, 'click');
 
-    // Reset car categories to defaults
-    const ccResetBtn = _shadow.querySelector('#jb-cc-reset');
-    if (ccResetBtn) ccResetBtn.addEventListener('click', () => {
-      st.carCats = {}; saveSt();
-      CARS.forEach(car => {
-        const sid = car.name.replace(/[^A-Za-z0-9]/g,'');
-        _shadow.querySelectorAll(`input[type="radio"][name="jb-cc-${sid}"]`).forEach(r => { r.checked = (r.value === car.def); });
-      });
-      setStatus('Car categories reset');
-    });
+    // ---- Crusher reset ----
+    bind('jb-crush-reset', () => {
+      st.crusherOwned = null; st.crusher = true; saveSt();
+      const cb = _shadow.querySelector('#jb-crusher'); if(cb) cb.disabled = false;
+      const cs = _shadow.querySelector('#jb-crush-st'); if(cs) cs.textContent = 'Unknown';
+      setStatus('Crusher status reset');
+    }, 'click');
 
-    // Telegram
-    _shadow.querySelector('#jb-tg-on').addEventListener('change', e => { tg.enabled = e.target.checked; saveTg(); });
-    _shadow.querySelector('#jb-tg-token').addEventListener('input', e => { tg.token = e.target.value.trim(); saveTg(); });
-    _shadow.querySelector('#jb-tg-chat').addEventListener('input', e => { tg.chat = e.target.value.trim(); saveTg(); });
-    _shadow.querySelector('#jb-tg-captcha').addEventListener('change', e => { tg.captcha = e.target.checked; saveTg(); });
-    _shadow.querySelector('#jb-tg-msgs').addEventListener('change', e => { tg.messages = e.target.checked; saveTg(); });
-    _shadow.querySelector('#jb-tg-st').addEventListener('change', e => { tg.scriptTest = e.target.checked; saveTg(); });
-    _shadow.querySelector('#jb-tg-staff').addEventListener('change', e => { tg.staffMail = e.target.checked; saveTg(); });
-    _shadow.querySelector('#jb-tg-sql').addEventListener('change', e => { tg.sqlCheck = e.target.checked; saveTg(); });
-    _shadow.querySelector('#jb-tg-logout').addEventListener('change', e => { tg.logout = e.target.checked; saveTg(); });
-    _shadow.querySelector('#jb-tg-test').addEventListener('click', testTg);
+    // ---- Telegram settings ----
+    bind('jb-tg-on', e => { tg.enabled = e.target.checked; saveTg(); });
+    bind('jb-tg-token', e => { tg.token = e.target.value.trim(); saveTg(); });
+    bind('jb-tg-chat', e => { tg.chat = e.target.value.trim(); saveTg(); });
+    bind('jb-tg-captcha', e => { tg.captcha = e.target.checked; saveTg(); });
+    bind('jb-tg-msgs', e => { tg.messages = e.target.checked; saveTg(); });
+    bind('jb-tg-st', e => { tg.scriptTest = e.target.checked; saveTg(); });
+    bind('jb-tg-staff', e => { tg.staffMail = e.target.checked; saveTg(); });
+    bind('jb-tg-sql', e => { tg.sqlCheck = e.target.checked; saveTg(); });
+    bind('jb-tg-logout', e => { tg.logout = e.target.checked; saveTg(); });
+    bind('jb-tg-test', testTg, 'click');
 
-    // Per-message Telegram toggles
-    _shadow.querySelectorAll('.jb-tgmsg-cb').forEach(cb => {
-      cb.addEventListener('change', e => {
-        const key = e.target.getAttribute('data-key');
-        tgMsgOn[key] = e.target.checked;
-        saveTgMsgs();
-      });
-    });
-    _shadow.querySelector('#jb-tgmsg-all').addEventListener('click', () => {
-      TG_MSGS.forEach(m => { tgMsgOn[m.key] = true; });
-      saveTgMsgs();
-      _shadow.querySelectorAll('.jb-tgmsg-cb').forEach(cb => { cb.checked = true; });
-      setStatus('All TG messages on');
-    });
-    _shadow.querySelector('#jb-tgmsg-none').addEventListener('click', () => {
-      TG_MSGS.forEach(m => { tgMsgOn[m.key] = false; });
-      saveTgMsgs();
-      _shadow.querySelectorAll('.jb-tgmsg-cb').forEach(cb => { cb.checked = false; });
-      setStatus('All TG messages off');
-    });
+    // ---- Per-message TG grid ----
+    _shadow.querySelectorAll('.jb-tgmsg-cb').forEach(cb => cb.addEventListener('change', e => {
+      const key = e.target.getAttribute('data-key');
+      tgMsgOn[key] = e.target.checked;
+      GM_setValue('cbTgMsg_'+key, tgMsgOn[key]);
+    }));
+    bind('jb-tgmsg-all', () => { TG_MSGS.forEach(m => { tgMsgOn[m.key] = true; }); saveTgMsgs(); _shadow.querySelectorAll('.jb-tgmsg-cb').forEach(cb => cb.checked = true); }, 'click');
+    bind('jb-tgmsg-none', () => { TG_MSGS.forEach(m => { tgMsgOn[m.key] = false; }); saveTgMsgs(); _shadow.querySelectorAll('.jb-tgmsg-cb').forEach(cb => cb.checked = false); }, 'click');
 
-    // Logout alerts
-    _shadow.querySelector('#jb-lo-flash').addEventListener('change', e => { logoutAlert.tabFlash = e.target.checked; saveLogoutAlert(); });
-    _shadow.querySelector('#jb-lo-notify').addEventListener('change', e => { logoutAlert.notify = e.target.checked; saveLogoutAlert(); if(e.target.checked) askNotifyPerm(); });
+    // ---- Logout alerts ----
+    bind('jb-lo-flash', e => { logoutAlert.tabFlash = e.target.checked; saveLogoutAlert(); });
+    bind('jb-lo-notify', e => { logoutAlert.notify = e.target.checked; saveLogoutAlert(); if (e.target.checked) askNotifyPerm(); });
 
-    // Advanced
-    _shadow.querySelector('#jb-resume').addEventListener('change', e => { resume.on = e.target.checked; saveResume(); });
-    _shadow.querySelector('#jb-stats-on').addEventListener('change', e => { stats.on = e.target.checked; saveStats(); });
-    const noXpCb = _shadow.querySelector('#jb-noxp-on');
-    if (noXpCb) noXpCb.addEventListener('change', e => { cfg.noXpLimiterOn = e.target.checked; GM_setValue('cbNoXpLimiterOn', cfg.noXpLimiterOn); setStatus(cfg.noXpLimiterOn?'No-XP limiter on':'No-XP limiter off'); });
-    const noXpStreak = _shadow.querySelector('#jb-noxp-streak');
-    if (noXpStreak) noXpStreak.addEventListener('change', e => { cfg.noXpStreakLimit = Math.max(2,Math.min(20,parseInt(e.target.value)||5)); GM_setValue('cbNoXpStreakLimit', cfg.noXpStreakLimit); });
+    // ---- Advanced ----
+    bind('jb-resume', e => { resume.on = e.target.checked; saveResume(); });
+    bind('jb-stats-on', e => { stats.on = e.target.checked; saveStats(); });
+    bind('jb-noxp-on', e => { cfg.noXpLimiterOn = e.target.checked; GM_setValue('cbNoXpLimiterOn', cfg.noXpLimiterOn); });
+    bind('jb-noxp-streak', e => { cfg.noXpStreakLimit = Math.max(2, Math.min(20, parseInt(e.target.value)||5)); GM_setValue('cbNoXpStreakLimit', cfg.noXpStreakLimit); });
 
-    // Reset/clear
-    _shadow.querySelector('#jb-reset-all').addEventListener('click', () => {
-      if (confirm('Reset ALL settings?')) {
-        localStorage.removeItem('cbMaster'); localStorage.removeItem('cbHeartbeat');
-        const keys = ['cbAutoCrime','cbAutoGta','cbAutoJail','cbAutoBooze','cbLastCrime','cbLastGta','cbLastJail','cbLastBooze','cbSelCrimes','cbSelGtas','cbPlayer','cbInJail','cbAction','cbPending','cbAutoOC','cbAutoDTM','cbAutoHealth','cbAutoGarage','cbAutoCrusher','cbCrusherOwned','cbLastGarage','cbLastHealth','cbLastJailCk','cbBuyHealth','cbMinimized','cbRefresh','cbTheme','cbNotifyReady','cbWhitelist','cbWlNames','cbCarCats','cbCreateOC','cbOcTrans','cbOcWeapon','cbOcExplo','cbOcSched','cbOcType','cbOcRepeat','cbOcLeft'];
-        keys.forEach(k => GM_setValue(k, undefined));
-        alert('Reset complete — refreshing');
-        setTimeout(() => window.location.reload(), 500);
+    // ---- Reset / clear ----
+    bind('jb-reset-all', () => {
+      if (confirm('Reset all settings? This reloads the page.')) {
+        const keys = ['cbAutoCrime','cbAutoGta','cbAutoJail','cbAutoBooze','cbAutoHealth','cbAutoGarage'];
+        keys.forEach(k => GM_setValue(k, false));
+        location.reload();
       }
-    });
-    _shadow.querySelector('#jb-clear-player').addEventListener('click', () => {
-      if (confirm('Clear player data?')) { st.player = ''; GM_setValue('cbPlayer',''); GM_setValue('cbLastNotifiedId',null); setStatus('Player cleared'); }
-    });
+    }, 'click');
+    bind('jb-clear-player', () => { st.player = ''; saveSt(); const b = _shadow.querySelector('#jb-player-badge'); if(b) b.textContent='—'; setStatus('Player cleared'); }, 'click');
 
-    // Break settings
-    _shadow.querySelector('#jb-coffee-on').addEventListener('change', e => { breaks.coffeeOn = e.target.checked; saveBreaks(); if(breaks.coffeeOn) scheduleCoffee(); });
-    _shadow.querySelector('#jb-coffee-min').addEventListener('change', e => { breaks.coffeeMinGap = Math.max(10,parseInt(e.target.value)||45); saveBreaks(); });
-    _shadow.querySelector('#jb-coffee-max').addEventListener('change', e => { breaks.coffeeMaxGap = Math.max(20,parseInt(e.target.value)||90); saveBreaks(); });
-    _shadow.querySelector('#jb-coffee-dur').addEventListener('change', e => { breaks.coffeeDuration = Math.max(1,Math.min(15,parseInt(e.target.value)||5)); saveBreaks(); });
-    _shadow.querySelector('#jb-lunch-on').addEventListener('change', e => { breaks.lunchOn = e.target.checked; saveBreaks(); });
-    _shadow.querySelector('#jb-lunch-time').addEventListener('change', e => { breaks.lunchTime = e.target.value; saveBreaks(); });
-    _shadow.querySelector('#jb-lunch-dur').addEventListener('change', e => { breaks.lunchDuration = Math.max(5,Math.min(120,parseInt(e.target.value)||30)); saveBreaks(); });
-    _shadow.querySelector('#jb-lunch-jitter').addEventListener('change', e => { breaks.lunchJitter = Math.max(0,Math.min(30,parseInt(e.target.value)||10)); saveBreaks(); });
-    _shadow.querySelector('#jb-lunch-mode').addEventListener('change', e => { breaks.lunchMode = e.target.value; saveBreaks(); });
-    _shadow.querySelector('#jb-sleep-on').addEventListener('change', e => { breaks.sleepOn = e.target.checked; saveBreaks(); });
-    _shadow.querySelector('#jb-sleep-time').addEventListener('change', e => { breaks.sleepTime = e.target.value; saveBreaks(); });
-    _shadow.querySelector('#jb-wake-time').addEventListener('change', e => { breaks.wakeTime = e.target.value; saveBreaks(); });
-    _shadow.querySelector('#jb-sleep-jitter').addEventListener('change', e => { breaks.sleepJitter = Math.max(0,Math.min(30,parseInt(e.target.value)||10)); saveBreaks(); });
-    _shadow.querySelector('#jb-sleep-mode').addEventListener('change', e => { breaks.sleepMode = e.target.value; saveBreaks(); });
-    _shadow.querySelector('#jb-sleep-logout').addEventListener('change', e => { breaks.sleepLogout = e.target.checked; saveBreaks(); });
+    // ---- Break settings ----
+    bind('jb-coffee-on', e => { breaks.coffeeOn = e.target.checked; saveBreaks(); if (e.target.checked && breaks.coffeeNextAt === 0) scheduleCoffee(); });
+    bind('jb-coffee-min', e => { breaks.coffeeMinGap = parseInt(e.target.value)||45; saveBreaks(); });
+    bind('jb-coffee-max', e => { breaks.coffeeMaxGap = parseInt(e.target.value)||90; saveBreaks(); });
+    bind('jb-coffee-dur', e => { breaks.coffeeDuration = parseInt(e.target.value)||5; saveBreaks(); });
+    bind('jb-lunch-on', e => { breaks.lunchOn = e.target.checked; saveBreaks(); });
+    bind('jb-lunch-time', e => { breaks.lunchTime = e.target.value||'12:30'; saveBreaks(); });
+    bind('jb-lunch-dur', e => { breaks.lunchDuration = parseInt(e.target.value)||30; saveBreaks(); });
+    bind('jb-lunch-jitter', e => { breaks.lunchJitter = parseInt(e.target.value)||10; saveBreaks(); });
+    bind('jb-lunch-mode', e => { breaks.lunchMode = e.target.value; saveBreaks(); });
+    bind('jb-sleep-on', e => { breaks.sleepOn = e.target.checked; saveBreaks(); });
+    bind('jb-sleep-time', e => { breaks.sleepTime = e.target.value||'23:00'; saveBreaks(); });
+    bind('jb-wake-time', e => { breaks.wakeTime = e.target.value||'07:00'; saveBreaks(); });
+    bind('jb-sleep-jitter', e => { breaks.sleepJitter = parseInt(e.target.value)||10; saveBreaks(); });
+    bind('jb-sleep-mode', e => { breaks.sleepMode = e.target.value; saveBreaks(); });
+    bind('jb-sleep-logout', e => { breaks.sleepLogout = e.target.checked; saveBreaks(); });
 
-    // Update break status periodically
+    // Break status refresh
     setInterval(() => {
       const el = _shadow.querySelector('#jb-break-status');
-      if (el) el.textContent = 'Break: ' + (getBreakStatus().msg || 'None active');
-      // Refresh jail counter too (catches game-day rollover during idle)
-      updateJailCountUI();
+      if (el) el.textContent = 'Break status: ' + (getBreakStatus().msg||'None active');
     }, 5000);
 
-    // Whitelist modal
-    function openModal2(id) { const m = _shadow.querySelector(id); const bg = _shadow.querySelector('#jb-backdrop'); if(m){m.classList.add('open');} if(bg)bg.style.display='block'; }
-    function closeModal2(id) { const m = _shadow.querySelector(id); const bg = _shadow.querySelector('#jb-backdrop'); if(m)m.classList.remove('open'); if(bg)bg.style.display='none'; }
+    // ---- Modal 2 helper (secondary modals) ----
+    function openModal2(id) { backdrop.style.display = 'block'; _shadow.querySelector('#'+id).classList.add('open'); }
+    function closeModal2(id) { backdrop.style.display = 'none'; _shadow.querySelector('#'+id).classList.remove('open'); }
 
-    _shadow.querySelector('#jb-wl-on').addEventListener('click', e => {
-      // Checkbox only — no label wrapping, so no conflict
-    });
-    // Open whitelist modal from the text link (single click)
-    _shadow.querySelector('#jb-wl-link').addEventListener('click', e => {
-      e.preventDefault(); e.stopPropagation();
-      openModal2('#jb-wl-modal');
-      renderWl();
-    });
-
-    _shadow.querySelector('#jb-wl-close').addEventListener('click', () => closeModal2('#jb-wl-modal'));
-
-    // XP Charts modal
-    const xpChartsLink = _shadow.querySelector('#jb-xp-charts-link');
-    if (xpChartsLink) xpChartsLink.addEventListener('click', e => {
-      e.preventDefault(); e.stopPropagation();
-      openModal2('#jb-xp-modal');
-      renderXpCharts();
-    });
-    const xpClose = _shadow.querySelector('#jb-xp-close');
-    if (xpClose) xpClose.addEventListener('click', () => closeModal2('#jb-xp-modal'));
-    const xpReset = _shadow.querySelector('#jb-xp-reset');
-    if (xpReset) xpReset.addEventListener('click', () => {
-      resetXpSession();
-      renderXpCharts();
-      setStatus('XP session reset');
-    });
-
+    // ---- Whitelist modal ----
+    _shadow.querySelector('#jb-wl-link').addEventListener('click', () => openModal2('jb-wl-modal'));
+    _shadow.querySelector('#jb-wl-close').addEventListener('click', () => closeModal2('jb-wl-modal'));
     function renderWl() {
-      const el = _shadow.querySelector('#jb-wl-entries');
-      if (!el) return;
-      el.innerHTML = '';
-      if (!st.wlNames.length) { el.innerHTML = '<div class="jb-sub">No players — all invites accepted.</div>'; return; }
-      st.wlNames.forEach((name, i) => {
-        const row = document.createElement('div');
-        row.className = 'jb-row';
-        const inp = document.createElement('input');
-        inp.className = 'jb-input'; inp.value = name; inp.placeholder = `Player ${i+1}`; inp.style.flex = '1';
-        inp.addEventListener('change', () => { st.wlNames[i] = inp.value.trim(); saveSt(); });
-        const btn = document.createElement('button');
-        btn.className = 'jb-btn jb-btn-danger'; btn.textContent = '✕'; btn.style.padding = '2px 6px';
-        btn.addEventListener('click', () => { st.wlNames.splice(i,1); saveSt(); renderWl(); });
-        row.appendChild(inp); row.appendChild(btn);
-        el.appendChild(row);
-      });
+      const host = _shadow.querySelector('#jb-wl-entries');
+      if (!host) return;
+      if (!st.wlNames.length) { host.innerHTML = '<div class="jb-sub">No players — accepting all invites.</div>'; return; }
+      host.innerHTML = st.wlNames.map((n,i) => `<div class="jb-row"><input class="jb-input jb-wl-name" data-i="${i}" value="${esc(n)}" style="flex:1"><button class="jb-btn jb-btn-danger jb-wl-del" data-i="${i}" style="padding:2px 8px">✕</button></div>`).join('');
+      host.querySelectorAll('.jb-wl-name').forEach(inp => inp.addEventListener('change', e => { const i = parseInt(e.target.getAttribute('data-i')); st.wlNames[i] = e.target.value.trim(); saveSt(); }));
+      host.querySelectorAll('.jb-wl-del').forEach(btn => btn.addEventListener('click', e => { const i = parseInt(e.target.getAttribute('data-i')); st.wlNames.splice(i,1); saveSt(); renderWl(); }));
     }
-    _shadow.querySelector('#jb-wl-add').addEventListener('click', () => { if(st.wlNames.length >= 10) return alert('Max 10'); st.wlNames.push(''); saveSt(); renderWl(); });
+    renderWl();
+    _shadow.querySelector('#jb-wl-add').addEventListener('click', () => { st.wlNames.push(''); saveSt(); renderWl(); });
     _shadow.querySelector('#jb-clear-cd').addEventListener('click', () => {
-      localStorage.removeItem(LS_LAST_DTM_ACC); localStorage.removeItem(LS_LAST_OC_ACC);
-      localStorage.removeItem(LS_LAST_DTM_MAIL); localStorage.removeItem(LS_LAST_OC_MAIL);
-      localStorage.removeItem('cbPendDtmHandle'); localStorage.removeItem('cbPendOcHandle');
-      localStorage.removeItem(LS_PEND_DTM); localStorage.removeItem(LS_PEND_OC);
+      ['cbLastOcMail','cbLastDtmMail','cbLastOcAcc','cbLastDtmAcc','cbPendOcUrl','cbPendDtmUrl','cbPendOcHandle','cbPendDtmHandle','cbAlertedMails'].forEach(k => localStorage.removeItem(k));
       setStatus('Cooldowns cleared');
     });
 
-    // Online Watch modal
-    _shadow.querySelector('#jb-ow-on').addEventListener('change', e => { ow.on = e.target.checked; saveOw(); owStart(); });
-    const owModalOn = _shadow.querySelector('#jb-ow-modal-on');
-    if (owModalOn) owModalOn.addEventListener('change', e => {
-      ow.on = e.target.checked; saveOw(); owStart();
-      const main = _shadow.querySelector('#jb-ow-on'); if(main) main.checked = ow.on;
-    });
-    _shadow.querySelector('#jb-ow-close').addEventListener('click', () => closeModal2('#jb-ow-modal'));
-    _shadow.querySelector('#jb-ow-sec').addEventListener('change', e => { ow.sec = Math.max(OW_MIN_SEC,Math.min(3600,parseInt(e.target.value)||OW_DEF_SEC)); saveOw(); owStart(); });
-    _shadow.querySelector('#jb-ow-notify').addEventListener('change', e => { ow.notify = e.target.checked; saveOw(); if(ow.notify) askNotifyPerm(); });
-    _shadow.querySelector('#jb-ow-flash').addEventListener('change', e => { ow.flash = e.target.checked; saveOw(); });
-    _shadow.querySelector('#jb-ow-sound').addEventListener('change', e => { ow.sound = e.target.checked; saveOw(); });
-    _shadow.querySelector('#jb-ow-tg').addEventListener('change', e => { ow.telegram = e.target.checked; saveOw(); });
-    _shadow.querySelector('#jb-ow-offnotify').addEventListener('change', e => { ow.notifyOff = e.target.checked; saveOw(); });
-    _shadow.querySelector('#jb-ow-scan').addEventListener('click', () => owScan('manual'));
-    _shadow.querySelector('#jb-ow-clear').addEventListener('click', () => { ow.lastOn={}; ow.lastAlert={}; ow.scanAt=0; ow.scanOk=false; ow.scanMsg='Cleared'; saveOw(); renderOwUI(); });
+    // ---- XP charts modal ----
+    const xpModal = _shadow.querySelector('#jb-xp-modal');
+    function openXp() { backdrop.style.display = 'block'; xpModal.classList.add('open'); renderXpCharts(); }
+    function closeXp() { backdrop.style.display = 'none'; xpModal.classList.remove('open'); }
+    _shadow.querySelector('#jb-xp-charts-link').addEventListener('click', openXp);
+    _shadow.querySelector('#jb-xp-close').addEventListener('click', closeXp);
+    bind('jb-xp-reset', () => { if (confirm('Reset XP session tracking?')) { resetXpSession(); renderXpCharts(); updateXpUI(); } }, 'click');
 
-    const owAddBtn = _shadow.querySelector('#jb-ow-add');
-    const owNameInp = _shadow.querySelector('#jb-ow-name');
-    if (owAddBtn && owNameInp) {
-      const addOw = () => { owAdd(owNameInp.value); owNameInp.value = ''; owNameInp.focus(); };
-      owAddBtn.addEventListener('click', addOw);
-      owNameInp.addEventListener('keydown', e => { if(e.key==='Enter') addOw(); });
-    }
+    // ---- Online Watch modal ----
+    _shadow.querySelector('#jb-ow-link').addEventListener('click', () => openModal2('jb-ow-modal'));
+    _shadow.querySelector('#jb-ow-close').addEventListener('click', () => closeModal2('jb-ow-modal'));
+    bind('jb-ow-modal-on', e => { ow.on = e.target.checked; const t = _shadow.querySelector('#jb-ow-on'); if(t) t.checked = ow.on; saveOw(); owStart(); });
+    bind('jb-ow-sec', e => { ow.sec = Math.max(OW_MIN_SEC, Math.min(3600, parseInt(e.target.value)||60)); saveOw(); owStart(); });
+    bind('jb-ow-notify', e => { ow.notify = e.target.checked; saveOw(); if (e.target.checked) askNotifyPerm(); });
+    bind('jb-ow-flash', e => { ow.flash = e.target.checked; saveOw(); });
+    bind('jb-ow-sound', e => { ow.sound = e.target.checked; saveOw(); });
+    bind('jb-ow-tg', e => { ow.telegram = e.target.checked; saveOw(); });
+    bind('jb-ow-offnotify', e => { ow.notifyOff = e.target.checked; saveOw(); });
+    bind('jb-ow-add', () => { const inp = _shadow.querySelector('#jb-ow-name'); if(inp){ owAdd(inp.value); inp.value=''; } }, 'click');
+    bind('jb-ow-scan', () => owScan('manual'), 'click');
+    bind('jb-ow-clear', () => { if(confirm('Clear watch list?')){ ow.list=[]; ow.lastOn={}; ow.lastAlert={}; saveOw(); renderOwUI(); } }, 'click');
 
-    // Implement renderOwUI properly now
+    // Implement renderOwUI now that shadow exists
     renderOwUI = function() {
-      const mainCb = _shadow.querySelector('#jb-ow-on'); if(mainCb) mainCb.checked = ow.on;
-      const modalCb = _shadow.querySelector('#jb-ow-modal-on'); if(modalCb) modalCb.checked = ow.on;
-      const listEl = _shadow.querySelector('#jb-ow-list');
-      if (listEl) {
-        if (!ow.list.length) { listEl.innerHTML = '<div class="jb-sub">No watched players.</div>'; }
-        else {
-          listEl.innerHTML = ow.list.map(name => {
-            const k = normName(name), on = !!ow.lastOn[k];
-            return `<div class="jb-row" style="font-size:11px;padding:3px;background:var(--jb-surface-alt);border-radius:2px;margin-bottom:3px">
-              <span style="color:${on?'var(--jb-success)':'var(--jb-text-ter)'}">●</span>
-              <span style="flex:1">${esc(name)} <span class="jb-sub">(${on?'Online':'Offline'})</span></span>
-              <button class="jb-btn jb-btn-danger jb-ow-rm" data-name="${esc(name)}" style="padding:1px 5px;font-size:10px">✕</button>
-            </div>`;
-          }).join('');
-          listEl.querySelectorAll('.jb-ow-rm').forEach(btn => btn.addEventListener('click', () => owRemove(btn.getAttribute('data-name'))));
-        }
+      const host = _shadow && _shadow.querySelector('#jb-ow-list');
+      if (!host) return;
+      if (!ow.list.length) { host.innerHTML = '<div class="jb-sub">No players watched.</div>'; }
+      else {
+        host.innerHTML = ow.list.map(n => {
+          const on = !!ow.lastOn[normName(n)];
+          return `<div class="jb-row" style="justify-content:space-between"><span>${on?'🟢':'⚫'} ${esc(n)}</span><button class="jb-btn jb-btn-danger jb-ow-del" data-n="${esc(n)}" style="padding:1px 6px">✕</button></div>`;
+        }).join('');
+        host.querySelectorAll('.jb-ow-del').forEach(btn => btn.addEventListener('click', e => owRemove(e.target.getAttribute('data-n'))));
       }
-      const statusEl = _shadow.querySelector('#jb-ow-status');
-      if (statusEl) statusEl.textContent = ow.scanOk ? ow.scanMsg : (ow.scanMsg||'Not scanned');
+      const stEl = _shadow.querySelector('#jb-ow-status');
+      if (stEl) stEl.textContent = ow.scanMsg;
     };
     renderOwUI();
 
-    // Open watch modal from text link (single click)
-    _shadow.querySelector('#jb-ow-link').addEventListener('click', e => {
-      e.preventDefault(); e.stopPropagation();
-      openModal2('#jb-ow-modal');
-      renderOwUI();
-    });
+    // ---- OC modal ----
+    _shadow.querySelector('#jb-oc-link').addEventListener('click', () => openModal2('jb-oc-modal'));
+    _shadow.querySelector('#jb-oc-close').addEventListener('click', () => closeModal2('jb-oc-modal'));
+    bind('jb-oc-type', e => { st.ocType = e.target.value; saveSt(); });
+    bind('jb-oc-trans', e => { st.ocTrans = e.target.value.trim(); saveSt(); });
+    bind('jb-oc-weapon', e => { st.ocWeapon = e.target.value.trim(); saveSt(); });
+    bind('jb-oc-explo', e => { st.ocExplo = e.target.value.trim(); saveSt(); });
+    bind('jb-oc-sched', e => { st.ocSched = e.target.value; saveSt(); });
+    bind('jb-oc-repeat', e => { st.ocRepeat = e.target.value; if (e.target.value.startsWith('repeat_')) st.ocLeft = parseInt(e.target.value.split('_')[1]); saveSt(); });
+    bind('jb-hot-refresh', () => { localStorage.removeItem(LS_HOT); localStorage.removeItem(LS_HOT_UNTIL); fetchHot(); }, 'click');
+    bind('jb-oc-reset', () => { resetCreateOC(); const s = _shadow.querySelector('#jb-oc-state'); if(s) s.textContent = 'idle (step 0)'; setStatus('OC creation reset'); }, 'click');
 
-    // OC Leader modal
-    _shadow.querySelector('#jb-oc-close').addEventListener('click', () => closeModal2('#jb-oc-modal'));
-    _shadow.querySelector('#jb-oc-type').addEventListener('change', e => { st.ocType = e.target.value; saveSt(); });
-    _shadow.querySelector('#jb-oc-trans').addEventListener('blur', e => { st.ocTrans = e.target.value.trim(); saveSt(); });
-    _shadow.querySelector('#jb-oc-weapon').addEventListener('blur', e => { st.ocWeapon = e.target.value.trim(); saveSt(); });
-    _shadow.querySelector('#jb-oc-explo').addEventListener('blur', e => { st.ocExplo = e.target.value.trim(); saveSt(); });
-    _shadow.querySelector('#jb-oc-sched').addEventListener('change', e => { st.ocSched = e.target.value; saveSt(); });
-    _shadow.querySelector('#jb-oc-repeat').addEventListener('change', e => {
-      st.ocRepeat = e.target.value;
-      if (e.target.value === 'repeat_1') st.ocLeft = 1;
-      else if (e.target.value === 'repeat_2') st.ocLeft = 2;
-      else if (e.target.value === 'repeat_3') st.ocLeft = 3;
-      else st.ocLeft = 0;
-      saveSt();
-    });
-    _shadow.querySelector('#jb-hot-refresh').addEventListener('click', () => { localStorage.removeItem(LS_HOT); localStorage.removeItem(LS_HOT_UNTIL); localStorage.removeItem('cbHotFetchAt'); fetchHot(); });
-    _shadow.querySelector('#jb-oc-reset').addEventListener('click', () => { resetCreateOC(); const s = _shadow.querySelector('#jb-oc-state'); if(s) s.textContent = 'idle (step 0)'; });
+    // ---- DTM modal ----
+    _shadow.querySelector('#jb-dtm-link').addEventListener('click', () => openModal2('jb-dtm-modal'));
+    _shadow.querySelector('#jb-dtm-close').addEventListener('click', () => closeModal2('jb-dtm-modal'));
+    bind('jb-dtm-partner', e => { st.dtmPartner = e.target.value.trim(); saveSt(); });
+    bind('jb-dtm-sched', e => { st.dtmSched = e.target.value; saveSt(); });
+    bind('jb-dtm-repeat', e => { st.dtmRepeat = e.target.value; if (e.target.value.startsWith('repeat_')) st.dtmLeft = parseInt(e.target.value.split('_')[1]); saveSt(); });
+    bind('jb-dtm-reset', () => { resetCreateDTM(); const s = _shadow.querySelector('#jb-dtm-state'); if(s) s.textContent = 'idle (step 0)'; setStatus('DTM creation reset'); }, 'click');
 
-    // Open OC modal from text link (single click)
-    _shadow.querySelector('#jb-oc-link').addEventListener('click', e => {
-      e.preventDefault(); e.stopPropagation();
-      openModal2('#jb-oc-modal');
-    });
-
-    // DTM creation toggle + modal
-    _shadow.querySelector('#jb-create-dtm').checked = st.createDTM;
-    _shadow.querySelector('#jb-create-dtm').addEventListener('change', e => {
-      st.createDTM = e.target.checked; saveSt();
-      setStatus('🚚 Create DTM ' + (st.createDTM ? 'ON' : 'OFF'));
-      if (st.createDTM && !getHot()) fetchHot();
-    });
-    _shadow.querySelector('#jb-dtm-link').addEventListener('click', e => {
-      e.preventDefault(); e.stopPropagation();
-      openModal2('#jb-dtm-modal');
-    });
-    _shadow.querySelector('#jb-dtm-close').addEventListener('click', () => closeModal2('#jb-dtm-modal'));
-    _shadow.querySelector('#jb-dtm-partner').addEventListener('blur', e => { st.dtmPartner = e.target.value.trim(); saveSt(); });
-    _shadow.querySelector('#jb-dtm-sched').addEventListener('change', e => { st.dtmSched = e.target.value; saveSt(); });
-    _shadow.querySelector('#jb-dtm-repeat').addEventListener('change', e => {
-      st.dtmRepeat = e.target.value;
-      if (e.target.value === 'repeat_1') st.dtmLeft = 1;
-      else if (e.target.value === 'repeat_2') st.dtmLeft = 2;
-      else st.dtmLeft = 0;
-      saveSt();
-    });
-    _shadow.querySelector('#jb-dtm-reset').addEventListener('click', () => {
-      resetCreateDTM();
-      const s = _shadow.querySelector('#jb-dtm-state');
-      if (s) s.textContent = 'idle (step 0)';
-    });
-
-    // Initialize jail counter display
+    // ---- Jail counter init ----
     updateJailCountUI();
 
-    // Drag
-    let locked = GM_getValue('cbLocked', true);
-    let posX = GM_getValue('cbPosX', null), posY = GM_getValue('cbPosY', null);
-    if (posX !== null && posY !== null) { host.style.right = 'auto'; host.style.left = posX+'px'; host.style.top = posY+'px'; }
+    // ---- Drag + lock ----
+    let locked = GM_getValue('cbUiLocked', false);
     const lockBtn = _shadow.querySelector('#jb-lock-btn');
-    const dragH = _shadow.querySelector('#jb-drag');
-    function updLock() { lockBtn.textContent = locked ? '🔒' : '🔓'; dragH.style.cursor = locked ? 'default' : 'grab'; }
-    updLock();
-    lockBtn.addEventListener('click', e => { e.stopPropagation(); locked = !locked; GM_setValue('cbLocked', locked); updLock(); });
-    let dragging = false, dx, dy, hx, hy;
-    dragH.addEventListener('mousedown', e => {
-      if (locked || e.target.closest('.jb-hbtn')) return;
-      dragging = true; dragH.style.cursor = 'grabbing';
-      const rect = host.getBoundingClientRect(); hx = rect.left; hy = rect.top; dx = e.clientX; dy = e.clientY;
+    function applyLock() { lockBtn.textContent = locked ? '🔒' : '🔓'; lockBtn.title = locked ? 'Locked' : 'Unlocked'; }
+    applyLock();
+    lockBtn.addEventListener('click', () => { locked = !locked; GM_setValue('cbUiLocked', locked); applyLock(); });
+
+    const savedPos = GM_getValue('cbUiPos', null);
+    if (savedPos && savedPos.top != null) { host.style.top = savedPos.top+'px'; host.style.right = 'auto'; host.style.left = savedPos.left+'px'; }
+
+    const dragHandle = _shadow.querySelector('#jb-drag');
+    let dragging = false, dx = 0, dy = 0;
+    dragHandle.addEventListener('mousedown', e => {
+      if (locked) return;
+      dragging = true;
+      const rect = host.getBoundingClientRect();
+      dx = e.clientX - rect.left; dy = e.clientY - rect.top;
       e.preventDefault();
     });
-    document.addEventListener('mousemove', e => { if (!dragging) return; host.style.right='auto'; host.style.left=(hx+e.clientX-dx)+'px'; host.style.top=(hy+e.clientY-dy)+'px'; });
-    document.addEventListener('mouseup', () => { if (!dragging) return; dragging = false; dragH.style.cursor = locked?'default':'grab'; const r = host.getBoundingClientRect(); GM_setValue('cbPosX',r.left); GM_setValue('cbPosY',r.top); });
+    document.addEventListener('mousemove', e => {
+      if (!dragging) return;
+      let nl = e.clientX - dx, nt = e.clientY - dy;
+      nl = Math.max(0, Math.min(window.innerWidth - 60, nl));
+      nt = Math.max(0, Math.min(window.innerHeight - 30, nt));
+      host.style.left = nl+'px'; host.style.top = nt+'px'; host.style.right = 'auto';
+    });
+    document.addEventListener('mouseup', () => {
+      if (!dragging) return;
+      dragging = false;
+      const rect = host.getBoundingClientRect();
+      GM_setValue('cbUiPos', { top: rect.top, left: rect.left });
+    });
   }
 
+  /* === AUTO TRAVEL + DTM LIST === */
 
-  /* === AUTO TRAVEL TO HOT CITY & DTM LIST === */
+  const OCADS_PATH = '/authenticated/organizedcrimeads.aspx';
 
-  const OCADS_PATH = '/authenticated/ocads.aspx';
-  const LS_DTM_LIST_DONE = 'cbDtmListDone';
-  const LS_TRAVEL_PENDING = 'cbTravelPending';
-
-  // Check if we're currently in the hot city
-  function isInHot() {
-    const hot = getHot();
-    if (!hot) return false;
-    const cur = getCurCity();
-    if (!cur) return false;
-    return cur.toLowerCase().includes(hot.toLowerCase()) || hot.toLowerCase().includes(cur.toLowerCase());
-  }
-
-  // Auto-travel to hot city via the travel page
   async function doAutoTravel() {
-    if (!st.autoTravel || st.inJail || st.acting || paused) return false;
+    if (!st.autoTravel || st.inJail || paused || st.acting) return;
+    if (!getHot()) { fetchHot(); return; }
+    if (isInHot()) return; // already there
+    const trav = getTravel();
+    if (trav && !trav.ready) return; // still on cooldown
+    if (curPage() !== 'travel') { safeNav('/authenticated/travel.aspx?'+Date.now()); return; }
 
-    // Need hot city known
-    if (!getHot()) { fetchHot(); return false; }
-
-    // Already in hot city
-    if (isInHot()) {
-      localStorage.removeItem(LS_TRAVEL_PENDING);
-      return false;
+    const hot = getHot();
+    // Find the hot city radio + travel button (jet preferred if available)
+    const radios = [...document.querySelectorAll('input[type=radio][name="ctl00$main$citieslist"]')];
+    let target = null;
+    for (const r of radios) {
+      const lbl = r.closest('td,tr,label')?.textContent || '';
+      if (hot && lbl.toLowerCase().includes(hot.toLowerCase())) { target = r; break; }
     }
-
-    // Check travel timer is ready
-    const travel = getTravel();
-    if (!travel || !travel.ready) return false;
-
-    const pg = curPage();
-
-    // If not on travel page, navigate there
-    if (pg !== 'travel') {
-      console.log('[JB][TRAVEL] Navigating to travel page for auto-travel to', getHot());
-      localStorage.setItem(LS_TRAVEL_PENDING, '1');
-      setStatus(`✈️ Traveling to ${getHot()}...`);
-      safeNav('/authenticated/travel.aspx?' + Date.now());
-      return true;
-    }
-
-    // On travel page — select hot city radio and click travel
-    if (localStorage.getItem(LS_TRAVEL_PENDING) === '1') {
-      const hotCity = getHot();
-      const hotLower = hotCity.toLowerCase();
-      console.log('[JB][TRAVEL] On travel page — looking for radio matching', hotCity);
-
-      // Find the radio button matching the hot city by label text
-      const radios = [...document.querySelectorAll('input[type=radio][name="ctl00$main$citieslist"]')];
-      let cityRadio = null;
-      for (const r of radios) {
-        const label = (r.parentElement?.textContent || r.closest('td,tr,label')?.textContent || '').toLowerCase();
-        if (label.includes(hotLower)) { cityRadio = r; break; }
-      }
-
-      if (!cityRadio) {
-        console.log('[JB][TRAVEL] Could not find radio for hot city:', hotCity);
-        localStorage.removeItem(LS_TRAVEL_PENDING);
-        return false;
-      }
-
-      cityRadio.checked = true;
-      try { cityRadio.dispatchEvent(new Event('change', {bubbles:true})); } catch(_){}
-      console.log('[JB][TRAVEL] Selected city radio:', cityRadio.id, '(value:', cityRadio.value, ')');
-
-      // Wait briefly, then click travel button — jet if DTM is close to ready, otherwise normal
-      setTimeout(() => {
-        // Decide jet vs normal: if DTM cooldown < 40 min, use jet (20 min cooldown vs 45 min)
-        const dtm = getDtm();
-        const dtmMinsLeft = dtm && !dtm.ready ? Math.ceil((dtm.total||0)/60) : 999;
-        const useJet = dtmMinsLeft < 40;
-
-        const btnId = useJet ? 'ctl00_main_btnTravelPrivate' : 'ctl00_main_btnTravelNormal';
-        const travelBtn = document.getElementById(btnId) ||
-                         (useJet
-                           ? [...document.querySelectorAll('input[type="submit"]')].find(b => /private\s*jet/i.test(b.value||''))
-                           : [...document.querySelectorAll('input[type="submit"]')].find(b => /^travel\s*\(normal\)/i.test(b.value||'')));
-
-        if (travelBtn && !travelBtn.disabled) {
-          console.log(`[JB][TRAVEL] DTM in ${dtmMinsLeft}m — using ${useJet?'JET (20m cd)':'NORMAL (45m cd)'}`);
-          st.acting = true; st.action = 'travel';
-          GM_setValue('cbActStart', Date.now());
-          travelBtn.click();
-
-          setTimeout(() => {
-            localStorage.removeItem(LS_TRAVEL_PENDING);
-            st.acting = false; st.action = '';
-            GM_setValue('cbActStart', 0);
-            // Set correct cooldown: jet=20min, normal=45min
-            const cooldown = useJet ? 20*60 : 45*60;
-            storeTravel({ cd: cooldown, canNormal: false, at: Date.now() });
-            saveSt();
-            const mode = useJet ? '🛩️ Jet' : '✈️ Plane';
-            tgMsg('travel', `${mode} <b>Traveled</b>\n${st.player||'?'} → ${hotCity}${useJet?` | DTM in ${dtmMinsLeft}m`:''}`);
-            setStatus(`${mode} → ${hotCity}`);
-            // Navigate away after travel completes
-            setTimeout(() => {
-              window.location.href = '/authenticated/crimes.aspx?' + Date.now();
-            }, 1500);
-          }, 2000);
-        } else {
-          console.log('[JB][TRAVEL] Travel button not found or disabled:', btnId);
-          localStorage.removeItem(LS_TRAVEL_PENDING);
-        }
-      }, 500 + Math.floor(Math.random() * 500));
-      return true;
-    }
-
-    return false;
+    if (!target) return; // hot city not travellable right now
+    target.checked = true;
+    try { target.dispatchEvent(new Event('change',{bubbles:true})); } catch(_){}
+    st.acting = true; st.action = 'travel'; GM_setValue('cbActStart', Date.now());
+    const jetBtn = document.getElementById('ctl00_main_btnTravelJet');
+    const normBtn = document.getElementById('ctl00_main_btnTravelNormal');
+    const btn = (jetBtn && !jetBtn.disabled) ? jetBtn : normBtn;
+    if (btn && !btn.disabled) {
+      tgMsg('travel', `✈️ <b>Auto Travel</b>\n${st.player||'?'} | → ${hot}`);
+      setTimeout(() => { btn.click(); }, rndDelay(DLY.normal));
+    } else { st.acting = false; }
   }
 
-  // Auto-add to DTM list at ocads.aspx
   async function doAutoAddDtmList() {
-    if (!st.autoDtmList || st.inJail || st.acting || paused) return false;
-
-    // DTM timer must be ready
-    const dtm = getDtm();
-    if (!dtm || !dtm.ready) return false;
-
-    // Must be in hot city
-    if (!isInHot()) {
-      // If auto-travel is on, it will handle getting us there
-      return false;
+    if (!st.autoDtmList || st.inJail || paused || st.acting) return;
+    checkDtmListReset();
+    if (localStorage.getItem('cbDtmListDone') === todayStr()) return;
+    if (curPage() !== 'other' || !/organizedcrimeads\.aspx/i.test(location.pathname)) {
+      // Only navigate occasionally
+      const last = parseInt(localStorage.getItem('cbDtmListNav')||'0',10);
+      if (Date.now()-last < 300000) return;
+      localStorage.setItem('cbDtmListNav', String(Date.now()));
+      safeNav(OCADS_PATH+'?'+Date.now());
+      return;
     }
-
-    // Check if we already added today (or recently) — don't spam
-    const lastDone = parseInt(localStorage.getItem(LS_DTM_LIST_DONE) || '0', 10);
-    if (lastDone > 0 && (Date.now() - lastDone) < 30 * 60 * 1000) {
-      // Added within last 30 min — skip
-      return false;
-    }
-
-    const pg = curPage();
-    const onOcads = window.location.pathname.toLowerCase().includes('ocads.aspx');
-
-    // Navigate to ocads page if not there
-    if (!onOcads) {
-      console.log('[JB][DTMLIST] Navigating to DTM list page');
-      setStatus('📋 Adding to DTM list...');
-      safeNav(OCADS_PATH + '?' + Date.now());
-      return true;
-    }
-
-    // On ocads page — find and click "Add me!" button
-    const addBtn = document.getElementById('ctl00_main_btnAddDTM') ||
-                   document.querySelector('input[value="Add me!"]') ||
-                   [...document.querySelectorAll('input[type="submit"]')].find(b => /add me/i.test(b.value||''));
-
+    const addBtn = [...document.querySelectorAll('input[type="submit"],button,a')].find(b => /add.*(list|dtm)|join.*list/i.test((b.value||b.textContent||'').trim()));
     if (addBtn && !addBtn.disabled) {
-      console.log('[JB][DTMLIST] Clicking Add me! button');
-      st.acting = true; st.action = 'dtmlist';
-      GM_setValue('cbActStart', Date.now());
-
-      setTimeout(() => {
-        addBtn.click();
-        localStorage.setItem(LS_DTM_LIST_DONE, String(Date.now()));
-        tgMsg('dtmList', `📋 <b>DTM List</b>\n${st.player||'?'} | Added to DTM list in ${getCurCity()}`);
-        setStatus('📋 Added to DTM list');
-
-        setTimeout(() => {
-          st.acting = false; st.action = '';
-          GM_setValue('cbActStart', 0);
-          saveSt();
-          // Go back to crimes
-          window.location.href = '/authenticated/crimes.aspx?' + Date.now();
-        }, 1500);
-      }, 300 + Math.floor(Math.random() * 400));
-
-      return true;
-    } else {
-      // Button not found or disabled — maybe already on list or not eligible
-      const bodyTxt = (document.body.textContent || '').toLowerCase();
-      if (bodyTxt.includes('already') || bodyTxt.includes('on the list')) {
-        console.log('[JB][DTMLIST] Already on DTM list');
-        localStorage.setItem(LS_DTM_LIST_DONE, String(Date.now()));
-        setStatus('📋 Already on DTM list');
-      } else if (bodyTxt.includes('cooldown') || bodyTxt.includes('wait')) {
-        console.log('[JB][DTMLIST] DTM on cooldown');
-      } else {
-        console.log('[JB][DTMLIST] Add button not available');
-      }
-      // Navigate away
-      setTimeout(() => {
-        window.location.href = '/authenticated/crimes.aspx?' + Date.now();
-      }, 1000);
-      return true;
+      addBtn.click();
+      localStorage.setItem('cbDtmListDone', todayStr());
+      tgMsg('dtmList', `📋 <b>DTM List</b>\n${st.player||'?'} | Added to list`);
     }
   }
 
-  // Clear DTM list done flag when DTM timer goes from ready to cooldown (means we did a DTM)
   function checkDtmListReset() {
-    const dtm = getDtm();
-    if (dtm && !dtm.ready && dtm.total > 60) {
-      // DTM is on cooldown — clear the "added" flag so we re-add when it's ready again
-      localStorage.removeItem(LS_DTM_LIST_DONE);
-    }
+    const done = localStorage.getItem('cbDtmListDone');
+    if (done && done !== todayStr()) localStorage.removeItem('cbDtmListDone');
   }
 
-  /* === XP TRACKING + NO-XP STREAK LIMITER ===
-   * Reads the player's Experience from the game's own status-refresh XHR
-   * (hndlr.ashx?m=pst), attributes each gain to the action that fired just
-   * before it, keeps a rolling history + per-action session totals for the
-   * charts, and (optionally) disables an action that yields no XP N times in
-   * a row — the game's daily cap, detected rather than hard-coded.
-   */
+  /* === XP TRACKING + NO-XP LIMITER === */
 
-  const XP_ACTIONS = ['crime','gta','booze','jail','garage','oc','dtm'];
+  const XP_ACTIONS = ['crime','gta','booze','jail','oc','dtm'];
+  const ACTION_ICON = { crime:'🔫', gta:'🚗', booze:'🍺', jail:'⛓️', oc:'🏢', dtm:'🚚', other:'⚡' };
+
   const xpState = {
     total:        GM_getValue('cbXpTotal', 0),
-    sessionGain:  GM_getValue('cbXpSessionGain', 0),
-    sessionStart: GM_getValue('cbXpSessionStart', Date.now()),
-    perAction:    GM_getValue('cbXpPerAction', null) || {},
-    history:      GM_getValue('cbXpHistory', null) || [],
-    samples:      GM_getValue('cbXpSamples', null) || []
+    sessionStart: GM_getValue('cbXpSessStart', Date.now()),
+    sessionGain:  GM_getValue('cbXpSessGain', 0),
+    perAction:    GM_getValue('cbXpPerAction', {}),
+    history:      GM_getValue('cbXpHistory', []),
+    samples:      GM_getValue('cbXpSamples', []),
+    lastAction:   GM_getValue('cbXpLastAction', ''),
+    lastActionTs: GM_getValue('cbXpLastActionTs', 0)
   };
-  XP_ACTIONS.forEach(a => { if (typeof xpState.perAction[a] !== 'number') xpState.perAction[a] = 0; });
+  if (!xpState.perAction || typeof xpState.perAction !== 'object') xpState.perAction = {};
+  if (!Array.isArray(xpState.history)) xpState.history = [];
+  if (!Array.isArray(xpState.samples)) xpState.samples = [];
 
-  const ACTION_ICON = { crime:'👜', gta:'🏎️', booze:'🍺', jail:'⛓️', garage:'🏪', oc:'🎯', dtm:'💊', other:'⚡' };
+  // Rank table: XP required WITHIN each rank step to advance (from a Legend contact).
+  const perRankReq = [5,15,60,60,80,100,130,150,200,300,400,500,1000,2000,3000,3000];
+  const cumRankReq = (() => { const a = []; let s = 0; for (const r of perRankReq) { s += r; a.push(s); } return a; })();
 
-  /* === RANK TABLE (per-rank XP requirements) ===
-   * perRankReq[i] = XP needed WITHIN rank-step i to advance to the next rank.
-   * Supplied by a Legend-rank player. The game's status bar gives us the rank
-   * NAME and a PERCENTAGE toward the next rank (lblrank / lblRankbarPerc, already
-   * parsed by readBar). This table turns that bare % into absolute numbers
-   * ("X XP into rank, Y to next") and powers the rank ladder on the stats page.
-   * cumRankReq = running totals, used to locate the current rank from a cumulative
-   * Experience value when one is available (self-validated against the status %).
-   */
-  const perRankReq = [5, 15, 60, 60, 80, 100, 130, 150, 200, 300, 400, 500, 1000, 2000, 3000, 3000];
-  const cumRankReq = (() => { let s = 0; return perRankReq.map(v => (s += v)); })(); // [5,20,80,140,...]
-
-  // Rank state captured from the status bar each tick (name + % toward next rank).
   const rankState = {
-    name:    GM_getValue('cbRankName', ''),
-    pct:     GM_getValue('cbRankPct', 0),     // 0..100 toward next rank
-    idx:     -1,                              // resolved rank-step index (best effort)
-    confident: false,                         // true when idx is validated against XP
-    lastName: GM_getValue('cbRankLastName', '')
+    name:     GM_getValue('cbRankName', ''),
+    lastName: GM_getValue('cbRankLastName', ''),
+    pct:      GM_getValue('cbRankPct', 0)
   };
 
-  // Resolve which perRankReq index the player is on, plus absolute XP into/to-next.
-  // Strategy: if we have a cumulative Experience value, find the step whose cumulative
-  // window contains it, then VALIDATE the implied within-rank % against the status-bar
-  // %. If they agree (±6%), we're confident (cumulative-XP model). Otherwise we fall
-  // back to deriving the step from the status %: the step whose size best matches
-  // Experience / (pct/100) — but only mark confident when a cross-check passes.
+  // Resolve current rank step from cumulative XP, cross-checked against status-bar %.
   function resolveRank() {
-    const pct = rankState.pct;
-    const xp = xpState.total;
-    let idx = -1, withinXp = null, toNext = null, confident = false;
-
-    if (xp > 0) {
-      // Cumulative model: locate the step window [cumBefore, cumBefore+req)
-      let cumBefore = 0;
-      for (let i = 0; i < perRankReq.length; i++) {
-        if (xp < cumRankReq[i]) {
-          idx = i;
-          const into = xp - cumBefore;
-          const impliedPct = perRankReq[i] > 0 ? (into / perRankReq[i]) * 100 : 0;
-          // Validate against the status-bar percentage
-          if (pct > 0 && Math.abs(impliedPct - pct) <= 6) {
-            withinXp = parseFloat(into.toFixed(2));
-            toNext = parseFloat((perRankReq[i] - into).toFixed(2));
-            confident = true;
-          }
-          break;
-        }
-        cumBefore = cumRankReq[i];
-      }
-      if (idx === -1) idx = perRankReq.length - 1; // past the table — max rank
-    }
-
-    // If not confident from cumulative XP but we have a % and an idx guess, still
-    // derive absolute numbers from the % (less authoritative, shown as approximate).
-    if (!confident && idx >= 0 && pct > 0) {
-      const req = perRankReq[idx];
-      withinXp = parseFloat(((pct / 100) * req).toFixed(1));
-      toNext  = parseFloat((req - withinXp).toFixed(1));
-    }
-
-    rankState.idx = idx;
-    rankState.confident = confident;
-    return { idx, withinXp, toNext, confident, pct, name: rankState.name };
+    const total = xpState.total || 0;
+    let idx = 0;
+    for (let i = 0; i < cumRankReq.length; i++) { if (total >= cumRankReq[i]) idx = i + 1; else break; }
+    idx = Math.max(0, Math.min(perRankReq.length - 1, idx));
+    const within = idx > 0 ? (total - (cumRankReq[idx-1]||0)) : total;
+    const req = perRankReq[idx] || 0;
+    const pctFromXp = req > 0 ? Math.max(0, Math.min(100, (within/req)*100)) : 0;
+    // Prefer the status-bar % when it broadly agrees (±6%); else fall back to XP estimate.
+    const pct = (rankState.pct > 0 && Math.abs(rankState.pct - pctFromXp) <= 6) ? rankState.pct : (rankState.pct > 0 ? rankState.pct : pctFromXp);
+    const confident = total > 0 && Math.abs((rankState.pct||pctFromXp) - pctFromXp) <= 6;
+    const toNext = req > 0 ? Math.max(0, +(req - within).toFixed(2)) : null;
+    return { name: rankState.name || '—', pct, idx, withinXp: +within.toFixed(2), toNext, confident };
   }
 
-  // Fired when the status-bar rank NAME changes — an unambiguous rank-up signal,
-  // independent of how Experience is counted. Logs it, alerts (gated), and drops a
-  // marker into the XP history so it shows on the charts.
-  function onRankUp(fromName, toName) {
-    console.log(`${APP_TAG}[RANK] Ranked up: ${fromName} → ${toName}`);
-    try {
-      xpState.history.unshift({
-        t: Date.now(), gained: 0, action: 'rankup', icon: '⭐',
-        total: xpState.total, rankUp: true, label: `${fromName} → ${toName}`
-      });
-      if (xpState.history.length > 40) xpState.history.pop();
-      saveXpState();
-    } catch(_){}
-    tgMsg('rankup', `⭐ <b>RANK UP</b>\n${st.player||'?'} | ${esc(fromName)} → <b>${esc(toName)}</b>`);
-    try { updateXpUI(); } catch(_){}
+  function onRankUp(oldName, newName) {
+    xpState.history.unshift({ rankUp:true, label:`${oldName} → ${newName}`, t:Date.now() });
+    if (xpState.history.length > 60) xpState.history.length = 60;
+    GM_setValue('cbXpHistory', xpState.history);
+    tgMsg('rankup', `⭐ <b>RANK UP</b>\n${st.player||'?'} | ${esc(oldName)} → <b>${esc(newName)}</b>`);
+    setStatus(`⭐ Rank up: ${newName}`);
   }
 
-  const xpNoGainStreak = {};
-  XP_ACTIONS.forEach(a => { xpNoGainStreak[a] = GM_getValue('cbXpStreak_'+a, 0); });
+  let _xpNoGain = GM_getValue('cbXpNoGain', {});
+  if (!_xpNoGain || typeof _xpNoGain !== 'object') _xpNoGain = {};
 
   function saveXpState() {
     GM_setValue('cbXpTotal', xpState.total);
-    GM_setValue('cbXpSessionGain', xpState.sessionGain);
-    GM_setValue('cbXpSessionStart', xpState.sessionStart);
+    GM_setValue('cbXpSessStart', xpState.sessionStart);
+    GM_setValue('cbXpSessGain', xpState.sessionGain);
     GM_setValue('cbXpPerAction', xpState.perAction);
     GM_setValue('cbXpHistory', xpState.history);
     GM_setValue('cbXpSamples', xpState.samples);
+    GM_setValue('cbXpLastAction', xpState.lastAction);
+    GM_setValue('cbXpLastActionTs', xpState.lastActionTs);
   }
 
   function resetXpSession() {
-    xpState.sessionGain = 0;
     xpState.sessionStart = Date.now();
-    XP_ACTIONS.forEach(a => { xpState.perAction[a] = 0; });
+    xpState.sessionGain = 0;
+    xpState.perAction = {};
     xpState.history = [];
-    xpState.samples = xpState.total > 0 ? [{ t: Date.now(), total: xpState.total }] : [];
+    xpState.samples = [];
     saveXpState();
-    updateXpUI();
   }
 
-  // Record which action just fired so the next XP gain can be attributed to it.
+  // Called right before an action's click, so the next XP read is attributed to it.
   function snapshotXP(action) {
-    const snap = { action, t: Date.now() };
-    GM_setValue('cbXpSnapshot', snap);
-    GM_setValue('cbXpStreakSnap', snap);
+    xpState.lastAction = action;
+    xpState.lastActionTs = Date.now();
+    GM_setValue('cbXpLastAction', action);
+    GM_setValue('cbXpLastActionTs', xpState.lastActionTs);
   }
 
-  // Called by the API interceptor whenever a fresh Experience value is seen.
-  function onExperienceRead(rawXp) {
-    const xp = parseFloat(rawXp);
+  // Called when a fresh Experience value is observed (from the status refresh XHR).
+  function onExperienceRead(xp) {
     if (!Number.isFinite(xp) || xp <= 0) return;
-
-    const prev = xpState.total;
+    const prev = xpState.total || 0;
     if (prev === 0) {
+      // First read = baseline; can't show a gain yet.
       xpState.total = xp;
       xpState.samples.push({ t: Date.now(), total: xp });
-      if (xpState.samples.length > 400) xpState.samples.shift();
-      saveXpState();
-      updateXpUI();
+      saveXpState(); updateXpUI();
       return;
     }
-    if (xp === prev) { maybeFeedNoXpLimiter(false); return; }
-    if (xp < prev)  { xpState.total = xp; saveXpState(); return; }
-
-    const gained = parseFloat((xp - prev).toFixed(4));
-    xpState.total = xp;
-    xpState.sessionGain = parseFloat((xpState.sessionGain + gained).toFixed(4));
-
-    const snap = GM_getValue('cbXpSnapshot', null);
-    let action = 'other';
-    if (snap && snap.action && (Date.now() - snap.t) < 90000) {
-      action = snap.action;
-      GM_setValue('cbXpSnapshot', null);
+    if (xp > prev) {
+      const gained = +(xp - prev).toFixed(2);
+      xpState.total = xp;
+      xpState.sessionGain = +(xpState.sessionGain + gained).toFixed(2);
+      // Attribute to the most recent action if it was recent (<20s ago)
+      let action = 'other';
+      if (xpState.lastAction && (Date.now() - xpState.lastActionTs) < 20000) action = xpState.lastAction;
+      xpState.perAction[action] = +((xpState.perAction[action]||0) + gained).toFixed(2);
+      xpState.history.unshift({ action, icon: ACTION_ICON[action]||'⚡', gained, t: Date.now() });
+      if (xpState.history.length > 60) xpState.history.length = 60;
+      xpState.samples.push({ t: Date.now(), total: xp });
+      if (xpState.samples.length > 300) xpState.samples.shift();
+      // Reset the no-gain streak for this action
+      if (action !== 'other') _xpNoGain[action] = 0;
+      GM_setValue('cbXpNoGain', _xpNoGain);
+      saveXpState(); updateXpUI();
+    } else if (xp < prev) {
+      // XP shouldn't drop; treat as a re-baseline (e.g. new source of truth)
+      xpState.total = xp;
+      xpState.samples.push({ t: Date.now(), total: xp });
+      saveXpState(); updateXpUI();
     }
-    if (typeof xpState.perAction[action] !== 'number') xpState.perAction[action] = 0;
-    xpState.perAction[action] = parseFloat((xpState.perAction[action] + gained).toFixed(4));
-
-    xpState.history.unshift({ t: Date.now(), gained, action, icon: ACTION_ICON[action] || '⚡', total: xp });
-    if (xpState.history.length > 40) xpState.history.pop();
-
-    xpState.samples.push({ t: Date.now(), total: xp });
-    if (xpState.samples.length > 400) xpState.samples.shift();
-
-    saveXpState();
-    maybeFeedNoXpLimiter(true);
-    updateXpUI();
-
-    const mins = (Date.now() - xpState.sessionStart) / 60000;
-    const rate = mins >= 2 ? ((xpState.sessionGain / mins) * 60).toFixed(1) : '…';
-    console.log(`${APP_TAG}[XP] +${gained} [${ACTION_ICON[action]||''}${action}] | session +${xpState.sessionGain} | total ${xp.toFixed(2)} | ${rate}/hr`);
   }
 
-  function maybeFeedNoXpLimiter(gained) {
+  // Feed the no-XP limiter after an action fires (called from the action functions'
+  // attribution path). If an action repeatedly yields no XP, disable it for the day.
+  function maybeFeedNoXpLimiter(action) {
     if (!cfg.noXpLimiterOn) return;
-    const snap = GM_getValue('cbXpStreakSnap', null);
-    const action = (snap && snap.action && (Date.now() - snap.t) < 90000) ? snap.action : null;
-    if (!action || !XP_ACTIONS.includes(action)) return;
-
-    if (gained) {
-      xpNoGainStreak[action] = 0;
-      GM_setValue('cbXpStreak_'+action, 0);
-      return;
-    }
-    xpNoGainStreak[action] = (xpNoGainStreak[action] || 0) + 1;
-    GM_setValue('cbXpStreak_'+action, xpNoGainStreak[action]);
-    console.log(`${APP_TAG}[XP] ${action} no-XP streak: ${xpNoGainStreak[action]}/${cfg.noXpStreakLimit}`);
-    if (xpNoGainStreak[action] >= cfg.noXpStreakLimit) {
-      disableActionForDay(action);
-      xpNoGainStreak[action] = 0;
-      GM_setValue('cbXpStreak_'+action, 0);
-    }
+    if (!XP_ACTIONS.includes(action)) return;
+    // Give the XP read a moment; check a few seconds later whether the gain landed.
+    const before = xpState.total;
+    setTimeout(() => {
+      if (xpState.total <= before) {
+        _xpNoGain[action] = (_xpNoGain[action]||0) + 1;
+        GM_setValue('cbXpNoGain', _xpNoGain);
+        if (_xpNoGain[action] >= cfg.noXpStreakLimit) disableActionForDay(action);
+      }
+    }, 6000);
   }
 
   function disableActionForDay(action) {
-    GM_setValue('cbXpCapDay_'+action, gameDayStr());
-    GM_setValue('cbXpCapWasOn_'+action, !!st[action]);
-    if (action in st) { st[action] = false; saveSt(); }
-    console.log(`${APP_TAG}[XP] ${action} hit no-XP cap — disabled until next game-day`);
-    tgMsg('jail', `🛑 <b>${(ACTION_ICON[action]||'')+action.toUpperCase()} capped</b>\n${st.player||'?'} | no XP ×${cfg.noXpStreakLimit}, off till tomorrow`);
+    const map = { crime:'crime', gta:'gta', booze:'booze', jail:'jail' };
+    const key = map[action];
+    if (!key) return;
+    if (st[key]) {
+      st[key] = false; saveSt();
+      GM_setValue('cbXpDisabled_'+action, gameDayStr());
+      _xpNoGain[action] = 0; GM_setValue('cbXpNoGain', _xpNoGain);
+      const btnId = { crime:'jb-r-crime', gta:'jb-r-gta', booze:'jb-r-booze', jail:'jb-r-jail' }[action];
+      if (btnId && _shadow) { const b = _shadow.querySelector('#'+btnId); if (b) b.classList.add('off'); }
+      tgMsg('jail', `📉 <b>${action} capped</b>\n${st.player||'?'} | No XP ${cfg.noXpStreakLimit}× — off until tomorrow`);
+      setStatus(`${action} disabled (daily cap)`);
+    }
   }
 
   function checkXpCapResets() {
-    if (!cfg.noXpLimiterOn) return;
     const today = gameDayStr();
-    XP_ACTIONS.forEach(action => {
-      const capDay = GM_getValue('cbXpCapDay_'+action, '');
-      if (capDay && capDay !== today) {
-        GM_setValue('cbXpCapDay_'+action, '');
-        const wasOn = GM_getValue('cbXpCapWasOn_'+action, true);
-        if (action in st && wasOn) { st[action] = true; saveSt(); }
-        console.log(`${APP_TAG}[XP] ${action} no-XP cap reset — re-enabled (new game-day)`);
+    ['crime','gta','booze','jail'].forEach(action => {
+      const disabledDay = GM_getValue('cbXpDisabled_'+action, '');
+      if (disabledDay && disabledDay !== today) {
+        GM_setValue('cbXpDisabled_'+action, '');
+        _xpNoGain[action] = 0; GM_setValue('cbXpNoGain', _xpNoGain);
+        if (!st[action]) { st[action] = true; saveSt();
+          const btnId = { crime:'jb-r-crime', gta:'jb-r-gta', booze:'jb-r-booze', jail:'jb-r-jail' }[action];
+          if (btnId && _shadow) { const b = _shadow.querySelector('#'+btnId); if (b) b.classList.remove('off'); }
+        }
       }
     });
   }
 
-  /* === XP API INTERCEPTOR ===
-   * The game refreshes the status bar via XHR to hndlr.ashx?m=pst&t=…, whose JSON
-   * carries the current Experience. We hook XMLHttpRequest to read it passively —
-   * no extra requests, just observing the game's own traffic.
-   */
-  let _xpInterceptorInstalled = false;
-  function installXpInterceptor() {
-    if (_xpInterceptorInstalled) return;
-    _xpInterceptorInstalled = true;
-    const TARGET = 'hndlr.ashx?m=pst';
-    const origOpen = XMLHttpRequest.prototype.open;
-    const origSend = XMLHttpRequest.prototype.send;
+  /* === XP API INTERCEPTOR === */
 
-    XMLHttpRequest.prototype.open = function(method, url, ...rest) {
-      this._jbXp = (typeof url === 'string') && url.includes(TARGET);
-      return origOpen.call(this, method, url, ...rest);
-    };
-    XMLHttpRequest.prototype.send = function(...args) {
-      if (this._jbXp) {
-        this.addEventListener('readystatechange', () => {
-          if (this.readyState === 4 && this.status === 200) {
-            try {
-              const raw = (this.responseText || '').trim();
-              if (!raw.startsWith('[') && !raw.startsWith('{')) return;
-              const data = JSON.parse(raw);
-              const d = Array.isArray(data) ? data[0] : data;
-              if (!d) return;
-              const xp = d.Experience ?? d.experience ?? d.XP ?? d.xp;
-              if (xp !== undefined && xp !== null) onExperienceRead(xp);
-            } catch (e) { /* non-JSON / partial — ignore */ }
-          }
+  // Passively read Experience from the game's own status-refresh XHR (hndlr.ashx?m=pst).
+  // We never fire this request ourselves — we just listen to the ones the game makes.
+  function installXpInterceptor() {
+    try {
+      const XHR = XMLHttpRequest.prototype;
+      const _open = XHR.open, _send = XHR.send;
+      XHR.open = function(method, url) { this._jbUrl = url; return _open.apply(this, arguments); };
+      XHR.send = function() {
+        this.addEventListener('load', function() {
+          try {
+            if (!this._jbUrl || !/hndlr\.ashx\?m=pst/i.test(this._jbUrl)) return;
+            const txt = this.responseText || '';
+            // Experience appears as a number in the pst payload; find the labelled field.
+            let m = txt.match(/"?[Ee]xperience"?\s*[:=]\s*"?([\d.]+)/);
+            if (!m) m = txt.match(/[Ee]xp(?:erience)?["']?\s*[:=]\s*["']?([\d.]+)/);
+            if (m) { const xp = parseFloat(m[1]); if (Number.isFinite(xp)) onExperienceRead(xp); }
+          } catch(_){}
         });
-      }
-      return origSend.apply(this, args);
-    };
-    console.log(`${APP_TAG}[XP] API interceptor installed`);
+        return _send.apply(this, arguments);
+      };
+    } catch(e) { console.error(APP_TAG, 'XP interceptor failed', e); }
   }
 
-  /* === WATCHDOG — self-healing main loop === */
+  /* === WATCHDOG (self-healing main loop) === */
 
-  const WATCHDOG_TIMEOUT = 60000; // restart only if loop hasn't ticked in 60s (well beyond any normal interval)
-  let _lastLoopTick = Date.now();
-  let _watchdogIv = null;
-  let _watchdogRestarts = 0;
+  const WATCHDOG_TIMEOUT = 60000;
+  let _lastLoopAt = Date.now();
+  let _watchdogTimer = null;
 
   function startWatchdog() {
-    if (_watchdogIv) clearInterval(_watchdogIv);
-    _watchdogIv = setInterval(() => {
-      const elapsed = Date.now() - _lastLoopTick;
-      // Don't fire during deliberate waits: breaks, sleep, pause, or an active post-action lock
-      const lockUntil = parseInt(localStorage.getItem('cbActionLockUntil')||'0',10);
-      const inLock = lockUntil > Date.now();
-      const inBreak = breaks.isSleeping ||
-        (breaks.coffeeEndAt > 0 && Date.now() < breaks.coffeeEndAt) ||
-        (breaks.lunchEndAt > 0 && Date.now() < breaks.lunchEndAt);
-      if (paused || inLock || inBreak) { _watchdogRestarts = 0; return; }
-
-      // Only restart if genuinely stalled well beyond any normal loop interval
-      if (elapsed > WATCHDOG_TIMEOUT) {
-        _watchdogRestarts++;
-        console.warn(`[JB][WATCHDOG] Loop stalled ${Math.round(elapsed/1000)}s — restart #${_watchdogRestarts}`);
-        if (_watchdogRestarts <= 3) {
-          st.acting = false; st.action = ''; GM_setValue('cbActStart', 0); saveSt();
-          _lastLoopTick = Date.now(); // mark so we don't immediately re-fire
-          setTimeout(mainLoop, 500);
-        } else {
-          console.error('[JB][WATCHDOG] Too many restarts, reloading');
-          tgMsg('watchdog', `⚠️ <b>Watchdog</b>\n${st.player||'?'} | reloading`);
-          _watchdogRestarts = 0;
-          setTimeout(() => window.location.reload(), 2000);
-        }
-      } else {
-        _watchdogRestarts = 0;
+    if (_watchdogTimer) return;
+    _watchdogTimer = setInterval(() => {
+      if (Date.now() - _lastLoopAt > WATCHDOG_TIMEOUT) {
+        console.warn(APP_TAG, 'Watchdog — main loop stalled, restarting');
+        tgMsg('watchdog', `🔧 <b>Watchdog</b>\n${st.player||'?'} | Loop restarted`);
+        _lastLoopAt = Date.now();
+        try { mainLoop(); } catch(e) { console.error(APP_TAG, 'Watchdog restart failed', e); }
       }
-    }, 15000); // check every 15s
+    }, 15000);
   }
 
-  /* === KEEP-ALIVE PING — prevent session timeout === */
-
-  const KEEPALIVE_INTERVAL = 5 * 60 * 1000; // 5 minutes
-  let _keepAliveIv = null;
+  /* === KEEP-ALIVE === */
 
   function startKeepAlive() {
-    if (_keepAliveIv) clearInterval(_keepAliveIv);
-    _keepAliveIv = setInterval(() => {
-      if (paused || breaks.isSleeping) return;
+    setInterval(() => {
       if (!tabs.isMaster) return;
-      fetch(`${window.location.origin}/authenticated/players.aspx?_=${Date.now()}`, {
-        method: 'HEAD',
-        credentials: 'include',
-        cache: 'no-store'
-      }).then(r => {
-        if (r.ok) {
-          console.log('[JB][KEEPALIVE] Ping OK');
-        } else if (r.status === 302 || r.redirected) {
-          console.warn('[JB][KEEPALIVE] Session may have expired (redirect)');
-        }
-      }).catch(e => {
-        console.warn('[JB][KEEPALIVE] Ping failed:', e.message);
-      });
-    }, KEEPALIVE_INTERVAL);
-    console.log('[JB][KEEPALIVE] Started (every 5 min)');
+      // Light HEAD ping to keep the session warm (only when idle-ish)
+      try {
+        fetch('/authenticated/default.aspx', { method:'HEAD', credentials:'same-origin', cache:'no-store' }).catch(()=>{});
+      } catch(_){}
+    }, 4*60*1000);
   }
 
-  /* === SERVER TIME OFFSET === */
+  /* === SERVER TIME === */
 
-  let _serverOffset = GM_getValue('cbServerOffset', 0); // ms difference: serverTime - localTime
+  let _serverOffset = GM_getValue('cbServerOffset', 0);
 
-  // Convert an Amsterdam wall-clock date/time into a real epoch ms timestamp,
-  // correctly handling CET (+01:00) vs CEST (+02:00) across the DST boundary.
-  // Tries +02:00 first and verifies the result reads back as the same Amsterdam
-  // hour; if not (winter), uses +01:00. Mirrors the moderator script's approach.
-  function amsterdamWallclockToTs(yyyy, mm, dd, HH, MM, SS) {
-    const pad = n => String(n).padStart(2, '0');
-    const iso = `${yyyy}-${pad(mm)}-${pad(dd)}T${pad(HH)}:${pad(MM)}:${pad(SS||0)}`;
-    const tryCEST = new Date(iso + '+02:00');
-    try {
-      const amsHour = parseInt(new Intl.DateTimeFormat('en-US', {
-        timeZone: 'Europe/Amsterdam', hour: '2-digit', hour12: false
-      }).format(tryCEST), 10);
-      // Intl may format midnight as 24 — normalise to 0 for comparison
-      const normHour = amsHour === 24 ? 0 : amsHour;
-      return (normHour === (HH % 24)) ? tryCEST.getTime() : new Date(iso + '+01:00').getTime();
-    } catch (e) {
-      // Intl/timezone unavailable — fall back to CET
-      return new Date(iso + '+01:00').getTime();
-    }
+  function amsterdamWallclockToTs(y, mo, d, h, mi, s) {
+    // Build a timestamp for the given Amsterdam wall-clock time, handling DST by
+    // measuring the zone's offset at that instant via Intl.
+    const utcGuess = Date.UTC(y, mo, d, h, mi, s);
+    const dtf = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'Europe/Amsterdam', hour12:false,
+      year:'numeric', month:'2-digit', day:'2-digit',
+      hour:'2-digit', minute:'2-digit', second:'2-digit'
+    });
+    const parts = dtf.formatToParts(new Date(utcGuess));
+    const map = {}; for (const p of parts) map[p.type] = p.value;
+    const asUTC = Date.UTC(+map.year, +map.month-1, +map.day, +map.hour, +map.minute, +map.second);
+    const offset = asUTC - utcGuess;
+    return utcGuess - offset;
   }
 
-  function getServerTime() {
-    return new Date(Date.now() + _serverOffset);
+  function getServerTime() { return new Date(Date.now() + _serverOffset); }
+
+  function calibrateServerTime(dateHeaderMs) {
+    if (!Number.isFinite(dateHeaderMs)) return;
+    _serverOffset = dateHeaderMs - Date.now();
+    GM_setValue('cbServerOffset', _serverOffset);
   }
 
-  function calibrateServerTime() {
-    // Read the update time element from the status bar
-    try {
-      const el = document.getElementById('ctl00_userInfo_lblUpdateTime');
-      if (!el) return;
-      const txt = (el.textContent || '').trim();
-      if (!txt) return;
-
-      // TMN format: "DD-MM-YYYY HH:MM:SS" or "DD.MM.YYYY HH:MM:SS"
-      // Also handles time-only "HH:MM:SS" when the element shows just the time
-      let dd, mm, yyyy, HH, MM, SS;
-      const m = txt.match(/(\d{1,2})[-.\/ ](\d{1,2})[-.\/ ](\d{4})\s+(\d{1,2}):(\d{2}):?(\d{2})?/);
-      if (m) {
-        [, dd, mm, yyyy, HH, MM, SS] = m;
-      } else {
-        const mTime = txt.match(/^(\d{1,2}):(\d{2}):(\d{2})$/);
-        if (!mTime) { console.log('[JB][TIME] Could not parse server time from:', txt); return; }
-        [, HH, MM, SS] = mTime;
-        const parts = new Intl.DateTimeFormat('en-GB', {
-          timeZone: 'Europe/Amsterdam', year: 'numeric', month: '2-digit', day: '2-digit'
-        }).formatToParts(new Date());
-        dd   = parts.find(p => p.type === 'day').value;
-        mm   = parts.find(p => p.type === 'month').value;
-        yyyy = parts.find(p => p.type === 'year').value;
-      }
-      // TMN runs on Amsterdam time (Europe/Amsterdam = CET in winter / CEST in summer).
-      // Build the timestamp as Amsterdam-local: try +02:00 (CEST), verify it round-trips
-      // to the same Amsterdam wall-clock hour, else fall back to +01:00 (CET). This is the
-      // robust DST-boundary handling borrowed from the moderator script's calculateHoursSince.
-      const serverTs = amsterdamWallclockToTs(+yyyy, +mm, +dd, +HH, +MM, +(SS||0));
-      const localTs = Date.now();
-      const offset = serverTs - localTs;
-
-      // Only update if offset changed significantly (> 5 seconds)
-      if (Math.abs(offset - _serverOffset) > 5000) {
-        _serverOffset = offset;
-        GM_setValue('cbServerOffset', _serverOffset);
-        const offsetSec = Math.round(_serverOffset / 1000);
-        console.log(`[JB][TIME] Server offset calibrated: ${offsetSec > 0 ? '+' : ''}${offsetSec}s`);
-      }
-    } catch (e) {
-      console.warn('[JB][TIME] Calibration error:', e);
-    }
-  }
-
-  // Calibrate on page load and periodically
   function initServerTime() {
-    // Calibrate immediately
-    setTimeout(calibrateServerTime, 2000);
-    // Re-calibrate every 10 minutes
-    setInterval(calibrateServerTime, 10 * 60 * 1000);
+    try {
+      fetch('/authenticated/default.aspx', { method:'HEAD', credentials:'same-origin', cache:'no-store' })
+        .then(r => { const d = r.headers.get('date'); if (d) { const ms = Date.parse(d); if (Number.isFinite(ms)) calibrateServerTime(ms); } })
+        .catch(()=>{});
+    } catch(_){}
   }
 
-  /* === DTM TEAM CREATION (Leader Mode) === */
+  /* === DTM TEAM CREATION === */
 
-  const LS_CREATE_DTM_STATE = 'cbCreateDtmState';   // idle | setup | polling
-  const LS_CREATE_DTM_STEP  = 'cbCreateDtmStep';    // 0-3
-  const LS_CREATE_DTM_NEXT  = 'cbCreateDtmNextAt';
-  const LS_CREATE_DTM_POLL  = 'cbCreateDtmPollSince';
-  const DTM_PAGE = '/authenticated/organizedcrime.aspx?p=dtm';
-
-  // State extension
-  st.createDTM = GM_getValue('cbCreateDTM', false);
+  // st extensions for DTM creation (added here to keep the state block above stable)
+  st.createDTM  = GM_getValue('cbCreateDTM', false);
   st.dtmPartner = GM_getValue('cbDtmPartner', '');
-  st.dtmSched = GM_getValue('cbDtmSched', '');
-  st.dtmRepeat = GM_getValue('cbDtmRepeat', 'once');
-  st.dtmLeft = GM_getValue('cbDtmLeft', 0);
+  st.dtmSched   = GM_getValue('cbDtmSched', '');
+  st.dtmRepeat  = GM_getValue('cbDtmRepeat', 'once');
+  st.dtmLeft    = GM_getValue('cbDtmLeft', 0);
 
-  // Save additions
+  // Extend saveSt to persist the DTM-creation fields too
   const _origSaveSt = saveSt;
   saveSt = function() {
     _origSaveSt();
@@ -5391,464 +4961,229 @@
     GM_setValue('cbDtmLeft', st.dtmLeft);
   };
 
-  function getCreateDtmState() { return localStorage.getItem(LS_CREATE_DTM_STATE) || 'idle'; }
-  function getCreateDtmStep() { return parseInt(localStorage.getItem(LS_CREATE_DTM_STEP) || '0', 10); }
-  function resetCreateDTM() {
-    localStorage.setItem(LS_CREATE_DTM_STATE, 'idle');
-    localStorage.setItem(LS_CREATE_DTM_STEP, '0');
-    localStorage.removeItem(LS_CREATE_DTM_NEXT);
-    localStorage.removeItem(LS_CREATE_DTM_POLL);
-    localStorage.removeItem('cbCreateDtmStartedAt');
-  }
+  const LS_DTM_ST = 'cbDtmCreateState', LS_DTM_STEP = 'cbDtmCreateStep', LS_DTM_NEXT = 'cbDtmCreateNext', LS_DTM_START = 'cbDtmCreateStart';
 
-  function isDtmSchedReady() {
-    const ms = parseSchedTime(st.dtmSched);
-    return ms === 0 || Date.now() >= ms;
-  }
+  function getCreateDtmState() { return localStorage.getItem(LS_DTM_ST)||'idle'; }
+  function getCreateDtmStep() { return parseInt(localStorage.getItem(LS_DTM_STEP)||'0',10); }
+  function resetCreateDTM() { localStorage.setItem(LS_DTM_ST,'idle'); localStorage.setItem(LS_DTM_STEP,'0'); localStorage.removeItem(LS_DTM_NEXT); localStorage.removeItem(LS_DTM_START); }
+
+  function dtmSchedReady() { const ms = parseSchedTime(st.dtmSched); return ms === 0 || Date.now() >= ms; }
 
   function triggerCreateDTM() {
     if (!st.createDTM) return;
-    if (!isDtmSchedReady()) return;
-    if (!getHot()) { fetchHot(); return; }
-    if (!isInHot()) {
-      tgOnce('dtm_skip_city', 3600, `⚠️ <b>DTM Skip</b>\n${st.player||'?'} | Not in hot city`);
-      return;
-    }
-    if (!st.dtmPartner.trim()) {
-      tgOnce('dtm_no_partner', 3600, `⚠️ <b>DTM</b> — partner not set`);
-      return;
-    }
-    // Clear throttle flags once we actually proceed
-    localStorage.removeItem('cbTgOnce_dtm_skip_city');
+    if (!dtmSchedReady()) return;
+    if (!st.dtmPartner.trim()) { tgOnce('dtm_no_partner', 3600, `⚠️ <b>DTM</b> — no partner set`); return; }
+    const dtm = getDtm();
+    if (dtm && !(dtm.ready || (dtm.total||0) <= 0)) return; // still on cooldown
     localStorage.removeItem('cbTgOnce_dtm_no_partner');
-
     tgMsg('dtmCreate', `🚚 <b>DTM Setup</b>\n${st.player||'?'} | Partner: ${st.dtmPartner}`);
-    localStorage.setItem(LS_CREATE_DTM_STATE, 'setup');
-    localStorage.setItem(LS_CREATE_DTM_STEP, '0');
-    localStorage.setItem(LS_CREATE_DTM_NEXT, String(Date.now()));
-
+    localStorage.setItem(LS_DTM_ST, 'setup'); localStorage.setItem(LS_DTM_STEP, '0');
+    localStorage.setItem(LS_DTM_NEXT, String(Date.now()));
+    localStorage.setItem(LS_DTM_START, String(Date.now()));
     const onDtm = /\/authenticated\/organizedcrime\.aspx/i.test(location.pathname) && /p=dtm/i.test(location.search);
     if (onDtm) setTimeout(() => handleCreateDTM(), 600);
-    else window.location.href = DTM_PAGE + '&_=' + Date.now();
+    else window.location.href = DTM_PATH+'&'+Date.now();
   }
 
   async function handleCreateDTM() {
     if (!st.createDTM) return false;
     const onDtm = /\/authenticated\/organizedcrime\.aspx/i.test(location.pathname) && /p=dtm/i.test(location.search);
     if (!onDtm) return false;
-
     const dtmSt = getCreateDtmState();
     if (dtmSt === 'idle') return false;
 
-    // Hard abort: if DTM creation has been running >10 min without completing, give up
-    // cleanly rather than looping forever between pages.
-    const started = parseInt(localStorage.getItem('cbCreateDtmStartedAt')||'0',10);
-    if (started === 0) { localStorage.setItem('cbCreateDtmStartedAt', String(Date.now())); }
-    else if (Date.now() - started > 600000) {
-      console.warn('[JB][CreateDTM] Aborting — stuck >10min');
-      tgMsg('dtmCreate', `⚠️ <b>DTM Create Aborted</b>\n${st.player||'?'} | Stuck >10min, check manually`);
+    // Hard abort: if the whole flow has been running >10 min, give up cleanly.
+    const startedAt = parseInt(localStorage.getItem(LS_DTM_START)||'0',10);
+    if (startedAt > 0 && Date.now()-startedAt > 600000) {
+      tgMsg('dtmCreate', `⚠️ <b>DTM Create aborted</b>\n${st.player||'?'} | Timed out`);
       resetCreateDTM();
-      localStorage.removeItem('cbCreateDtmStartedAt');
-      st.acting = false; st.action = ''; GM_setValue('cbActStart',0);
-      return false; // resume normal automation
+      return true;
     }
 
-    const next = parseInt(localStorage.getItem(LS_CREATE_DTM_NEXT) || '0', 10);
-    // Still waiting for a scheduled retry — hold position on this page, don't fall through
-    if (next > Date.now()) { st.acting = true; st.action = 'dtm-create'; return true; }
+    const next = parseInt(localStorage.getItem(LS_DTM_NEXT)||'0',10);
+    if (next > Date.now()) return true; // holding position — block other actions
 
     const step = getCreateDtmStep();
     const partner = st.dtmPartner.trim();
 
-    // Keep other automation blocked while we work the DTM creation
-    st.acting = true; st.action = 'dtm-create'; GM_setValue('cbActStart', Date.now());
-
     try {
-      // POLLING: Check if "Complete DTM" or "Buy drugs" is ready
-      if (dtmSt === 'polling') {
-        // Check for complete button
+      if (step === 0) {
+        // Start the DTM (invite partner)
+        const nameIn = document.getElementById('ctl00_main_txtinvitename') ||
+                       document.querySelector('input[id*="invitename"],input[id*="Participant"],input[id*="partner" i]');
+        const invBtn = document.getElementById('ctl00_main_btninvite') ||
+                       document.getElementById('ctl00_main_btnInvite') ||
+                       [...document.querySelectorAll('input[type="submit"],button')].find(b => /invite|start.*dtm/i.test((b.value||b.textContent||'').trim()));
+        if (!nameIn || !invBtn) { localStorage.setItem(LS_DTM_NEXT, String(Date.now()+5000)); return true; }
+        nameIn.value = ''; await wait(rndDelay(DLY.normal));
+        nameIn.value = partner;
+        try { nameIn.dispatchEvent(new Event('input',{bubbles:true})); nameIn.dispatchEvent(new Event('change',{bubbles:true})); } catch(_){}
+        await wait(rndDelay(DLY.normal));
+        tgMsg('dtmCreate', `🚚 <b>DTM</b>\n${st.player||'?'} | Invited ${partner}, waiting for accept`);
+        localStorage.setItem(LS_DTM_STEP, '1');
+        localStorage.setItem(LS_DTM_NEXT, String(Date.now()+60000)); // wait for partner
+        invBtn.click(); return true;
+      }
+
+      if (step === 1) {
+        // Partner accepted? Buy drugs / complete
         const compBtn = document.getElementById('ctl00_main_btnCompleteDTM') ||
-          [...document.querySelectorAll('input[type="submit"]')].find(b => /complete/i.test(b.value||''));
+                        [...document.querySelectorAll('input[type="submit"],button')].find(b => /complete\s*dtm|buy\s*drugs/i.test((b.value||b.textContent||'').trim()));
         if (compBtn && !compBtn.disabled) {
-          await wait(rndDelay(DLY.normal));
-          formSubmit(compBtn);
-          tgMsg('dtmBuy', `✅ <b>DTM Committed</b>\n${st.player||'?'}`);
+          const mode = st.dtmRepeat||'once';
+          let willRepeat = false;
+          if (mode === 'continuous') willRepeat = true;
+          else if (mode === 'once') willRepeat = false;
+          else { const left = (st.dtmLeft||0)-1; if(left>0){st.dtmLeft=left;willRepeat=true;}else willRepeat=false; }
+          storeDtm({ready:false,total:7200,h:2,m:0,s:0,at:Date.now()});
+          tgMsg('dtmCreate', `✅ <b>DTM Created</b>\n${st.player||'?'} | 2h cooldown`);
           resetCreateDTM();
-          // Handle repeat logic
-          const mode = st.dtmRepeat || 'once';
-          let willRepeat = mode === 'continuous';
-          if (mode.startsWith('repeat_')) {
-            const left = (st.dtmLeft || 0) - 1;
-            if (left > 0) { st.dtmLeft = left; willRepeat = true; }
-          }
           if (!willRepeat) { st.createDTM = false; st.dtmSched = ''; st.dtmLeft = 0; }
           saveSt();
+          localStorage.setItem('cbActionLockUntil', String(Date.now()+8000));
+          setTimeout(() => { compBtn.click(); }, rndDelay(DLY.normal));
           return true;
         }
-
-        // Check for buy drugs
-        const pageTxt = document.body.textContent || '';
-        let maxAmt = 0;
-        const maxMatch = pageTxt.match(/maximum amount.*?(\d+)/i);
-        if (maxMatch) maxAmt = parseInt(maxMatch[1], 10);
-
-        const drugIn = document.getElementById('ctl00_main_tbDrugLAmount') ||
-          document.getElementById('ctl00_main_tbDrugAmount') ||
-          document.querySelector('input[id*="tbDrug"],input[id*="txtDrug"]');
-        const buyBtn = document.getElementById('ctl00_main_btnBuyLDrugs') ||
-          document.getElementById('ctl00_main_btnBuyDrugs') ||
-          [...document.querySelectorAll('input[type="submit"]')].find(b => /buy/i.test(b.value||''));
-
-        if (maxAmt > 0 && drugIn && buyBtn && !buyBtn.disabled) {
-          drugIn.value = String(maxAmt);
-          await wait(rndDelay(DLY.quick));
-          buyBtn.click();
-          tgMsg('dtmBuy', `🚚 <b>DTM Bought ${maxAmt}</b>\n${st.player||'?'}`);
-          storeDtm({ ready: false, total: 7200, h: 2, m: 0, s: 0, at: Date.now() });
-          resetCreateDTM();
-          if (st.dtmRepeat === 'once') { st.createDTM = false; st.dtmSched = ''; }
-          saveSt();
-          return true;
-        }
-
-        // Not ready — check back in 60s
-        localStorage.setItem(LS_CREATE_DTM_NEXT, String(Date.now() + 60000));
-        window.location.href = '/authenticated/crimes.aspx?' + Date.now();
-        return true;
+        // Partner hasn't accepted yet — hold position, re-check shortly
+        localStorage.setItem(LS_DTM_NEXT, String(Date.now()+30000));
+        return true; // hold-position default: block other actions while waiting
       }
-
-      // STEP 0: Click "Start DTM"
-      if (step === 0) {
-        const startBtn = document.getElementById('ctl00_main_btnStartDTM') ||
-          document.getElementById('ctl00_main_btnStartDTMRob') ||
-          [...document.querySelectorAll('input[type="submit"],button')].find(b => /start.*dtm|begin.*dtm/i.test((b.value||b.textContent||'')));
-        if (!startBtn || startBtn.disabled) {
-          // Button not present yet — could still be loading, or DTM already started.
-          // Check if we're actually already past the start (invite field present)
-          const inviteField = document.getElementById('ctl00_main_tbParticipant');
-          if (inviteField) {
-            // Already started — jump to invite step
-            console.log('[JB][CreateDTM] Start button gone but invite field present — advancing to step 1');
-            localStorage.setItem(LS_CREATE_DTM_STEP, '1');
-            localStorage.setItem(LS_CREATE_DTM_NEXT, String(Date.now()));
-            return true;
-          }
-          console.log('[JB][CreateDTM] Start DTM button not found yet — waiting');
-          localStorage.setItem(LS_CREATE_DTM_NEXT, String(Date.now() + 5000));
-          return true; // hold position, don't fall through to crime navigation
-        }
-        await wait(rndDelay(DLY.normal));
-        console.log('[JB][CreateDTM] Clicking Start DTM:', startBtn.id||startBtn.value);
-        tgMsg('dtmCreate', `🚚 <b>DTM 1/3</b>\n${st.player||'?'} | Started DTM`);
-        localStorage.setItem(LS_CREATE_DTM_STATE, 'setup');
-        localStorage.setItem(LS_CREATE_DTM_STEP, '1');
-        localStorage.setItem(LS_CREATE_DTM_NEXT, String(Date.now() + 10000));
-        formSubmit(startBtn);
-        return true;
-      }
-
-      // STEP 1: Invite partner
-      if (step === 1) {
-        if (!partner) { resetCreateDTM(); return false; }
-        // Correct field ID is ctl00_main_tbParticipant (with fallbacks)
-        const nameIn = document.getElementById('ctl00_main_tbParticipant') ||
-                       document.getElementById('ctl00_main_txtinvitename') ||
-                       document.querySelector('input[id*="Participant"],input[id*="participant"],input[id*="invitename"]');
-        const invBtn = document.getElementById('ctl00_main_btnInviteDTMMember') ||
-                       document.getElementById('ctl00_main_btnInvite') ||
-                       document.getElementById('ctl00_main_btninvite') ||
-                       document.getElementById('ctl00_main_btnAddParticipant') ||
-                       [...document.querySelectorAll('input[type="submit"],button')].find(b => /invite\s*member|invite|add\s*participant|add\s*member/i.test((b.value||b.textContent||'').trim()));
-        if (!nameIn || !invBtn) {
-          console.log('[JB][CreateDTM] Invite form not ready — field:', !!nameIn, 'btn:', !!invBtn);
-          localStorage.setItem(LS_CREATE_DTM_NEXT, String(Date.now() + 5000));
-          return true;
-        }
-        nameIn.focus();
-        nameIn.value = '';
-        await wait(rndDelay(DLY.normal));
-        nameIn.value = partner;
-        // Fire events so ASP.NET registers the typed value before postback
-        try { nameIn.dispatchEvent(new Event('input', {bubbles:true})); nameIn.dispatchEvent(new Event('change', {bubbles:true})); nameIn.dispatchEvent(new Event('keyup', {bubbles:true})); } catch(_){}
-        await wait(rndDelay(DLY.normal));
-        console.log('[JB][CreateDTM] Entered partner:', partner, 'in', nameIn.id, '— clicking', invBtn.id||invBtn.value);
-        tgMsg('dtmCreate', `🚚 <b>DTM 2/3</b>\n${st.player||'?'} | Invited ${partner}`);
-        localStorage.setItem(LS_CREATE_DTM_STEP, '2');
-        localStorage.setItem(LS_CREATE_DTM_NEXT, String(Date.now() + 60000));
-        invBtn.click();
-        return true;
-      }
-
-      // STEP 2: Buy security device / wait for partner
-      if (step === 2) {
-        const secSel = document.getElementById('ctl00_main_securitydeviceslist');
-        const buyBtn = document.getElementById('ctl00_main_btnBuySecurity');
-        if (secSel && buyBtn) {
-          secSel.value = '6'; // Laptop
-          await wait(rndDelay(DLY.normal));
-          tgMsg('dtmCreate', `🚚 <b>DTM 3/3</b>\n${st.player||'?'} | Laptop bought, waiting`);
-          localStorage.setItem(LS_CREATE_DTM_STEP, '3');
-          localStorage.setItem(LS_CREATE_DTM_STATE, 'polling');
-          localStorage.setItem(LS_CREATE_DTM_POLL, String(Date.now()));
-          localStorage.setItem(LS_CREATE_DTM_NEXT, String(Date.now() + 60000));
-          buyBtn.click();
-          return true;
-        }
-        // No buy form — maybe already bought, switch to polling
-        localStorage.setItem(LS_CREATE_DTM_STATE, 'polling');
-        localStorage.setItem(LS_CREATE_DTM_NEXT, String(Date.now() + 30000));
-        return true;
-      }
-
-      // Check for cancelled/expired DTM
-      const bt = (document.body.textContent || '').toLowerCase();
-      if (/you cannot do a dtm|you have to wait/.test(bt)) {
-        resetCreateDTM();
-        localStorage.removeItem('cbCreateDtmStartedAt');
-        st.acting = false; st.action = ''; GM_setValue('cbActStart',0);
-        return false; // genuine cooldown — resume normal automation
-      }
-    } catch (e) {
-      console.error('[JB][CreateDTM] Error:', e);
-      resetCreateDTM();
-      localStorage.removeItem('cbCreateDtmStartedAt');
-      st.acting = false; st.action = ''; GM_setValue('cbActStart',0);
-      return false;
-    }
-    // Default: stay on the DTM page and retry next tick rather than falling through
-    // to crime navigation (which caused the crime<->DTM loop).
-    localStorage.setItem(LS_CREATE_DTM_NEXT, String(Date.now() + 8000));
+    } catch(e) { console.error(APP_TAG,'CreateDTM err',e); resetCreateDTM(); return false; }
     return true;
   }
 
   /* === MAIN LOOP === */
 
-  async function mainLoop() {
-    _lastLoopTick = Date.now(); // Watchdog heartbeat
-    const wasMaster = tabs.isMaster;
-    tabs.check();
+  // Human cadence helper: remaining ms until an action's persisted delay elapses.
+  // Used so the loop's readiness + ordering follow the SAME schedule the do* funcs
+  // enforce — otherwise the loop navigates on the raw interval and camps on a page
+  // waiting out a long camo delay, starving the other actions.
+  function remainingMs(action, lastTs, intervalSec) {
+    let dly = GM_getValue('cbDly_' + action, 0);
+    if (!dly) { dly = nextCooldownMs(intervalSec); GM_setValue('cbDly_' + action, dly); }
+    return Math.max(0, (lastTs + dly) - Date.now());
+  }
 
-    if (!tabs.isMaster) {
-      if (wasMaster) console.log(APP_TAG, 'Lost master');
-      setStatus('⏸ Secondary tab');
-      setTimeout(mainLoop, 3000); return;
-    }
+  function mainLoop() {
+    _lastLoopAt = Date.now();
+    try {
+      const master = tabs.check();
 
-    if (paused) { setTimeout(mainLoop, 1800+Math.floor(Math.random()*1400)); return; }
-
-    // HEALTH MONITORING — runs at all times, bypasses every break.
-    // Always check low-HP alerting, and if HP is critically low let health auto-buy
-    // run even during a coffee/lunch/sleep break (we don't want to die while resting).
-    checkLowHp();
-    const _breakActive = breaks.isSleeping ||
-      (breaks.coffeeEndAt > 0 && Date.now() < breaks.coffeeEndAt) ||
-      (breaks.lunchEndAt > 0 && Date.now() < breaks.lunchEndAt) ||
-      isSleepWindow();
-    if (_breakActive && st.health) {
-      const _hp = getHp();
-      if (_hp > 0 && _hp < cfg.minHealth) {
-        // Critical: bypass the break to top up health, then resume the break next tick
-        console.log(`[JB][HEALTH] HP ${_hp}% < ${cfg.minHealth}% during break — buying health (bypassing break)`);
-        setStatus(`💊 Emergency health (${_hp}%) — break paused`);
-        checkHealth();
-        setTimeout(mainLoop, 2500); return;
-      }
-    }
-
-    // Break system checks — highest priority (health already handled above)
-    if (handleSleep()) {
-      setStatus(getBreakStatus().msg);
-      setTimeout(mainLoop, 30000); return;
-    }
-    coffeeJustEnded(); lunchJustEnded(); // clear ended breaks
-    if (isCoffeeTime()) {
-      const bs = getBreakStatus();
-      setStatus(bs.msg);
-      setTimeout(mainLoop, 10000); return;
-    }
-    if (isLunchTime()) {
-      const bs = getBreakStatus();
-      setStatus(bs.msg);
-      setTimeout(mainLoop, 10000); return;
-    }
-
-    checkCaptcha(); checkNewMsgs(); checkLogout();
-
-    if (checkSqlCheck()) {
-      paused = true; setStatus('⚠️ STAFF CHECK — paused');
-      setTimeout(mainLoop, 10000); return;
-    }
-
-    checkStuck();
-
-    if (isOnCaptcha()) {
-      if (resume.on) { setStatus('Script Check — monitoring...'); localStorage.setItem('cbScriptCheck','1'); startScMonitor(); }
-      else setStatus('Script Check — paused');
-      setTimeout(mainLoop, 1800+Math.floor(Math.random()*1400)); return;
-    } else {
-      if (localStorage.getItem('cbScriptCheck') === '1') { localStorage.removeItem('cbScriptCheck'); _scActive = false; }
-    }
-
-    if (!st.player) { getPlayerName(); setTimeout(mainLoop, 3000); return; }
-
-    checkJailAny();
-
-    if (handleOcPage()) { setTimeout(mainLoop, 3000); return; }
-    if (handleDtmPage()) { setTimeout(mainLoop, 3000); return; }
-
-    // OC creation flow
-    if (st.createOC && !st.inJail) {
-      const ocSt = getCreateOCState();
-      if (ocSt === 'idle') {
-        try {
-          const oc = getOc();
-          if (oc && (oc.ready || (oc.total||0)<=0) && isSchedReady()) triggerCreateOC();
-        } catch(_){}
-      }
-      if (ocSt !== 'idle') {
-        const onOc = /\/authenticated\/organizedcrime\.aspx/i.test(location.pathname) && !/p=dtm/i.test(location.search);
-        if (onOc) { try { if (await handleCreateOC()) { setTimeout(mainLoop, 3000); return; } } catch(_){} }
-        else {
-          const next = parseInt(localStorage.getItem(LS_OC_NEXT)||'0',10);
-          if (next > 0 && Date.now() >= next && !st.acting) { window.location.href = OC_PATH+'?'+Date.now(); setTimeout(mainLoop, 5000); return; }
-        }
-      }
-    }
-
-    // DTM creation flow (leader mode)
-    if (st.createDTM && !st.inJail) {
-      const dtmSt = getCreateDtmState();
-      if (dtmSt === 'idle') {
-        try {
-          const dtm = getDtm();
-          if (dtm && (dtm.ready || (dtm.total||0)<=0) && isDtmSchedReady()) triggerCreateDTM();
-        } catch(_){}
-      }
-      if (dtmSt !== 'idle') {
-        const onDtm = /\/authenticated\/organizedcrime\.aspx/i.test(location.pathname) && /p=dtm/i.test(location.search);
-        if (onDtm) { try { if (await handleCreateDTM()) { setTimeout(mainLoop, 3000); return; } } catch(_){} }
-        else {
-          const next = parseInt(localStorage.getItem(LS_CREATE_DTM_NEXT)||'0',10);
-          if (next > 0 && Date.now() >= next && !st.acting) { window.location.href = DTM_PAGE+'&_='+Date.now(); setTimeout(mainLoop, 5000); return; }
-        }
-      }
-    }
-
-    // Auto-travel to hot city and DTM list (priority after OC/DTM creation, before invites)
-    if (!st.inJail && !st.acting) {
-      checkDtmListReset();
-
-      // Auto-travel: if we need to be in hot city (for DTM list or OC creation)
-      if (st.autoTravel) {
-        const handled = await doAutoTravel();
-        if (handled) { setTimeout(mainLoop, 3000); return; }
+      // --- STAFF CHECK: detect + pause ALWAYS, before anything else, before the
+      // paused gate, and INDEPENDENT of Telegram. Gaining XP after an unanswered
+      // check = ban, so the pause must never depend on alerting being configured. ---
+      if (checkSqlCheck()) {
+        paused = true; _sqlPaused = true;
+        setStatus('⚠️ STAFF CHECK — paused');
+        setTimeout(mainLoop, 10000);
+        return;
       }
 
-      // Auto-add to DTM list: in hot city + DTM ready
-      if (st.autoDtmList) {
-        const handled = await doAutoAddDtmList();
-        if (handled) { setTimeout(mainLoop, 3000); return; }
-      }
-    }
+      if (paused) { setTimeout(mainLoop, 2000); return; }
 
-    // Pending invite URLs
-    if (!st.inJail && !st.acting) {
+      // Health can still be handled during breaks (safety), but nothing else
+      const brk = getBreakStatus();
+      const onBreak = brk.active;
+
+      // Sleep / coffee / lunch handling
+      handleSleep();
+      if (breaks.isSleeping) { setStatus('😴 Sleeping'); setTimeout(mainLoop, 30000); return; }
+      coffeeJustEnded(); lunchJustEnded();
+      if (isLunchTime()) { setStatus(getBreakStatus().msg||'🍔 Lunch'); if (st.health) try{checkHealth();}catch(_){}
+        setTimeout(mainLoop, 15000); return; }
+      if (isCoffeeTime()) { setStatus(getBreakStatus().msg||'☕ Coffee'); if (st.health) try{checkHealth();}catch(_){}
+        setTimeout(mainLoop, 15000); return; }
+
+      // Telegram-driven checks
+      try { checkCaptcha(); } catch(_){}
+      try { checkNewMsgs(); } catch(_){}
+      try { checkLogout(); } catch(_){}
+
+      // Stuck-action recovery
+      try { checkStuck(); } catch(_){}
+
+      // On a script-check page? Let the monitor handle it, stay paused
+      if (isOnCaptcha()) { startScMonitor(); paused = true; _sqlPaused = true; setStatus('⚠️ Script check page'); setTimeout(mainLoop, 5000); return; }
+
+      // Identify player once
+      if (!st.player) { getPlayerName(); setTimeout(mainLoop, 3000); return; }
+
+      // Jail handling
+      if (checkJailAny()) {
+        if (curPage() === 'jail') { try { doJailbreak(); } catch(_){} }
+        else { /* will redirect to jail via checkJailAny */ }
+        updateJailCountUI();
+        setTimeout(mainLoop, 1500 + Math.floor(Math.random()*800));
+        return;
+      }
+
+      // OC/DTM invite page handlers (accept flow)
+      if (handleOcPage()) { setTimeout(mainLoop, 2000); return; }
+      if (handleDtmPage()) { setTimeout(mainLoop, 2000); return; }
+
+      // OC/DTM creation flows (leader)
+      if (st.createOC && getCreateOCState() !== 'idle') { handleCreateOC(); setTimeout(mainLoop, 2000); return; }
+      if (st.createDTM && getCreateDtmState() !== 'idle') { handleCreateDTM(); setTimeout(mainLoop, 2000); return; }
+      if (st.createOC && getCreateOCState() === 'idle') { try { triggerCreateOC(); } catch(_){} }
+      if (st.createDTM && getCreateDtmState() === 'idle') { try { triggerCreateDTM(); } catch(_){} }
+
+      // Auto travel to hot city / DTM list
+      try { doAutoTravel(); } catch(_){}
+      try { doAutoAddDtmList(); } catch(_){}
+
+      // Pending invite URLs (navigate to accept)
       const pendDtm = localStorage.getItem(LS_PEND_DTM);
-      if (pendDtm && st.autoDTM) {
-        localStorage.removeItem(LS_PEND_DTM);
-        localStorage.removeItem('cbDtmJustActed'); // fresh invite — clear any stale guard
-        localStorage.setItem('cbPendDtmHandle','true');
-        localStorage.setItem('cbPendDtmHandleTs', String(Date.now()));
-        tgMsg('dtmAccept', `🚚 <b>DTM Accepted</b>\n${st.player||'?'}`);
-        st.acting = true; st.action = 'dtm-invite'; GM_setValue('cbActStart', Date.now()); saveSt();
-        try { const u = new URL(pendDtm); window.location.href = u.pathname+u.search; } catch(_) { window.location.href = pendDtm.replace(/^https?:\/\/[^/]+/,''); }
-        return;
-      }
-      const pendOc = localStorage.getItem(LS_PEND_OC);
-      if (pendOc && st.autoOC && !st.inJail) {
-        localStorage.removeItem(LS_PEND_OC);
-        localStorage.setItem('cbPendOcHandle','true');
-        localStorage.setItem('cbPendOcHandleTs', String(Date.now()));
-        tgMsg('ocAccept', `🕵️ <b>OC Accepted</b>\n${st.player||'?'}`);
-        st.acting = true; st.action = 'oc-invite'; GM_setValue('cbActStart', Date.now()); saveSt();
-        try { const u = new URL(pendOc); window.location.href = u.pathname+u.search; } catch(_) { window.location.href = pendOc.replace(/^https?:\/\/[^/]+/,''); }
-        return;
-      }
-    }
+      const pendOc  = localStorage.getItem(LS_PEND_OC);
+      if (pendDtm) { localStorage.setItem('cbPendDtmHandle','true'); localStorage.setItem('cbPendDtmHandleTs', String(Date.now())); localStorage.removeItem(LS_PEND_DTM); safeNav(pendDtm); setTimeout(mainLoop, 2000); return; }
+      if (pendOc)  { localStorage.setItem('cbPendOcHandle','true'); localStorage.setItem('cbPendOcHandleTs', String(Date.now())); localStorage.removeItem(LS_PEND_OC); safeNav(pendOc); setTimeout(mainLoop, 2000); return; }
 
-    // Mail check
-    if ((st.autoOC || st.autoDTM || (tg.enabled && (tg.messages||tg.scriptTest||tg.staffMail))) && tabs.isMaster) {
-      const lastMail = parseInt(localStorage.getItem('cbLastMailTs')||'0',10);
-      const onMail = curPage() === 'mailbox';
-      if (onMail || (Date.now() - lastMail > MAIL_INT_MS)) {
-        localStorage.setItem('cbLastMailTs', String(Date.now()));
-        try { await checkMail(); } catch(_){}
-        if (localStorage.getItem(LS_PEND_DTM) || localStorage.getItem(LS_PEND_OC)) { setTimeout(mainLoop, 500); return; }
-      }
-    }
+      // Mail check (periodic)
+      const lastMail = parseInt(localStorage.getItem('cbLastMailCheck')||'0',10);
+      if (Date.now()-lastMail > MAIL_INT_MS) { localStorage.setItem('cbLastMailCheck', String(Date.now())); checkMail(); }
 
-    try { checkReadyAlerts(); } catch(_){}
+      // Ready alerts + health
+      try { checkReadyAlerts(); } catch(_){}
+      try { if (st.health) checkHealth(); } catch(_){}
 
-    if (st.health && !st.acting) {
-      checkHealth();
-      if (st.buyHealth) { setTimeout(mainLoop, 1800+Math.floor(Math.random()*1400)); return; }
-    }
+      // --- ACTION READINESS (human cadence) ---
+      // Use the persisted per-action delay for BOTH readiness and ordering, so the
+      // loop never camps on one page starving the others.
+      const crimeRem = st.crime ? remainingMs('crime', st.lastCrime, cfg.crimeInt) : Infinity;
+      const gtaRem   = st.gta   ? remainingMs('gta',   st.lastGta,   cfg.gtaInt)   : Infinity;
+      const boozeRem = st.booze ? remainingMs('booze', st.lastBooze, cfg.boozeInt) : Infinity;
+      const jailRem  = st.jail  ? remainingMs('jail',  st.lastJail,  cfg.jailInt)  : Infinity;
 
-    if (!st.acting) {
-      const now = Date.now();
-      const pg = curPage();
-
-      if (!st.crime && !st.gta && !st.booze && !st.jail && !st.garage && !st.health && !st.autoOC && !st.autoDTM) {
-        if (now % 30000 < 2000) setStatus('Idle');
-        setTimeout(mainLoop, 5000); return;
+      // Fire whichever action is ready. Crime vs GTA ordering uses the ACTUAL next-due
+      // time (lastTs + persisted delay), not the raw interval, so neither starves.
+      let acted = false;
+      if (!st.acting) {
+        if (crimeRem <= 0 || gtaRem <= 0) {
+          const crimeDue = st.crime ? (st.lastCrime + GM_getValue('cbDly_crime', cfg.crimeInt*1000)) : Infinity;
+          const gtaDue   = st.gta   ? (st.lastGta   + GM_getValue('cbDly_gta',   cfg.gtaInt*1000))   : Infinity;
+          if (crimeDue <= gtaDue) { if (crimeRem <= 0) { doCrime(); acted = true; } else if (gtaRem <= 0) { doGta(); acted = true; } }
+          else { if (gtaRem <= 0) { doGta(); acted = true; } else if (crimeRem <= 0) { doCrime(); acted = true; } }
+        }
+        if (!acted && boozeRem <= 0) { doBooze(); acted = true; }
+        if (!acted && jailRem <= 0)  { doJailbreak(); acted = true; }
+        if (!acted && st.garage) { try { doGarage(); } catch(_){} }
       }
 
-      if (st.inJail) {
-        if (now - st.lastJailCk > cfg.jailCheckInt*1000) {
-          st.lastJailCk = now; saveSt();
-          safeNav('/authenticated/jail.aspx?'+Date.now());
+      // Status countdown — show the soonest upcoming action from the SAME schedule
+      if (!st.acting && !acted) {
+        const soon = Math.min(crimeRem, gtaRem, boozeRem, jailRem);
+        if (Number.isFinite(soon)) {
+          const secs = Math.ceil(soon/1000);
+          setStatus(`Next action in ~${secs}s`);
         } else {
-          const pend = localStorage.getItem(LS_PEND_DTM) ? ' (DTM pending)' : localStorage.getItem(LS_PEND_OC) ? ' (OC pending)' : '';
-          setStatus(`IN JAIL${st.pending?` (resume ${st.pending})`:''} ${pend}`);
-        }
-      } else {
-        if (st.pending) {
-          if (st.pending === 'crime' && st.crime) { if(pg==='crimes') doCrime(); else safeNav('/authenticated/crimes.aspx?'+Date.now()); setTimeout(mainLoop, 1800+Math.floor(Math.random()*1400)); return; }
-          if (st.pending === 'gta' && st.gta) { if(pg==='gta') doGta(); else safeNav('/authenticated/crimes.aspx?p=g&'+Date.now()); setTimeout(mainLoop, 1800+Math.floor(Math.random()*1400)); return; }
-          if (st.pending === 'booze' && st.booze) { if(pg==='booze') doBooze(); else safeNav('/authenticated/crimes.aspx?p=b&'+Date.now()); setTimeout(mainLoop, 1800+Math.floor(Math.random()*1400)); return; }
-          st.pending = ''; saveSt();
-        }
-
-        const garageOd = st.garage && (now - st.lastGarage >= cfg.garageInt*1000);
-        if (garageOd && pg === 'garage') doGarage();
-
-        const crimeRdy = st.crime && (now - st.lastCrime >= cfg.crimeInt*1000);
-        const gtaRdy   = st.gta   && (now - st.lastGta >= cfg.gtaInt*1000);
-        const boozeRdy = st.booze && (now - st.lastBooze >= cfg.boozeInt*1000);
-        const jailRdy  = st.jail  && (now - st.lastJail >= cfg.jailInt*1000);
-        const garageRdy= st.garage && (now - st.lastGarage >= cfg.garageInt*1000);
-
-        if (crimeRdy && gtaRdy) {
-          const ct = st.lastCrime+cfg.crimeInt*1000, gt = st.lastGta+cfg.gtaInt*1000;
-          if (ct <= gt) { if(pg==='crimes') doCrime(); else safeNav('/authenticated/crimes.aspx?'+Date.now()); }
-          else { if(pg==='gta') doGta(); else safeNav('/authenticated/crimes.aspx?p=g&'+Date.now()); }
-        } else if (crimeRdy) { if(pg==='crimes') doCrime(); else safeNav('/authenticated/crimes.aspx?'+Date.now()); }
-        else if (gtaRdy) { if(pg==='gta') doGta(); else safeNav('/authenticated/crimes.aspx?p=g&'+Date.now()); }
-        else if (boozeRdy) { if(pg==='booze') doBooze(); else safeNav('/authenticated/crimes.aspx?p=b&'+Date.now()); }
-        else if (jailRdy) { if(pg==='jail') doJailbreak(); else safeNav('/authenticated/jail.aspx?'+Date.now()); }
-        else if (garageRdy) { if(pg==='garage') doGarage(); else safeNav('/authenticated/playerproperty.aspx?p=g&'+Date.now()); }
-        else {
-          const cr = Math.max(0, Math.ceil((cfg.crimeInt*1000-(now-st.lastCrime))/1000));
-          const gr = Math.max(0, Math.ceil((cfg.gtaInt*1000-(now-st.lastGta))/1000));
-          const br = Math.max(0, Math.ceil((cfg.boozeInt*1000-(now-st.lastBooze))/1000));
-          const jr = Math.max(0, Math.ceil((cfg.jailInt*1000-(now-st.lastJail))/1000));
-          const gar= Math.max(0, Math.ceil((cfg.garageInt*1000-(now-st.lastGarage))/60000));
-          setStatus(`C:${cr}s G:${gr}s B:${br}s J:${jr}s Gar:${gar}m`);
+          setStatus('Idle (no actions enabled)');
         }
       }
-    }
 
-    setTimeout(mainLoop, 1800+Math.floor(Math.random()*1400));
+      setTimeout(mainLoop, 1800 + Math.floor(Math.random()*1400));
+    } catch(e) {
+      console.error(APP_TAG, 'mainLoop error', e);
+      setTimeout(mainLoop, 5000);
+    }
   }
 
   /* === INIT === */
@@ -5868,23 +5203,14 @@
     initServerTime();
     try { initHot(); } catch(_){}
 
-    if (tabs.isMaster) setStatus(`${APP_NAME} ${APP_VERSION} — Master tab`);
-    else setStatus('⏸ Secondary tab');
-
-    checkJailAny();
-
-    window.addEventListener('beforeunload', () => {
-      tabs.release(); owStop();
-      if (owFlashTimer) { clearInterval(owFlashTimer); owFlashTimer = null; }
-    });
-
+    window.addEventListener('beforeunload', () => { try { tabs.release(); } catch(_){} });
     window.addEventListener('storage', e => {
-      if (e.key === LS_MASTER) tabs.check();
+      if (e.key === LS_MASTER && !localStorage.getItem(LS_MASTER)) { try { tabs.check(); } catch(_){} }
     });
 
-    setTimeout(() => { st.lastJailCk = 0; mainLoop(); }, 1500);
+    setStatus(`${APP_NAME} ${APP_VERSION} ready`);
+    setTimeout(mainLoop, 1500);
   }
 
   init();
-
 })();
