@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Jarvis Bot 2000.200
+// @name         Jarvis Bot 2000.201
 // @namespace    http://tampermonkey.net/
-// @version      2000.200
-// @description  Jarvis Bot 2000.200 — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
+// @version      2000.201
+// @description  Jarvis Bot 2000.201 — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
 // @match        *://www.tmn2010.net/authenticated/*
@@ -31,7 +31,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.200
+/*  Jarvis Bot 2000.201
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -111,7 +111,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.200';
+  const APP_VERSION = '2000.201';
   const APP_TAG     = '[JB]';
 
   // Known staff accounts (profile IDs)
@@ -5918,9 +5918,11 @@
     tabs.check();
     buildUI();
     try { updateXpUI(); } catch(_){} // paint saved XP/rank straight away so it doesn't blank on load
-    installXpInterceptor();
+    // Start the alert pumps FIRST and unconditionally — delivery must never be
+    // hostage to a later step throwing (e.g. the XP interceptor patching XHR).
     startTgPump();
     startCriticalPump();
+    try { installXpInterceptor(); } catch(e) { console.error(APP_TAG, 'XP interceptor failed (non-fatal):', e); }
 
     // If a staff check locked us on a previous page, do NOT start automation or any
     // page-touching timers on this load — a reload/navigation is bannable until the
