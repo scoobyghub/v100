@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Jarvis Bot 2000.195
+// @name         Jarvis Bot 2000.210
 // @namespace    http://tampermonkey.net/
-// @version      2000.195
-// @description  Jarvis Bot 2000.195 — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
+// @version      2000.210
+// @description  Jarvis Bot 2000.210 — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
 // @match        *://www.tmn2010.net/authenticated/*
@@ -31,7 +31,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.195
+/*  Jarvis Bot 2000.210
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -100,6 +100,13 @@
 (function blockLogoutRedirect() {
   try {
     if (!window.location.search.includes('act=out')) return;
+    // A deliberate logout (e.g. sleep-mode sign-out) sets this flag first, so
+    // only accidental/stray logout URLs get bounced back to the game.
+    if (localStorage.getItem('cbLogoutIntent') === '1') {
+      localStorage.removeItem('cbLogoutIntent');
+      console.log('[JB] Intentional logout — allowing');
+      return;
+    }
     console.log('[JB] Logout URL intercepted — redirecting to home');
     window.location.replace('/authenticated/default.aspx');
   } catch (_) {}
@@ -111,8 +118,14 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.195';
+  const APP_VERSION = '2000.210';
   const APP_TAG     = '[JB]';
+
+  // Verbose logging (off by default) — gates high-frequency chatter like the
+  // 60s travel-timer poll so the console stays readable overnight. Real events
+  // (crimes, watch triggers, logouts, watchdog) always log.
+  let _debug = GM_getValue('cbDebug', false);
+  function dlog(...a) { if (_debug) console.log(...a); }
 
   // Known staff accounts (profile IDs)
   const STAFF_IDS = {
@@ -312,6 +325,112 @@
     maxAttempts: 3,
     delay: 3000
   };
+
+  /* === CAPTCHA SOLVER (CapSolver API — optional) ===
+   * Optional automated reCAPTCHA v2 solve on the login page. Off unless a
+   * CapSolver key is set in settings; with no key, Jarvis keeps its existing
+   * behaviour of pausing and alerting for a manual solve. Talks only to
+   * api.capsolver.com (a paid third-party service that consumes solver credits).
+   * Uses plain fetch so no @connect entry is needed.
+   */
+
+  const LS_CAPSOLVER_KEY = 'cbCapsolverKey';
+  function getCapsolverKey() { return (localStorage.getItem(LS_CAPSOLVER_KEY) || '').trim(); }
+  function setCapsolverKey(k) { localStorage.setItem(LS_CAPSOLVER_KEY, (k || '').trim()); }
+
+  async function solveRecaptchaWithCapsolver(siteKey, pageUrl) {
+    const apiKey = getCapsolverKey();
+    if (!apiKey) return null;
+    const clog = (...a) => console.log('[JB CapSolver]', ...a);
+    try {
+      clog('Submitting captcha…');
+      const createRes = await fetch('https://api.capsolver.com/createTask', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          clientKey: apiKey,
+          task: { type: 'ReCaptchaV2TaskProxyless', websiteURL: pageUrl, websiteKey: siteKey }
+        })
+      });
+      const createData = await createRes.json();
+      if (createData.errorId > 0) { clog('create error:', createData.errorCode, createData.errorDescription); return null; }
+      const taskId = createData.taskId;
+      clog('task created:', taskId);
+
+      const POLL_DEADLINE_MS = 120000;
+      const start = Date.now();
+      await new Promise(r => setTimeout(r, 2000));
+      let poll = 0;
+      while (Date.now() - start < POLL_DEADLINE_MS) {
+        const resultRes = await fetch('https://api.capsolver.com/getTaskResult', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ clientKey: apiKey, taskId })
+        });
+        const resultData = await resultRes.json();
+        if (resultData.errorId > 0) { clog('result error:', resultData.errorCode); return null; }
+        if (resultData.status === 'ready') {
+          const token = resultData.solution?.gRecaptchaResponse;
+          clog(`solved in ${Math.round((Date.now() - start) / 1000)}s`);
+          return token || null;
+        }
+        poll++;
+        if (poll % 5 === 0) clog(`pending… (${Math.round((Date.now() - start) / 1000)}s)`);
+        await new Promise(r => setTimeout(r, 1500));
+      }
+      clog('timed out after 120s');
+      return null;
+    } catch (e) {
+      clog('fetch error:', e);
+      return null;
+    }
+  }
+
+  // Find the reCAPTCHA site key on the current page (data-sitekey or the widget
+  // iframe's k= param). Returns null if none present.
+  function findRecaptchaSiteKey() {
+    const el = document.querySelector('.g-recaptcha[data-sitekey], [data-sitekey]');
+    if (el && el.getAttribute('data-sitekey')) return el.getAttribute('data-sitekey');
+    const ifr = document.querySelector('iframe[src*="recaptcha"][src*="k="]');
+    if (ifr) { const m = ifr.getAttribute('src').match(/[?&]k=([^&]+)/); if (m) return decodeURIComponent(m[1]); }
+    return null;
+  }
+
+  // Inject a solved token into the g-recaptcha-response field and fire any
+  // grecaptcha callback so the page treats the captcha as completed.
+  function injectRecaptchaToken(token) {
+    if (!token) return false;
+    let ta = document.querySelector('textarea[name="g-recaptcha-response"], #g-recaptcha-response');
+    if (!ta) {
+      ta = document.createElement('textarea');
+      ta.name = 'g-recaptcha-response';
+      ta.id = 'g-recaptcha-response';
+      ta.style.display = 'none';
+      document.body.appendChild(ta);
+    }
+    ta.value = token;
+    ta.dispatchEvent(new Event('input', { bubbles: true }));
+    ta.dispatchEvent(new Event('change', { bubbles: true }));
+    try {
+      if (window.___grecaptcha_cfg && window.___grecaptcha_cfg.clients) {
+        // Best-effort: walk the widget config for a callback and invoke it.
+        const clients = window.___grecaptcha_cfg.clients;
+        for (const cid in clients) {
+          const c = clients[cid];
+          for (const k in c) {
+            const o = c[k];
+            if (o && typeof o === 'object') {
+              for (const kk in o) {
+                const oo = o[kk];
+                if (oo && typeof oo.callback === 'function') { try { oo.callback(token); } catch(_){} }
+              }
+            }
+          }
+        }
+      }
+    } catch(_) {}
+    return true;
+  }
 
   /* === LOGOUT ALERTS === */
 
@@ -596,8 +715,44 @@
       }
     }
 
+    let _autoSolveTried = false, _autoSolveWaits = 0;
+    function maybeAutoSolveCaptcha() {
+      if (_autoSolveTried) return;
+      if (!getCapsolverKey()) return;   // no key → keep existing manual-solve behaviour
+      if (getToken()) return;           // already solved
+      const siteKey = findRecaptchaSiteKey();
+      if (!siteKey) {                   // widget may not have loaded yet — retry briefly
+        if (_autoSolveWaits++ < 20) setTimeout(maybeAutoSolveCaptcha, 1000);
+        return;
+      }
+      _autoSolveTried = true;
+      showOverlay('🤖 Solving captcha…');
+      solveRecaptchaWithCapsolver(siteKey, window.location.href).then(token => {
+        if (token) {
+          injectRecaptchaToken(token);
+          showOverlay('✅ Captcha solved — submitting…');
+          // checkLogin()'s 1s interval detects the injected token and submits.
+        } else {
+          _autoSolveTried = false;      // let a manual solve (or later retry) take over
+          showOverlay('⚠️ Auto-solve failed — solve captcha manually.');
+        }
+      });
+    }
+
     function initLogin() {
       resetLogin();
+
+      // Watch-logout parking: we've just logged out because a watched player
+      // came online. Leave TMN entirely so the captcha/auto-login can't fire.
+      // The tab sits off-site until you manually come back.
+      if (GM_getValue('cbLogoutPark', '') === '1') {
+        GM_setValue('cbLogoutPark', '');   // consume — park once
+        const park = GM_getValue('cbLogoutParkUrl', 'https://www.google.co.uk') || 'https://www.google.co.uk';
+        console.log('[JB Login] Watch-logout — parking off-site at', park);
+        try { showOverlay('🚪 Logged out — leaving site'); } catch(_) {}
+        location.replace(park);
+        return;
+      }
 
       // Check sleep mode — don't auto-login during sleep window
       if (GM_getValue('jbSleepOn', false)) {
@@ -635,10 +790,22 @@
       }
 
       if (!fillCreds()) return;
+
+      // Online-watch logout window: stay signed out until it expires.
+      const owUntil = GM_getValue('cbOwLogoutUntil', 0);
+      if (owUntil && Date.now() < owUntil) {
+        const remMin = Math.ceil((owUntil - Date.now()) / 60000);
+        showOverlay(`🚪 Watched player online\\nAuto-login paused (${remMin}m left)`);
+        console.log('[JB Login] Watch-logout active — skipping auto-login for', remMin, 'min');
+        setTimeout(() => location.reload(), 60000);
+        return;
+      }
+
       if (canAuto()) {
         showOverlay('Solve captcha to continue...');
         const iv = setInterval(checkLogin, 1000);
         window.addEventListener('beforeunload', () => { clearInterval(iv); clearTimers(); });
+        maybeAutoSolveCaptcha();
       }
     }
 
@@ -782,6 +949,7 @@
     { key:'dtmList',     label:'DTM list add',          def:true  },
     { key:'jail',        label:'Jail limit/reset',      def:true  },
     { key:'crusher',     label:'Crusher events',        def:true  },
+    { key:'propDrop',    label:'Property dropped',      def:true  },
     { key:'watchdog',    label:'Watchdog',              def:true  },
     { key:'rankup',      label:'Rank up',               def:true  }
   ];
@@ -1002,19 +1170,37 @@
 
   /* === ONLINE WATCH CONFIG === */
 
-  const OW_MAX = 10, OW_DEF_SEC = 60, OW_MIN_SEC = 20;
+  const OW_MAX = 20, OW_DEF_SEC = 60, OW_MIN_SEC = 20;
+
+  // Per-player actions — each watched name fires only the actions ticked for it.
+  const OW_ACTIONS = [
+    { key:'notify',   icon:'🔔', label:'On-screen notify' },
+    { key:'telegram', icon:'✈️', label:'Telegram' },
+    { key:'sound',    icon:'🔊', label:'Sound' },
+    { key:'flash',    icon:'⚡', label:'Tab flash' },
+    { key:'logout',   icon:'🚪', label:'Log out & stay off' },
+    { key:'stop',     icon:'⏸',  label:'Stop script & wait' }
+  ];
+  const OW_DEFAULT_ACTIONS = ['notify','telegram'];
   const OW_COOLDOWN = 5*60*1000, OW_TIMEOUT = 15000;
   const OW_PAGES = ['/authenticated/players.aspx', '/Authenticated/players.aspx'];
 
   const ow = {
     on:       GM_getValue('cbOwOn', false),
+    on2:      GM_getValue('cbOwOn2', false),
     sec:      GM_getValue('cbOwSec', OW_DEF_SEC),
     notify:   GM_getValue('cbOwNotify', true),
     flash:    GM_getValue('cbOwFlash', true),
     sound:    GM_getValue('cbOwSound', true),
     telegram: GM_getValue('cbOwTg', true),
     notifyOff: GM_getValue('cbOwNotifyOff', false),
+    logout:    GM_getValue('cbOwLogout', false),
+    logoutMins:GM_getValue('cbOwLogoutMins', 60),
+    logoutPark:GM_getValue('cbOwLogoutPark', true),
+    parkUrl:   GM_getValue('cbOwParkUrl', 'https://www.google.co.uk'),
     list:     GM_getValue('cbOwList', []),
+    actions:  GM_getValue('cbOwActions', {}),
+    group:    GM_getValue('cbOwGroup', {}),
     lastOn:   GM_getValue('cbOwLastOn', {}),
     lastAlert:GM_getValue('cbOwLastAlert', {}),
     scanAt:   GM_getValue('cbOwScanAt', 0),
@@ -1031,10 +1217,14 @@
   let owTimer = null, owBusy = false, owFlashTimer = null;
 
   function saveOw() {
-    GM_setValue('cbOwOn', ow.on); GM_setValue('cbOwSec', ow.sec);
+    GM_setValue('cbOwOn', ow.on); GM_setValue('cbOwOn2', ow.on2); GM_setValue('cbOwSec', ow.sec);
     GM_setValue('cbOwNotify', ow.notify); GM_setValue('cbOwFlash', ow.flash);
     GM_setValue('cbOwSound', ow.sound); GM_setValue('cbOwTg', ow.telegram);
     GM_setValue('cbOwNotifyOff', ow.notifyOff);
+    GM_setValue('cbOwLogout', ow.logout); GM_setValue('cbOwLogoutMins', ow.logoutMins);
+    GM_setValue('cbOwLogoutPark', ow.logoutPark); GM_setValue('cbOwParkUrl', ow.parkUrl);
+    GM_setValue('cbOwActions', ow.actions || {});
+    GM_setValue('cbOwGroup', ow.group || {});
     GM_setValue('cbOwList', ow.list.slice(0,OW_MAX)); GM_setValue('cbOwLastOn', ow.lastOn);
     GM_setValue('cbOwLastAlert', ow.lastAlert); GM_setValue('cbOwScanAt', ow.scanAt);
     GM_setValue('cbOwScanOk', ow.scanOk); GM_setValue('cbOwScanMsg', ow.scanMsg);
@@ -1078,6 +1268,7 @@
     notifyReady:GM_getValue('cbNotifyReady', true),
     whitelist: GM_getValue('cbWhitelist', false),
     wlNames:   GM_getValue('cbWlNames', []),
+    blNames:   GM_getValue('cbBlNames', []),
     carCats:   GM_getValue('cbCarCats', {}),
     createOC:  GM_getValue('cbCreateOC', false),
     ocTrans:   GM_getValue('cbOcTrans', ''),
@@ -1277,6 +1468,56 @@
     }
   }
 
+  /* === SESSION LOGOUT ===
+   * Ends the session properly (real logout link, or the act=out URL) instead of
+   * leaving it open to time out. Sets cbLogoutIntent first so the
+   * blockLogoutRedirect guard at the top lets this one through. Used by both
+   * scheduled sleep and the online-watch logout action.
+   */
+  function doLogout(reason) {
+    try {
+      try { tabs.release(); } catch(_) {}
+      try { stopKaWorker(); stopKaAudio(); releaseWakeLock(); } catch(_) {}
+      localStorage.setItem('cbLogoutIntent', '1');
+      const link = document.querySelector('a[href*="act=out" i]');
+      const url  = link ? link.href : '/authenticated/default.aspx?act=out';
+      console.log('[JB][LOGOUT]', reason || 'logout', '→', url);
+      window.location.href = url;
+    } catch (e) {
+      console.warn('[JB][LOGOUT] failed:', e.message);
+      try { localStorage.removeItem('cbLogoutIntent'); } catch(_) {}
+    }
+  }
+
+  function doSleepLogout() { doLogout('sleep window'); }
+
+  // Triggered by the online-watch when a listed player comes online, if the
+  // logout action is enabled. Sets a suppression window so auto-login stays off
+  // for the configured number of minutes rather than signing straight back in.
+  function watchLogout(name) {
+    const mins = Math.max(1, Number(ow.logoutMins) || 60);
+    if (ow.logoutPark) {
+      // Parking is the suppression mechanism — leave TMN and stay off until the
+      // user returns manually. No timed window, so a manual return logs in cleanly.
+      GM_setValue('cbLogoutPark', '1');
+      GM_setValue('cbLogoutParkUrl', ow.parkUrl || 'https://www.google.co.uk');
+    } else {
+      // No parking: hold on the login page for the configured window instead.
+      GM_setValue('cbOwLogoutUntil', Date.now() + mins * 60000);
+    }
+    if (ow.telegram) tgMsg('online', `🚪 <b>Logging out</b> — ${esc(name)} online\\n${st.player||'?'} | ${ow.logoutPark ? 'parked off-site' : 'back in ' + mins + 'm'}`);
+    setTimeout(() => doLogout('watched player online: ' + name), 2000);
+  }
+
+  // Pause the automation and wait for a manual decision (stays logged in).
+  function watchStop(name) {
+    paused = true;
+    setStatus(`⏸ Stopped — ${name} online`);
+    owBrowserNotify(`${APP_NAME}: stopped`, `Paused because ${name} is online`);
+    if (ow.telegram) tgMsg('online', `⏸ <b>Stopped</b> — ${esc(name)} online\n${st.player||'?'} | script paused, waiting for you`);
+    console.log('[JB][WATCH] Script paused —', name, 'online');
+  }
+
   function handleSleep() {
     if (!breaks.sleepOn) { breaks.isSleeping = false; saveBreaks(); return false; }
     if (isSleepWindow()) {
@@ -1286,7 +1527,7 @@
         tgMsg('sleep', `😴 <b>Sleep Mode</b>\n${st.player||'?'} | Until ${breaks.wakeTime}`);
         console.log(`[JB] Entering sleep mode until ${breaks.wakeTime}`);
         if (breaks.sleepLogout) {
-          setTimeout(() => { window.location.href = '/authenticated/default.aspx'; }, 3000);
+          setTimeout(doSleepLogout, 3000);
         }
       }
       return true;
@@ -1328,7 +1569,7 @@
       cbMinimized:st.minimized, cbLastJailCk:st.lastJailCk, cbAction:st.action,
       cbRefresh:st.refresh, cbPending:st.pending, cbBuyHealth:st.buyHealth,
       cbAutoOC:st.autoOC, cbAutoDTM:st.autoDTM, cbNotifyReady:st.notifyReady,
-      cbWhitelist:st.whitelist, cbWlNames:st.wlNames, cbCarCats:st.carCats,
+      cbWhitelist:st.whitelist, cbWlNames:st.wlNames, cbBlNames:st.blNames, cbCarCats:st.carCats,
       cbCreateOC:st.createOC, cbOcTrans:st.ocTrans, cbOcWeapon:st.ocWeapon,
       cbOcExplo:st.ocExplo, cbOcSched:st.ocSched, cbOcType:st.ocType,
       cbOcRepeat:st.ocRepeat, cbOcLeft:st.ocLeft,
@@ -1344,11 +1585,32 @@
 
   class TabCtrl {
     constructor() {
-      this.id = `t_${Date.now()}_${Math.random().toString(36).substr(2,9)}`;
+      // Stable per-tab id: sessionStorage survives this tab's own navigations
+      // (crimes → travel → jail …) but is unique per browser tab. Without this,
+      // every page load minted a new id that no longer matched the master
+      // record, so the tab demoted itself to "secondary" for ~15s after each
+      // navigation while it waited for the previous page's heartbeat to expire.
+      let id = null;
+      try { id = sessionStorage.getItem('cbTabId'); } catch(_) {}
+      if (!id) {
+        id = `t_${Date.now()}_${Math.random().toString(36).substr(2,9)}`;
+        try { sessionStorage.setItem('cbTabId', id); } catch(_) {}
+      }
+      this.id = id;
       this.hbIv = null;
       this.isMaster = false;
       this.HB_MS = 2000;
-      this.TIMEOUT = 6000;
+      // Takeover threshold is now dynamic — see timeoutMs().
+    }
+    // A hidden tab's heartbeat interval gets throttled to ~1/min, so a 6s
+    // takeover threshold would let another tab steal mastership from a
+    // perfectly healthy worker. Be generous while hidden.
+    timeoutMs() { return document.hidden ? 120000 : 15000; }
+    // Stamp the heartbeat out-of-band (called by the worker ticker, which keeps
+    // running when normal intervals are throttled).
+    beat() {
+      if (this.isMaster && localStorage.getItem(LS_MASTER) === this.id)
+        localStorage.setItem(LS_HB, String(Date.now()));
     }
     check() {
       const cur = localStorage.getItem(LS_MASTER);
@@ -1359,7 +1621,7 @@
         localStorage.setItem(LS_HB, String(now));
         return true;
       }
-      if (!cur || (now - hb) > this.TIMEOUT) {
+      if (!cur || (now - hb) > this.timeoutMs()) {
         const lk = localStorage.getItem(LS_LOCK);
         if (!lk || (now - parseInt(lk,10)) > 1000) {
           localStorage.setItem(LS_LOCK, String(now));
@@ -1402,7 +1664,7 @@
     hasOther() {
       const cur = localStorage.getItem(LS_MASTER);
       const hb  = parseInt(localStorage.getItem(LS_HB)||'0',10);
-      return cur && cur !== this.id && (Date.now()-hb) <= this.TIMEOUT;
+      return cur && cur !== this.id && (Date.now()-hb) <= this.timeoutMs();
     }
   }
 
@@ -1746,20 +2008,34 @@
     return was; // was online, now offline = alert
   }
 
-  function owTriggerOnline(p) {
-    const k = normName(p.name);
-    ow.lastAlert[k] = Date.now();
-    saveOw();
-    owBrowserNotify(`${APP_NAME}: player online`, `${p.name} is online`, p.href);
-    owSound();
-    owFlashTitle(p.name);
-    if (ow.telegram) tgMsg('online', `🟢 <b>ONLINE</b> — ${esc(p.name)}\n${st.player||'?'} | ${fmtDate()}`);
-    setStatus(`🟢 ${p.name} online`);
-    console.log('[JB][WATCH]', p.name, 'came ONLINE');
+  // Fire a player's configured actions immediately, as if they'd just come
+  // online — for testing your setup without waiting for a real offline→online
+  // flip. Runs the REAL actions (so a logout-configured player really logs out).
+  function owTestPlayer(id) {
+    const entry = (ow.list || []).find(e => owId(e) === id);
+    if (!entry) return;
+    console.log('[JB][WATCH] TEST fire for', owName(entry));
+    owTriggerOnline(entry, { name: owName(entry), href: '' });
   }
 
-  function owTriggerOffline(name) {
+  function owTriggerOnline(entry, hit) {
+    const id = owId(entry), name = owName(entry), href = (hit && hit.href) || '';
+    ow.lastAlert[id] = Date.now();
+    saveOw();
+    const acts = getOwActions(id);
+    console.log('[JB][WATCH]', name, `(G${getOwGroup(id)}) came ONLINE — actions:`, acts.join(',') || 'none');
+    setStatus(`🟢 ${name} online`);
+    if (acts.includes('notify'))   owBrowserNotify(`${APP_NAME}: player online`, `${name} is online`, href);
+    if (acts.includes('sound'))    owSound();
+    if (acts.includes('flash'))    owFlashTitle(name);
+    if (acts.includes('telegram')) tgMsg('online', `🟢 <b>ONLINE</b> — ${esc(name)}\n${st.player||'?'} | ${fmtDate()}`);
+    if (acts.includes('stop'))     watchStop(name);
+    if (acts.includes('logout'))   watchLogout(name);
+  }
+
+  function owTriggerOffline(entry) {
     if (!ow.notifyOff) return;
+    const name = owName(entry);
     owBrowserNotify(`${APP_NAME}: player offline`, `${name} went offline`);
     if (ow.telegram) tgMsg('offline', `🔴 <b>OFFLINE</b> — ${esc(name)}\n${st.player||'?'} | ${fmtDate()}`);
     setStatus(`🔴 ${name} offline`);
@@ -1767,7 +2043,7 @@
   }
 
   async function owScan(reason='timer') {
-    if (!ow.on || !tabs.isMaster || owBusy) return;
+    if (!owEnabled() || !tabs.isMaster || owBusy) return;
     if (!ow.list.length) {
       ow.scanAt = Date.now(); ow.scanOk = true; ow.scanMsg = 'No names in list';
       saveOw(); renderOwUI(); return;
@@ -1776,22 +2052,23 @@
     try {
       let map = curOwPlayers(), src = 'current page';
       if (!map) { const f = await fetchOwPage(); map = parseOwPlayers(f.doc); src = f.url; }
-      for (const raw of ow.list) {
-        const k = normName(raw);
-        const hit = map.get(k);
+      for (const entry of ow.list) {
+        const id = owId(entry), nm = owName(entry);
+        const hit = map.get(normName(nm));
         const isOnline = !!hit;
-        const wasOnline = !!ow.lastOn[k];
+        const wasOnline = !!ow.lastOn[id];
+        const grpOn = groupOn(getOwGroup(id));   // only act if this entry's group is enabled
 
         // State change: offline → online
-        if (isOnline && !wasOnline) {
-          owTriggerOnline(hit);
+        if (isOnline && !wasOnline && grpOn) {
+          owTriggerOnline(entry, hit);
         }
         // State change: online → offline
-        if (!isOnline && wasOnline) {
-          owTriggerOffline(raw);
+        if (!isOnline && wasOnline && grpOn) {
+          owTriggerOffline(entry);
         }
 
-        ow.lastOn[k] = isOnline;
+        ow.lastOn[id] = isOnline;
       }
       ow.scanAt = Date.now(); ow.scanOk = true;
       ow.scanMsg = `OK: ${map.size} online (${src})`;
@@ -1805,7 +2082,7 @@
 
   function owStart() {
     owStop();
-    if (!ow.on) { renderOwUI(); return; }
+    if (!owEnabled()) { renderOwUI(); return; }
     const ms = Math.max(OW_MIN_SEC, Number(ow.sec||OW_DEF_SEC)) * 1000;
     owTimer = setInterval(() => owScan('timer'), ms);
     setTimeout(() => owScan('startup'), 2500);
@@ -1814,20 +2091,78 @@
 
   function owStop() { if (owTimer) clearInterval(owTimer); owTimer = null; }
 
+  // --- watch-entry helpers (entries are {id, name}; legacy entries were plain strings) ---
+  function genOwId() { return 'w' + Date.now().toString(36) + Math.random().toString(36).slice(2,6); }
+  function owId(e)   { return (e && typeof e === 'object') ? e.id : ('legacy_' + normName(e)); }
+  function owName(e) { return (e && typeof e === 'object') ? e.name : String(e||''); }
+
+  // One-time migration: turn old string-list entries into {id,name} objects and
+  // carry their name-keyed settings across to the new per-entry id keys.
+  function migrateOwList() {
+    if (!Array.isArray(ow.list)) { ow.list = []; return; }
+    let changed = false;
+    ow.list = ow.list.map(item => {
+      if (item && typeof item === 'object' && item.id) return item; // already migrated
+      const name = String(item||'').trim();
+      const id = genOwId(), k = normName(name);
+      if (ow.actions && Array.isArray(ow.actions[k])) ow.actions[id] = ow.actions[k].slice();
+      if (ow.group && ow.group[k]) ow.group[id] = ow.group[k];
+      if (ow.lastOn && k in ow.lastOn) ow.lastOn[id] = ow.lastOn[k];
+      changed = true;
+      return { id, name };
+    });
+    if (changed) saveOw();
+  }
+
   function owAdd(name) {
     const clean = String(name||'').trim().replace(/\s+/g,' ');
     if (!clean) return alert('Enter a name');
-    if (ow.list.some(x => normName(x) === normName(clean))) return alert(`${clean} already in list`);
-    if (ow.list.length >= OW_MAX) return alert(`Max ${OW_MAX} players`);
-    ow.list.push(clean);
-    ow.lastOn[normName(clean)] = false;
+    if (ow.list.length >= OW_MAX) return alert(`Max ${OW_MAX} entries`);
+    // Duplicates allowed: each entry is independent, so the same person can
+    // appear twice with different groups/actions (e.g. a day one and a night one).
+    const id = genOwId();
+    ow.list.push({ id, name: clean });
+    ow.lastOn[id] = false;
+    if (!ow.actions) ow.actions = {};
+    ow.actions[id] = OW_DEFAULT_ACTIONS.slice();
+    if (!ow.group) ow.group = {};
+    ow.group[id] = 1;
     saveOw(); renderOwUI();
   }
 
-  function owRemove(name) {
-    const k = normName(name);
-    ow.list = ow.list.filter(x => normName(x) !== k);
-    delete ow.lastOn[k]; delete ow.lastAlert[k];
+  function owRemove(id) {
+    ow.list = ow.list.filter(e => owId(e) !== id);
+    delete ow.lastOn[id]; delete ow.lastAlert[id];
+    if (ow.actions) delete ow.actions[id];
+    if (ow.group) delete ow.group[id];
+    saveOw(); renderOwUI();
+  }
+
+  // Actions ticked for a given entry id (falls back to defaults if never set).
+  function getOwActions(id) {
+    if (!ow.actions) ow.actions = {};
+    if (!Array.isArray(ow.actions[id])) ow.actions[id] = OW_DEFAULT_ACTIONS.slice();
+    return ow.actions[id];
+  }
+
+  function toggleOwAction(id, actionKey) {
+    const arr = getOwActions(id);
+    const i = arr.indexOf(actionKey);
+    if (i >= 0) arr.splice(i, 1); else arr.push(actionKey);
+    saveOw(); renderOwUI();
+  }
+
+  // Two groups sharing one scan — each has its own Enabled toggle so you can
+  // switch e.g. friends and enemies on/off independently.
+  function owEnabled() { return ow.on || ow.on2; }
+  function groupOn(g) { return g === 2 ? ow.on2 : ow.on; }
+  function getOwGroup(id) {
+    if (!ow.group) ow.group = {};
+    return ow.group[id] === 2 ? 2 : 1;   // default group 1
+  }
+  function setOwGroup(id, g) {
+    if (!ow.group) ow.group = {};
+    ow.group[id] = (g === 2 ? 2 : 1);
     saveOw(); renderOwUI();
   }
 
@@ -1952,7 +2287,7 @@
   async function fetchTravel() {
     try {
       const url = `${window.location.origin}${TRAVEL_PATH}?_=${Date.now()}`;
-      console.log('[JB][TRAVEL] Fetching:', url);
+      dlog('[JB][TRAVEL] Fetching:', url);
       const r = await fetch(url, { method:'GET', headers:{'Cache-Control':'no-cache'}, credentials:'same-origin' });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const html = await r.text();
@@ -1964,7 +2299,7 @@
       const bodyTxt = doc.body.textContent||'';
       const lower = bodyTxt.toLowerCase();
 
-      console.log('[JB][TRAVEL] lblMsg:', msgTxt || '(empty)');
+      dlog('[JB][TRAVEL] lblMsg:', msgTxt || '(empty)');
 
       let h = 0, m = 0, s = 0, found = false;
 
@@ -2006,7 +2341,7 @@
         const total = h*3600+m*60+s;
         if (total > 0) {
           storeTravel({ cd:total, canNormal:false, at:Date.now() });
-          console.log(`[JB][TRAVEL] Cooldown: ${h}h ${m}m ${s}s (${total}s)`);
+          dlog(`[JB][TRAVEL] Cooldown: ${h}h ${m}m ${s}s (${total}s)`);
           updateTimers();
           return;
         }
@@ -2019,9 +2354,9 @@
 
       if (canNow) {
         storeTravel({ cd:0, canNormal:true, at:Date.now() });
-        console.log('[JB][TRAVEL] Ready to travel');
+        dlog('[JB][TRAVEL] Ready to travel');
       } else {
-        console.log('[JB][TRAVEL] Could not parse — keeping existing timer');
+        dlog('[JB][TRAVEL] Could not parse — keeping existing timer');
       }
       updateTimers();
     } catch(e) { console.error(APP_TAG,'Travel fetch err',e); }
@@ -2272,6 +2607,27 @@
   const LS_LAST_DTM_MAIL = 'cbLastDtmMail';
   const LS_LAST_OC_ACC   = 'cbLastOcAcc';
   const LS_LAST_DTM_ACC  = 'cbLastDtmAcc';
+
+  /* Persistent invite dedup — once an OC/DTM invite mail has been acted on it
+   * must never be re-read, even after the cooldown timer completes and the
+   * single last-mail marker is cleared (which is exactly when stale invites
+   * used to fire again). Keyed by mail id, pruned by age and capped. */
+  const INVITE_HANDLED_TTL = 14 * 24 * 3600 * 1000; // 14 days
+  function _handledKey(kind) { return kind === 'dtm' ? 'cbHandledDtm' : 'cbHandledOc'; }
+  function _loadHandled(kind) { try { return JSON.parse(localStorage.getItem(_handledKey(kind)) || '{}') || {}; } catch(_) { return {}; } }
+  function wasHandledInvite(kind, mailId) {
+    if (!mailId) return false;
+    return !!_loadHandled(kind)[String(mailId)];
+  }
+  function markHandledInvite(kind, mailId) {
+    if (!mailId) return;
+    const m = _loadHandled(kind), now = Date.now();
+    m[String(mailId)] = now;
+    for (const k in m) { if (now - m[k] > INVITE_HANDLED_TTL) delete m[k]; }
+    const keys = Object.keys(m);
+    if (keys.length > 200) keys.sort((a,b)=>m[a]-m[b]).slice(0, keys.length-200).forEach(k => delete m[k]);
+    try { localStorage.setItem(_handledKey(kind), JSON.stringify(m)); } catch(_){}
+  }
   const LS_PEND_DTM      = 'cbPendDtmUrl';
   const LS_PEND_OC       = 'cbPendOcUrl';
   const MAIL_INT_MS      = 60000;
@@ -2430,6 +2786,7 @@
         // DTM invite check
         const isDtm = /(dtm\s*invitation|dtm\s*invite|drug\s*trade)/i.test(rowTxt);
         if (isDtm && st.autoDTM) {
+          if (wasHandledInvite('dtm', mailId)) continue;   // already acted on — never re-read
           const lastAcc = parseInt(localStorage.getItem(LS_LAST_DTM_ACC)||'0',10);
           if (lastAcc > 0 && (Date.now()-lastAcc) < 7200000) { localStorage.setItem(LS_LAST_DTM_MAIL, mailId); continue; }
           if (localStorage.getItem('cbPendDtmHandle') === 'true' || localStorage.getItem(LS_PEND_DTM)) { localStorage.setItem(LS_LAST_DTM_MAIL, mailId); continue; }
@@ -2437,6 +2794,7 @@
           const ts = parseTmnDate(rowTxt);
           if (isOlderThan(ts, INVITE_STALE)) { localStorage.setItem(LS_LAST_DTM_MAIL, mailId); continue; }
           if (ts === 0 && localStorage.getItem(LS_LAST_DTM_MAIL) && parseInt(mailId) <= parseInt(localStorage.getItem(LS_LAST_DTM_MAIL))) continue;
+          markHandledInvite('dtm', mailId);
           await handleDtmInvite(mailId, href);
           continue;
         } else if (isDtm) { localStorage.setItem(LS_LAST_DTM_MAIL, mailId); continue; }
@@ -2444,6 +2802,7 @@
         // OC invite check
         const isOc = /(organized\s*crime\s*invitation|oc\s*invitation)/i.test(rowTxt);
         if (isOc && st.autoOC) {
+          if (wasHandledInvite('oc', mailId)) continue;   // already acted on — never re-read
           const lastAcc = parseInt(localStorage.getItem(LS_LAST_OC_ACC)||'0',10);
           if (lastAcc > 0 && (Date.now()-lastAcc) < 7200000) { localStorage.setItem(LS_LAST_OC_MAIL, mailId); continue; }
           if (localStorage.getItem('cbPendOcHandle') === 'true' || localStorage.getItem(LS_PEND_OC)) { localStorage.setItem(LS_LAST_OC_MAIL, mailId); continue; }
@@ -2451,6 +2810,7 @@
           const ts = parseTmnDate(rowTxt);
           if (isOlderThan(ts, INVITE_STALE)) { localStorage.setItem(LS_LAST_OC_MAIL, mailId); continue; }
           if (ts === 0 && localStorage.getItem(LS_LAST_OC_MAIL) && parseInt(mailId) <= parseInt(localStorage.getItem(LS_LAST_OC_MAIL))) continue;
+          markHandledInvite('oc', mailId);
           await handleOcInvite(mailId, href);
           continue;
         } else if (isOc) { localStorage.setItem(LS_LAST_OC_MAIL, mailId); continue; }
@@ -2535,8 +2895,12 @@
         tgMsg('dtmInvite', `📬 <b>DTM Invite</b>\n${st.player||'?'} | ${fmtDate()}\n${st.inJail ? '⛓ In jail' : '🚚 Accepting...'}`);
       }
       const url = await getAcceptUrl(href, 'dtm');
+      const inv = await extractInviter(href);
+      if (st.blNames && st.blNames.length && inv && st.blNames.some(n => n && n.toLowerCase().trim() === inv.toLowerCase().trim())) {
+        tgMsg('blocked', `🚫 <b>DTM Blocked</b>\n${st.player||'?'} | ${inv} blacklisted`);
+        return;
+      }
       if (st.whitelist && st.wlNames.length > 0) {
-        const inv = await extractInviter(href);
         const ok = inv && st.wlNames.some(n => n && n.toLowerCase().trim() === inv.toLowerCase().trim());
         if (!ok) {
           tgMsg('blocked', `🚫 <b>DTM Blocked</b>\n${st.player||'?'} | ${inv||'Unknown'} not whitelisted`);
@@ -2552,8 +2916,12 @@
     try {
       localStorage.setItem(LS_LAST_OC_MAIL, mailId);
       const url = await getAcceptUrl(href, 'oc');
+      const inv = await extractInviter(href);
+      if (st.blNames && st.blNames.length && inv && st.blNames.some(n => n && n.toLowerCase().trim() === inv.toLowerCase().trim())) {
+        tgMsg('blocked', `🚫 <b>OC Blocked</b>\n${st.player||'?'} | ${inv} blacklisted`);
+        return;
+      }
       if (st.whitelist && st.wlNames.length > 0) {
-        const inv = await extractInviter(href);
         const ok = inv && st.wlNames.some(n => n && n.toLowerCase().trim() === inv.toLowerCase().trim());
         if (!ok) {
           tgMsg('blocked', `🚫 <b>OC Blocked</b>\n${st.player||'?'} | ${inv||'Unknown'} not whitelisted`);
@@ -2733,6 +3101,237 @@
   function clearDtmHandle() {
     localStorage.removeItem('cbPendDtmHandle');
     localStorage.removeItem('cbPendDtmHandleTs');
+  }
+
+  /* === PROPERTY DROP WATCH ===
+   * Background-fetches the cities statistics page on a timer and flags any
+   * property with no owner shown (dropped — free to claim). Alerts once per new
+   * drop via Telegram; stays silent while the dropped set is unchanged. Fully
+   * local — only touches the game's own statistics.aspx. Master tab only.
+   */
+
+  const PROP_MIN_SEC = 120, PROP_DEF_SEC = 300;
+  const PROP_COLUMNS = [
+    { name:'Airport',         col:1 },
+    { name:'Bullets Factory', col:2 },
+    { name:'Roulette',        col:3 },
+    { name:'Blackjack',       col:4 },
+    { name:'Racetrack',       col:5 },
+    { name:'Slots',           col:6 },
+    { name:'War',             col:7 },
+    { name:'Double Up',       col:8 }
+  ];
+
+  const propWatch = {
+    on:      GM_getValue('cbPropOn', false),
+    sec:     GM_getValue('cbPropSec', PROP_DEF_SEC),
+    lastSig: GM_getValue('cbPropLastSig', ''),
+    scanAt:  GM_getValue('cbPropScanAt', 0),
+    scanOk:  GM_getValue('cbPropScanOk', false),
+    scanMsg: GM_getValue('cbPropScanMsg', 'Not scanned'),
+    dropped: GM_getValue('cbPropDropped', [])
+  };
+  if (!Array.isArray(propWatch.dropped)) propWatch.dropped = [];
+  propWatch.sec = Math.max(PROP_MIN_SEC, Math.min(3600, Number(propWatch.sec || PROP_DEF_SEC)));
+
+  let propTimer = null, propBusy = false;
+
+  function savePropWatch() {
+    GM_setValue('cbPropOn', propWatch.on);
+    GM_setValue('cbPropSec', propWatch.sec);
+    GM_setValue('cbPropLastSig', propWatch.lastSig);
+    GM_setValue('cbPropScanAt', propWatch.scanAt);
+    GM_setValue('cbPropScanOk', propWatch.scanOk);
+    GM_setValue('cbPropScanMsg', propWatch.scanMsg);
+    GM_setValue('cbPropDropped', propWatch.dropped);
+  }
+
+  // Read the cities table out of a parsed statistics doc. Returns an array of
+  // {city, property} for every unowned cell, or null if the table is absent
+  // (treated as inconclusive so we never false-alarm "everything dropped").
+  function scanDroppedProps(doc) {
+    const table = doc.getElementById('ctl00_main_gvCitiesInformation');
+    if (!table) return null;
+    const dropped = [];
+    const rows = Array.from(table.querySelectorAll('tr')).filter(tr => tr.querySelector('[id^="City"]'));
+    for (const row of rows) {
+      const citySpan = row.querySelector('[id^="City"]');
+      const city = citySpan ? citySpan.textContent.trim() : 'Unknown';
+      const cells = row.querySelectorAll('td');
+      for (const col of PROP_COLUMNS) {
+        const cell = cells[col.col];
+        if (!cell) continue;
+        const link = cell.querySelector('a[href*="profile.aspx"]');
+        if (!link || !link.textContent.trim()) dropped.push({ city, property: col.name });
+      }
+    }
+    return dropped;
+  }
+
+  function renderPropUI() {
+    if (!_shadow) return;
+    const cb = _shadow.querySelector('#jb-prop-on');
+    if (!cb) return;
+    cb.checked = propWatch.on;
+    const lbl = cb.closest('.jb-switch');
+    if (lbl) lbl.title = `${propWatch.scanMsg}${propWatch.scanAt ? ' · ' + fmtAgo(propWatch.scanAt) : ''}`;
+  }
+
+  async function propScan(reason = 'timer') {
+    if (!propWatch.on || !tabs.isMaster || propBusy) return;
+    if (st.inJail || paused) return;
+    propBusy = true;
+    try {
+      const r = await owFetch(owUrl('statistics.aspx') + '?_=' + Date.now());
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const html = await r.text();
+      const doc = new DOMParser().parseFromString(html, 'text/html');
+      if (isLoginDoc(doc)) throw new Error('Logged out');
+      const dropped = scanDroppedProps(doc);
+      if (dropped === null) throw new Error('Cities table not found');
+
+      propWatch.scanAt = Date.now();
+      propWatch.scanOk = true;
+      propWatch.dropped = dropped;
+      propWatch.scanMsg = dropped.length ? `${dropped.length} dropped` : 'All owned';
+
+      const sig = dropped.map(d => `${d.city}:${d.property}`).sort().join('|');
+      const lastSet = new Set((propWatch.lastSig || '').split('|').filter(Boolean));
+      const fresh = dropped.filter(d => !lastSet.has(`${d.city}:${d.property}`));
+      propWatch.lastSig = sig;
+      savePropWatch();
+      renderPropUI();
+
+      if (fresh.length) {
+        const body = fresh.map(d => `• ${esc(d.property)} in ${esc(d.city)}`).join('\n');
+        tgMsg('propDrop', `🏠 <b>Property dropped!</b>\n${body}`);
+      }
+    } catch (e) {
+      propWatch.scanAt = Date.now();
+      propWatch.scanOk = false;
+      propWatch.scanMsg = 'Scan failed: ' + (e && e.message ? e.message : e);
+      savePropWatch();
+      renderPropUI();
+    } finally {
+      propBusy = false;
+    }
+  }
+
+  function propWatchStart() {
+    propWatchStop();
+    if (!propWatch.on) { renderPropUI(); return; }
+    const ms = Math.max(PROP_MIN_SEC, Number(propWatch.sec || PROP_DEF_SEC)) * 1000;
+    propTimer = setInterval(() => propScan('timer'), ms);
+    setTimeout(() => propScan('startup'), 6000);
+    renderPropUI();
+  }
+
+  function propWatchStop() { if (propTimer) clearInterval(propTimer); propTimer = null; }
+
+  /* === PLAYER HOVER TOOLTIP ===
+   * Hover any player profile link to get a quick card — rank, wealth, network,
+   * join date, new-player protection — fetched same-origin from the game's own
+   * profile page and cached. Fully local: no external lists or servers. Runs
+   * per-tab as a UI helper, independent of master-tab status.
+   */
+
+  const hoverCfg = { on: GM_getValue('cbHoverOn', true) };
+  function saveHoverCfg() { GM_setValue('cbHoverOn', hoverCfg.on); }
+
+  let _hoverInited = false;
+  function initPlayerHover() {
+    if (_hoverInited || !hoverCfg.on || !document.body) return;
+    _hoverInited = true;
+
+    const cache = new Map();
+
+    const tip = document.createElement('div');
+    tip.id = 'jb-hover-tip';
+    Object.assign(tip.style, {
+      position:'fixed', display:'none',
+      background:'rgba(20,20,20,0.97)', color:'#fff',
+      padding:'8px 12px', borderRadius:'7px',
+      font:'12px/1.6 system-ui, sans-serif',
+      zIndex:'2147483647', pointerEvents:'none',
+      boxShadow:'0 4px 18px rgba(0,0,0,0.6)',
+      border:'1px solid var(--jb-accent, #7a1f1f)', maxWidth:'260px'
+    });
+    document.body.appendChild(tip);
+
+    function positionTip(e) {
+      const pad = 14;
+      let x = e.clientX + pad, y = e.clientY + pad;
+      if (x + 270 > window.innerWidth)  x = e.clientX - 270 - pad;
+      if (y + 180 > window.innerHeight) y = e.clientY - 180 - pad;
+      tip.style.left = x + 'px';
+      tip.style.top  = y + 'px';
+    }
+
+    async function fetchProfile(id) {
+      if (cache.has(id)) return cache.get(id);
+      try {
+        const html = await fetch(`/authenticated/profile.aspx?id=${id}`, { method:'GET', credentials:'same-origin', cache:'no-store' }).then(r => r.text());
+        const doc = new DOMParser().parseFromString(html, 'text/html');
+        const panel = doc.querySelector('#ctl00_main_pnlMainProfile');
+        if (!panel) return null;
+        const get = sel => panel.querySelector(sel)?.textContent?.trim() || '';
+        let protection = null;
+        const protSpan = panel.querySelector('#ctl00_main_lblNewPlayerProtection');
+        if (protSpan) { const m = protSpan.textContent.match(/(\d{2}-\d{2}-\d{4}\s+\d{2}:\d{2}:\d{2})/); if (m) protection = m[1]; }
+        const info = {
+          name:     get('#ctl00_main_hlName'),
+          rank:     get('#ctl00_main_lblRank'),
+          wealth:   get('#ctl00_main_lblWealth'),
+          network:  get('#ctl00_main_hlNetwork'),
+          joinDate: get('#ctl00_main_lblJoin'),
+          protection
+        };
+        if (cache.size > 300) cache.delete(cache.keys().next().value);
+        cache.set(id, info);
+        return info;
+      } catch(_) { return null; }
+    }
+
+    function attachHover(a) {
+      if (a._jbHover) return;
+      a._jbHover = true;
+      const m = (a.getAttribute('href') || '').match(/id=(\d+)/);
+      if (!m) return;
+      const id = m[1];
+      let hoverTimer = null, cancelled = false;
+
+      a.addEventListener('mouseenter', e => {
+        cancelled = false;
+        hoverTimer = setTimeout(async () => {
+          if (cancelled) return;
+          const info = await fetchProfile(id);
+          if (cancelled || !info) return;
+          let html = `<b style="font-size:13px">${esc(info.name)}</b>`;
+          html += `<br><span style="color:#aaa">Rank:</span> ${esc(info.rank)}`;
+          html += `<br><span style="color:#aaa">Wealth:</span> ${esc(info.wealth)}`;
+          html += `<br><span style="color:#aaa">Network:</span> ${esc(info.network) || '—'}`;
+          html += `<br><span style="color:#aaa">Joined:</span> ${esc(info.joinDate)}`;
+          if (info.protection) html += `<br><span style="color:#ffc107">🛡️ Protected until:</span> ${esc(info.protection)}`;
+          tip.innerHTML = html;
+          tip.style.display = 'block';
+          positionTip(e);
+        }, 300);
+      });
+      a.addEventListener('mousemove', e => { if (tip.style.display === 'block') positionTip(e); });
+      a.addEventListener('mouseleave', () => { cancelled = true; clearTimeout(hoverTimer); tip.style.display = 'none'; });
+    }
+
+    document.querySelectorAll('a[href*="profile.aspx?id="]').forEach(attachHover);
+
+    new MutationObserver(mutations => {
+      for (const mm of mutations) {
+        for (const node of mm.addedNodes) {
+          if (node.nodeType !== 1) continue;
+          if (node.matches?.('a[href*="profile.aspx?id="]')) attachHover(node);
+          node.querySelectorAll?.('a[href*="profile.aspx?id="]').forEach(attachHover);
+        }
+      }
+    }).observe(document.body, { childList:true, subtree:true });
   }
 
   /* === PAGE HELPERS === */
@@ -3877,6 +4476,8 @@
               <div class="jb-switch"><input type="checkbox" id="jb-create-oc"> <span id="jb-oc-link" style="cursor:pointer;text-decoration:underline;color:var(--jb-accent)">Create OC</span></div>
               <div class="jb-switch"><input type="checkbox" id="jb-create-dtm"> <span id="jb-dtm-link" style="cursor:pointer;text-decoration:underline;color:var(--jb-accent)">Create DTM</span></div>
               <div class="jb-switch"><input type="checkbox" id="jb-ow-on"> <span id="jb-ow-link" style="cursor:pointer;text-decoration:underline;color:var(--jb-accent)">🟢 Watch</span></div>
+              <label class="jb-switch" title="Property drop watch"><input type="checkbox" id="jb-prop-on"> 🏠 Props</label>
+              <label class="jb-switch" title="Player hover tooltip (reload to apply)"><input type="checkbox" id="jb-hover-on"> 🔍 Hover</label>
               <label class="jb-switch"><input type="checkbox" id="jb-notify-ready"> 🔔 Alerts</label>
               <label class="jb-switch"><input type="checkbox" id="jb-auto-travel" ${st.autoTravel?'checked':''}> ✈️ Auto Travel</label>
               <label class="jb-switch"><input type="checkbox" id="jb-auto-dtmlist" ${st.autoDtmList?'checked':''}> 📋 DTM List</label>
@@ -3910,6 +4511,18 @@
               <input class="jb-input" id="jb-login-pass" type="text" value="${LOGIN.pass}">
             </div>
             <label class="jb-switch jb-mb"><input type="checkbox" id="jb-auto-submit" ${LOGIN.autoSubmit?'checked':''}> Auto-submit</label>
+            <div class="jb-mb">
+              <label class="jb-label">CapSolver key (optional — auto-solves captcha; blank = manual)</label>
+              <input class="jb-input" id="jb-capsolver-key" type="text" value="${esc(getCapsolverKey())}" placeholder="CAP-… (paid service)">
+            </div>
+
+            <hr class="jb-sep">
+            <div class="jb-sect-title">Keep-alive (anti-throttle)</div>
+            <label class="jb-switch jb-mb" title="Silent inaudible tone — stops the browser throttling this tab in the background. Most effective option."><input type="checkbox" id="jb-ka-audio" ${ka.audio?'checked':''}> 🔊 Silent audio</label>
+            <label class="jb-switch jb-mb" title="Stops the screen sleeping while this tab is visible. Does not prevent the PC sleeping."><input type="checkbox" id="jb-ka-wake" ${ka.wakeLock?'checked':''}> 💡 Screen wake lock</label>
+            <label class="jb-switch jb-mb" title="Background worker ticker — keeps the loop and master heartbeat alive when timers are throttled."><input type="checkbox" id="jb-ka-worker" ${ka.worker?'checked':''}> ⚙️ Worker ticker</label>
+            <div class="jb-label" style="opacity:.75;line-height:1.5">Note: nothing here can keep running if Windows sleeps. Set power mode to Never sleep, and in Chrome add tmn2010.net to "Always keep these sites active" under Performance.</div>
+            <label class="jb-switch jb-mb" title="Verbose console logging for diagnostics. Off keeps the console quiet (real events still log)."><input type="checkbox" id="jb-debug" ${_debug?'checked':''}> 🐛 Verbose debug logging</label>
 
             <hr class="jb-sep">
             <div class="jb-sect-title">Crimes</div>
@@ -4097,7 +4710,7 @@
                 <option value="weekends" ${breaks.sleepMode==='weekends'?'selected':''}>Weekends</option>
               </select>
             </div>
-            <label class="jb-switch jb-mb"><input type="checkbox" id="jb-sleep-logout" ${breaks.sleepLogout?'checked':''}> Logout on sleep</label>
+            <label class="jb-switch jb-mb" title="Signs out properly when the sleep window opens, instead of leaving the session open to time out. Logs back in automatically at wake time."><input type="checkbox" id="jb-sleep-logout" ${breaks.sleepLogout?'checked':''}> Log out on sleep</label>
             <div class="jb-sub jb-mb" style="color:var(--jb-warning)">⚠️ Health is monitored during coffee/lunch breaks. With "Logout on sleep" ON, no health monitoring while logged out overnight.</div>
             <div class="jb-sub jb-mb" id="jb-break-status">Break status: ${getBreakStatus().msg||'None active'}</div>
 
@@ -4113,11 +4726,18 @@
       <div class="jb-modal-bg" id="jb-wl-backdrop" style="display:none"></div>
       <div class="jb-modal" id="jb-wl-modal">
         <div class="jb-modal-content" style="width:280px">
-          <div class="jb-modal-head"><span>OC/DTM Whitelist</span><button class="jb-hbtn" id="jb-wl-close">✕</button></div>
+          <div class="jb-modal-head"><span>OC/DTM Invite Filters</span><button class="jb-hbtn" id="jb-wl-close">✕</button></div>
           <div class="jb-modal-body">
+            <div class="jb-sect-title">Whitelist</div>
             <div class="jb-sub jb-mb">Only accept invites from these players. Empty = accept all.</div>
             <div id="jb-wl-entries"></div>
             <button class="jb-btn jb-btn-outline" id="jb-wl-add" style="width:100%;margin-top:6px">+ Add Player</button>
+            <hr class="jb-sep">
+            <div class="jb-sect-title">Blacklist</div>
+            <div class="jb-sub jb-mb">Never auto-join invites from these players (e.g. ones who invite then go offline for hours). Always applies, even if the whitelist is off.</div>
+            <div id="jb-bl-entries"></div>
+            <button class="jb-btn jb-btn-outline" id="jb-bl-add" style="width:100%;margin-top:6px">+ Add Player</button>
+            <hr class="jb-sep">
             <button class="jb-btn" id="jb-clear-cd" style="width:100%;margin-top:6px;background:var(--jb-warning)">Clear Cooldowns</button>
           </div>
         </div>
@@ -4127,8 +4747,11 @@
         <div class="jb-modal-content" style="width:320px">
           <div class="jb-modal-head"><span>🟢 Online Watch</span><button class="jb-hbtn" id="jb-ow-close">✕</button></div>
           <div class="jb-modal-body">
-            <div class="jb-sub jb-mb">Watch up to 10 players. Alerts when they come online.</div>
-            <label class="jb-switch jb-mb"><input type="checkbox" id="jb-ow-modal-on" ${ow.on?'checked':''}> Enabled</label>
+            <div class="jb-sub jb-mb">Watch up to 20 entries (the same person can appear twice for different day/night options). Alerts when they come online.</div>
+            <div class="jb-row jb-mb" style="gap:12px">
+              <label class="jb-switch" title="Enable Group 1 players"><input type="checkbox" id="jb-ow-modal-on" ${ow.on?'checked':''}> <b>Group 1</b></label>
+              <label class="jb-switch" title="Enable Group 2 players"><input type="checkbox" id="jb-ow-modal-on2" ${ow.on2?'checked':''}> <b>Group 2</b></label>
+            </div>
             <div class="jb-row jb-mb">
               <label class="jb-label">Scan (s):</label>
               <input class="jb-input jb-input-sm" type="number" id="jb-ow-sec" value="${ow.sec}" min="20" max="3600">
@@ -4140,11 +4763,22 @@
               <label class="jb-switch"><input type="checkbox" id="jb-ow-tg" ${ow.telegram?'checked':''}> Telegram</label>
               <label class="jb-switch"><input type="checkbox" id="jb-ow-offnotify" ${ow.notifyOff?'checked':''}> Offline alerts</label>
             </div>
+            <div class="jb-row jb-mb" style="align-items:center;gap:8px">
+              <span class="jb-sub" style="flex:1">Stay logged out after a 🚪 logout action:</span>
+              <input class="jb-input jb-input-sm" type="number" id="jb-ow-logout-mins" value="${ow.logoutMins}" min="1" max="1440" title="Minutes to stay logged out" style="width:64px">
+              <span class="jb-sub">min</span>
+            </div>
+            <label class="jb-switch jb-mb" title="After a 🚪 logout, leave TMN and sit on an off-site page so nothing can auto-log-in. Stays off until you go back manually."><input type="checkbox" id="jb-ow-park" ${ow.logoutPark?'checked':''}> 🅿️ Park off-site after logout (stops auto-login)</label>
+            <div class="jb-row jb-mb">
+              <label class="jb-label">Park page:</label>
+              <input class="jb-input" id="jb-ow-park-url" value="${esc(ow.parkUrl)}" placeholder="https://www.google.co.uk" style="flex:1">
+            </div>
             <div id="jb-ow-list"></div>
             <div class="jb-row" style="margin-top:6px">
               <input class="jb-input" id="jb-ow-name" maxlength="40" placeholder="Player name" style="flex:1">
               <button class="jb-btn" id="jb-ow-add">+ Add</button>
             </div>
+            <div class="jb-sub jb-mb" style="line-height:1.5">Tap icons per player: 🔔 notify · ✈️ Telegram · 🔊 sound · ⚡ flash · 🚪 log out · ⏸ stop &amp; wait. <b>G1/G2</b> = group (tap to switch); each group has its own on/off above.</div>
             <div class="jb-sub jb-mb" id="jb-ow-status">${ow.scanMsg}</div>
             <div class="jb-row">
               <button class="jb-btn jb-btn-outline" id="jb-ow-scan" style="flex:1">Scan Now</button>
@@ -4336,6 +4970,16 @@
     _shadow.querySelector('#jb-wl-on').checked = st.whitelist;
     _shadow.querySelector('#jb-wl-on').addEventListener('change', e => { st.whitelist = e.target.checked; saveSt(); });
 
+    { const pcb = _shadow.querySelector('#jb-prop-on');
+      if (pcb) { pcb.checked = propWatch.on;
+        pcb.addEventListener('change', e => { propWatch.on = e.target.checked; savePropWatch(); propWatchStart(); }); } }
+    try { renderPropUI(); } catch(_){}
+
+    { const hcb = _shadow.querySelector('#jb-hover-on');
+      if (hcb) { hcb.checked = hoverCfg.on;
+        // Toggling on takes effect immediately; toggling off needs a reload to detach.
+        hcb.addEventListener('change', e => { hoverCfg.on = e.target.checked; saveHoverCfg(); if (hoverCfg.on) { try { initPlayerHover(); } catch(_){} } }); } }
+
     _shadow.querySelector('#jb-create-oc').checked = st.createOC;
     _shadow.querySelector('#jb-create-oc').addEventListener('change', e => { st.createOC = e.target.checked; saveSt(); if(st.createOC && !getHot()) fetchHot(); });
 
@@ -4402,6 +5046,16 @@
     _shadow.querySelector('#jb-login-user').addEventListener('input', e => { LOGIN.user = e.target.value.trim(); GM_setValue('cbLoginUser', LOGIN.user); });
     _shadow.querySelector('#jb-login-pass').addEventListener('input', e => { LOGIN.pass = e.target.value.trim(); GM_setValue('cbLoginPass', LOGIN.pass); });
     _shadow.querySelector('#jb-auto-submit').addEventListener('change', e => { LOGIN.autoSubmit = e.target.checked; GM_setValue('cbAutoSubmit', LOGIN.autoSubmit); });
+    { const ck = _shadow.querySelector('#jb-capsolver-key'); if (ck) ck.addEventListener('input', e => setCapsolverKey(e.target.value)); }
+
+    { const a = _shadow.querySelector('#jb-ka-audio');
+      if (a) a.addEventListener('change', e => { ka.audio = e.target.checked; saveKa(); if (ka.audio) startKaAudio(); else stopKaAudio(); }); }
+    { const w = _shadow.querySelector('#jb-ka-wake');
+      if (w) w.addEventListener('change', e => { ka.wakeLock = e.target.checked; saveKa(); if (ka.wakeLock) requestWakeLock(); else releaseWakeLock(); }); }
+    { const k = _shadow.querySelector('#jb-ka-worker');
+      if (k) k.addEventListener('change', e => { ka.worker = e.target.checked; saveKa(); if (ka.worker) startKaWorker(); else stopKaWorker(); }); }
+    { const d = _shadow.querySelector('#jb-debug');
+      if (d) d.addEventListener('change', e => { _debug = e.target.checked; GM_setValue('cbDebug', _debug); }); }
 
     _shadow.querySelectorAll('.jb-crime-cb').forEach(cb => cb.addEventListener('change', () => {
       st.crimes = [..._shadow.querySelectorAll('.jb-crime-cb:checked')].map(c => parseInt(c.value)); saveSt();
@@ -4619,9 +5273,32 @@
       });
     }
     _shadow.querySelector('#jb-wl-add').addEventListener('click', () => { if(st.wlNames.length >= 10) return alert('Max 10'); st.wlNames.push(''); saveSt(); renderWl(); });
+
+    function renderBl() {
+      const el = _shadow.querySelector('#jb-bl-entries');
+      if (!el) return;
+      el.innerHTML = '';
+      if (!st.blNames || !st.blNames.length) { el.innerHTML = '<div class="jb-sub">No blacklisted players.</div>'; return; }
+      st.blNames.forEach((name, i) => {
+        const row = document.createElement('div');
+        row.className = 'jb-row';
+        const inp = document.createElement('input');
+        inp.className = 'jb-input'; inp.value = name; inp.placeholder = `Player ${i+1}`; inp.style.flex = '1';
+        inp.addEventListener('change', () => { st.blNames[i] = inp.value.trim(); saveSt(); });
+        const btn = document.createElement('button');
+        btn.className = 'jb-btn jb-btn-danger'; btn.textContent = '✕'; btn.style.padding = '2px 6px';
+        btn.addEventListener('click', () => { st.blNames.splice(i,1); saveSt(); renderBl(); });
+        row.appendChild(inp); row.appendChild(btn);
+        el.appendChild(row);
+      });
+    }
+    if (!Array.isArray(st.blNames)) st.blNames = [];
+    _shadow.querySelector('#jb-bl-add').addEventListener('click', () => { if(st.blNames.length >= 20) return alert('Max 20'); st.blNames.push(''); saveSt(); renderBl(); });
+    renderBl();
     _shadow.querySelector('#jb-clear-cd').addEventListener('click', () => {
       localStorage.removeItem(LS_LAST_DTM_ACC); localStorage.removeItem(LS_LAST_OC_ACC);
       localStorage.removeItem(LS_LAST_DTM_MAIL); localStorage.removeItem(LS_LAST_OC_MAIL);
+      localStorage.removeItem('cbHandledOc'); localStorage.removeItem('cbHandledDtm');
       localStorage.removeItem('cbPendDtmHandle'); localStorage.removeItem('cbPendOcHandle');
       localStorage.removeItem(LS_PEND_DTM); localStorage.removeItem(LS_PEND_OC);
       setStatus('Cooldowns cleared');
@@ -4634,6 +5311,8 @@
       ow.on = e.target.checked; saveOw(); owStart();
       const main = _shadow.querySelector('#jb-ow-on'); if(main) main.checked = ow.on;
     });
+    { const g2 = _shadow.querySelector('#jb-ow-modal-on2');
+      if (g2) g2.addEventListener('change', e => { ow.on2 = e.target.checked; saveOw(); owStart(); }); }
     _shadow.querySelector('#jb-ow-close').addEventListener('click', () => closeModal2('#jb-ow-modal'));
     _shadow.querySelector('#jb-ow-sec').addEventListener('change', e => { ow.sec = Math.max(OW_MIN_SEC,Math.min(3600,parseInt(e.target.value)||OW_DEF_SEC)); saveOw(); owStart(); });
     _shadow.querySelector('#jb-ow-notify').addEventListener('change', e => { ow.notify = e.target.checked; saveOw(); if(ow.notify) askNotifyPerm(); });
@@ -4641,6 +5320,9 @@
     _shadow.querySelector('#jb-ow-sound').addEventListener('change', e => { ow.sound = e.target.checked; saveOw(); });
     _shadow.querySelector('#jb-ow-tg').addEventListener('change', e => { ow.telegram = e.target.checked; saveOw(); });
     _shadow.querySelector('#jb-ow-offnotify').addEventListener('change', e => { ow.notifyOff = e.target.checked; saveOw(); });
+    { const lm = _shadow.querySelector('#jb-ow-logout-mins'); if (lm) lm.addEventListener('change', e => { ow.logoutMins = Math.max(1, Math.min(1440, parseInt(e.target.value,10)||60)); e.target.value = ow.logoutMins; saveOw(); }); }
+    { const pk = _shadow.querySelector('#jb-ow-park'); if (pk) pk.addEventListener('change', e => { ow.logoutPark = e.target.checked; saveOw(); }); }
+    { const pu = _shadow.querySelector('#jb-ow-park-url'); if (pu) pu.addEventListener('change', e => { const v = e.target.value.trim(); ow.parkUrl = v || 'https://www.google.co.uk'; e.target.value = ow.parkUrl; saveOw(); }); }
     _shadow.querySelector('#jb-ow-scan').addEventListener('click', () => owScan('manual'));
     _shadow.querySelector('#jb-ow-clear').addEventListener('click', () => { ow.lastOn={}; ow.lastAlert={}; ow.scanAt=0; ow.scanOk=false; ow.scanMsg='Cleared'; saveOw(); renderOwUI(); });
 
@@ -4656,19 +5338,36 @@
     renderOwUI = function() {
       const mainCb = _shadow.querySelector('#jb-ow-on'); if(mainCb) mainCb.checked = ow.on;
       const modalCb = _shadow.querySelector('#jb-ow-modal-on'); if(modalCb) modalCb.checked = ow.on;
+      const modalCb2 = _shadow.querySelector('#jb-ow-modal-on2'); if(modalCb2) modalCb2.checked = ow.on2;
       const listEl = _shadow.querySelector('#jb-ow-list');
       if (listEl) {
         if (!ow.list.length) { listEl.innerHTML = '<div class="jb-sub">No watched players.</div>'; }
         else {
-          listEl.innerHTML = ow.list.map(name => {
-            const k = normName(name), on = !!ow.lastOn[k];
-            return `<div class="jb-row" style="font-size:11px;padding:3px;background:var(--jb-surface-alt);border-radius:2px;margin-bottom:3px">
-              <span style="color:${on?'var(--jb-success)':'var(--jb-text-ter)'}">●</span>
-              <span style="flex:1">${esc(name)} <span class="jb-sub">(${on?'Online':'Offline'})</span></span>
-              <button class="jb-btn jb-btn-danger jb-ow-rm" data-name="${esc(name)}" style="padding:1px 5px;font-size:10px">✕</button>
+          listEl.innerHTML = ow.list.map(entry => {
+            const id = owId(entry), name = owName(entry), on = !!ow.lastOn[id];
+            const grp = getOwGroup(id);
+            const acts = getOwActions(id);
+            const chips = OW_ACTIONS.map(a => {
+              const active = acts.includes(a.key);
+              return `<button class="jb-ow-act" data-id="${id}" data-act="${a.key}" title="${a.label}${active?' (on)':''}"
+                style="padding:1px 4px;font-size:11px;border-radius:3px;cursor:pointer;border:1px solid var(--jb-border);
+                background:${active?'var(--jb-accent)':'transparent'};opacity:${active?'1':'0.45'}">${a.icon}</button>`;
+            }).join('');
+            return `<div style="padding:4px;background:var(--jb-surface-alt);border-radius:3px;margin-bottom:4px">
+              <div class="jb-row" style="font-size:11px;align-items:center">
+                <span style="color:${on?'var(--jb-success)':'var(--jb-text-ter)'}">●</span>
+                <button class="jb-btn jb-ow-grp" data-id="${id}" title="Group ${grp} — click to switch" style="padding:1px 6px;font-size:10px;background:var(--jb-accent)">G${grp}</button>
+                <span style="flex:1">${esc(name)} <span class="jb-sub">(${on?'Online':'Offline'})</span></span>
+                <button class="jb-btn jb-ow-test" data-id="${id}" title="Test: fire this entry's ticked actions now" style="padding:1px 5px;font-size:10px">▶ Test</button>
+                <button class="jb-btn jb-btn-danger jb-ow-rm" data-id="${id}" style="padding:1px 5px;font-size:10px">✕</button>
+              </div>
+              <div class="jb-row" style="gap:3px;margin-top:3px;flex-wrap:wrap">${chips}</div>
             </div>`;
           }).join('');
-          listEl.querySelectorAll('.jb-ow-rm').forEach(btn => btn.addEventListener('click', () => owRemove(btn.getAttribute('data-name'))));
+          listEl.querySelectorAll('.jb-ow-rm').forEach(btn => btn.addEventListener('click', () => owRemove(btn.getAttribute('data-id'))));
+          listEl.querySelectorAll('.jb-ow-test').forEach(btn => btn.addEventListener('click', () => owTestPlayer(btn.getAttribute('data-id'))));
+          listEl.querySelectorAll('.jb-ow-act').forEach(btn => btn.addEventListener('click', () => toggleOwAction(btn.getAttribute('data-id'), btn.getAttribute('data-act'))));
+          listEl.querySelectorAll('.jb-ow-grp').forEach(btn => btn.addEventListener('click', () => { const eid = btn.getAttribute('data-id'); setOwGroup(eid, getOwGroup(eid) === 1 ? 2 : 1); }));
         }
       }
       const statusEl = _shadow.querySelector('#jb-ow-status');
@@ -4737,24 +5436,52 @@
     // Initialize jail counter display
     updateJailCountUI();
 
-    // Drag
+    // Drag — grab from anywhere on the panel except interactive controls
     let locked = GM_getValue('cbLocked', true);
     let posX = GM_getValue('cbPosX', null), posY = GM_getValue('cbPosY', null);
     if (posX !== null && posY !== null) { host.style.right = 'auto'; host.style.left = posX+'px'; host.style.top = posY+'px'; }
     const lockBtn = _shadow.querySelector('#jb-lock-btn');
-    const dragH = _shadow.querySelector('#jb-drag');
-    function updLock() { lockBtn.textContent = locked ? '🔒' : '🔓'; dragH.style.cursor = locked ? 'default' : 'grab'; }
+    // Elements that must keep their own click/drag behaviour (never start a move).
+    const DRAG_IGNORE = 'button, a, input, select, textarea, label, .jb-switch, .jb-hbtn, .jb-ow-act, .jb-modal, .jb-modal-bg, [contenteditable], [role="button"]';
+    function updLock() { lockBtn.textContent = locked ? '🔒' : '🔓'; root.style.cursor = locked ? 'default' : 'move'; }
     updLock();
     lockBtn.addEventListener('click', e => { e.stopPropagation(); locked = !locked; GM_setValue('cbLocked', locked); updLock(); });
     let dragging = false, dx, dy, hx, hy;
-    dragH.addEventListener('mousedown', e => {
-      if (locked || e.target.closest('.jb-hbtn')) return;
-      dragging = true; dragH.style.cursor = 'grabbing';
+    root.addEventListener('mousedown', e => {
+      if (locked || e.button !== 0) return;
+      if (e.target.closest(DRAG_IGNORE)) return;   // clicked a control — let it work
+      dragging = true; root.style.cursor = 'grabbing';
       const rect = host.getBoundingClientRect(); hx = rect.left; hy = rect.top; dx = e.clientX; dy = e.clientY;
       e.preventDefault();
     });
     document.addEventListener('mousemove', e => { if (!dragging) return; host.style.right='auto'; host.style.left=(hx+e.clientX-dx)+'px'; host.style.top=(hy+e.clientY-dy)+'px'; });
-    document.addEventListener('mouseup', () => { if (!dragging) return; dragging = false; dragH.style.cursor = locked?'default':'grab'; const r = host.getBoundingClientRect(); GM_setValue('cbPosX',r.left); GM_setValue('cbPosY',r.top); });
+    document.addEventListener('mouseup', () => { if (!dragging) return; dragging = false; root.style.cursor = locked?'default':'move'; const r = host.getBoundingClientRect(); GM_setValue('cbPosX',r.left); GM_setValue('cbPosY',r.top); });
+
+    // Make each modal window draggable by its title bar. Modals are centred via
+    // a CSS transform, so on first grab we switch to explicit left/top coords.
+    function makeModalDraggable(modal, handle) {
+      handle.style.cursor = 'move';
+      let md = false, sx, sy, sl, stp;
+      handle.addEventListener('mousedown', e => {
+        if (e.button !== 0 || e.target.closest('button, input, select, textarea, a')) return;
+        const rect = modal.getBoundingClientRect();
+        modal.style.transform = 'none';
+        modal.style.left = rect.left + 'px';
+        modal.style.top  = rect.top + 'px';
+        md = true; sx = e.clientX; sy = e.clientY; sl = rect.left; stp = rect.top;
+        e.preventDefault();
+      });
+      document.addEventListener('mousemove', e => {
+        if (!md) return;
+        modal.style.left = (sl + e.clientX - sx) + 'px';
+        modal.style.top  = (stp + e.clientY - sy) + 'px';
+      });
+      document.addEventListener('mouseup', () => { md = false; });
+    }
+    _shadow.querySelectorAll('.jb-modal').forEach(m => {
+      const head = m.querySelector('.jb-modal-head');
+      if (head) makeModalDraggable(m, head);
+    });
   }
 
 
@@ -4827,10 +5554,16 @@
 
       // Wait briefly, then click travel button — jet if DTM is close to ready, otherwise normal
       setTimeout(() => {
-        // Decide jet vs normal: if DTM cooldown < 40 min, use jet (20 min cooldown vs 45 min)
+        // Decide jet vs normal: if EITHER an OC or a DTM is < 40 min from ready,
+        // use the jet (20 min cooldown) so we arrive in time; otherwise the
+        // normal plane (45 min cooldown).
         const dtm = getDtm();
+        const oc  = getOc();
         const dtmMinsLeft = dtm && !dtm.ready ? Math.ceil((dtm.total||0)/60) : 999;
-        const useJet = dtmMinsLeft < 40;
+        const ocMinsLeft  = oc  && !oc.ready  ? Math.ceil((oc.total||0)/60)  : 999;
+        const soonestMins = Math.min(dtmMinsLeft, ocMinsLeft);
+        const soonKind    = ocMinsLeft <= dtmMinsLeft ? 'OC' : 'DTM';
+        const useJet = soonestMins < 40;
 
         const btnId = useJet ? 'ctl00_main_btnTravelPrivate' : 'ctl00_main_btnTravelNormal';
         const travelBtn = document.getElementById(btnId) ||
@@ -4839,7 +5572,7 @@
                            : [...document.querySelectorAll('input[type="submit"]')].find(b => /^travel\s*\(normal\)/i.test(b.value||'')));
 
         if (travelBtn && !travelBtn.disabled) {
-          console.log(`[JB][TRAVEL] DTM in ${dtmMinsLeft}m — using ${useJet?'JET (20m cd)':'NORMAL (45m cd)'}`);
+          console.log(`[JB][TRAVEL] ${soonKind} in ${soonestMins}m — using ${useJet?'JET (20m cd)':'NORMAL (45m cd)'}`);
           st.acting = true; st.action = 'travel';
           GM_setValue('cbActStart', Date.now());
           travelBtn.click();
@@ -4853,7 +5586,7 @@
             storeTravel({ cd: cooldown, canNormal: false, at: Date.now() });
             saveSt();
             const mode = useJet ? '🛩️ Jet' : '✈️ Plane';
-            tgMsg('travel', `${mode} <b>Traveled</b>\n${st.player||'?'} → ${hotCity}${useJet?` | DTM in ${dtmMinsLeft}m`:''}`);
+            tgMsg('travel', `${mode} <b>Traveled</b>\n${st.player||'?'} → ${hotCity}${useJet?` | ${soonKind} in ${soonestMins}m`:''}`);
             setStatus(`${mode} → ${hotCity}`);
             // Navigate away after travel completes
             setTimeout(() => {
@@ -5217,9 +5950,176 @@
     console.log(`${APP_TAG}[XP] API interceptor installed`);
   }
 
+  /* === ANTI-THROTTLE KEEP-ALIVE ===
+   * Browsers clamp background timers hard: after ~5 minutes hidden, Chrome
+   * throttles setTimeout/setInterval to roughly once per minute. That starves
+   * the main loop and (previously) tricked the watchdog into spurious reloads.
+   * Four defences here:
+   *   1. Single cancellable loop timer with a wall-clock deadline, so a
+   *      throttled or suspended gap self-corrects instead of compounding.
+   *   2. A silent WebAudio tone — marks the tab "audible", which exempts it
+   *      from intensive throttling entirely. This is the big one.
+   *   3. Screen Wake Lock — stops the display sleeping while visible.
+   *   4. A Web Worker ticker — worker timers survive throttling far better,
+   *      and it stamps the master-tab heartbeat so mastership isn't lost.
+   * NOTE: none of this can survive the OS sleeping/hibernating the machine.
+   */
+
+  const ka = {
+    audio:    GM_getValue('cbKaAudio', true),
+    wakeLock: GM_getValue('cbKaWake', true),
+    worker:   GM_getValue('cbKaWorker', true)
+  };
+
+  function saveKa() {
+    GM_setValue('cbKaAudio', ka.audio);
+    GM_setValue('cbKaWake', ka.wakeLock);
+    GM_setValue('cbKaWorker', ka.worker);
+  }
+
+  /* --- loop scheduling (single timer + wall-clock deadline) --- */
+
+  let _loopTimer = null, _loopDueAt = 0, _loopRunning = false;
+
+  function schedLoop(ms) {
+    if (_loopTimer) { clearTimeout(_loopTimer); _loopTimer = null; }
+    const delay = Math.max(0, Number(ms) || 0);
+    _loopDueAt = Date.now() + delay;
+    _loopTimer = setTimeout(runLoop, delay);
+  }
+
+  function runLoop() {
+    if (_loopTimer) { clearTimeout(_loopTimer); _loopTimer = null; }
+    _loopDueAt = 0;
+    if (_loopRunning) return;              // never overlap loop bodies
+    _loopRunning = true;
+    Promise.resolve()
+      .then(() => mainLoop())
+      .catch(e => { console.error('[JB][LOOP] error:', e); schedLoop(3000); })
+      .finally(() => { _loopRunning = false; });
+  }
+
+  // Run the loop immediately if its wall-clock deadline has already passed
+  // (i.e. the timer was throttled or the machine was suspended), or if no tick
+  // is scheduled at all. Cheap and safe to call often.
+  function kickLoop(reason) {
+    if (_loopRunning) return;
+    if (!_loopDueAt || Date.now() >= _loopDueAt) {
+      if (reason) console.log('[JB][KEEPALIVE] catch-up tick:', reason);
+      runLoop();
+    }
+  }
+
+  /* --- silent audio (defeats intensive throttling) --- */
+
+  let _kaCtx = null, _kaOsc = null;
+
+  function startKaAudio() {
+    if (!ka.audio || _kaCtx) return;
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return;
+      const ctx = new AC();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      gain.gain.value = 0.0001;   // inaudible, but non-zero so the tab counts as playing
+      osc.frequency.value = 20;   // sub-audible
+      osc.connect(gain); gain.connect(ctx.destination);
+      osc.start();
+      _kaCtx = ctx; _kaOsc = osc;
+      // Autoplay policy may suspend until a gesture — resume on first interaction.
+      if (ctx.state === 'suspended') {
+        const resume = () => { ctx.resume().catch(()=>{}); };
+        document.addEventListener('click', resume, { once:true });
+        document.addEventListener('keydown', resume, { once:true });
+      }
+      console.log('[JB][KEEPALIVE] Silent audio started');
+    } catch (e) { console.warn('[JB][KEEPALIVE] Audio failed:', e.message); _kaCtx = null; }
+  }
+
+  function stopKaAudio() {
+    try { if (_kaOsc) _kaOsc.stop(); } catch(_) {}
+    try { if (_kaCtx) _kaCtx.close(); } catch(_) {}
+    _kaOsc = null; _kaCtx = null;
+  }
+
+  /* --- screen wake lock --- */
+
+  let _wakeLock = null;
+
+  async function requestWakeLock() {
+    if (!ka.wakeLock || _wakeLock) return;
+    try {
+      if (!('wakeLock' in navigator)) return;
+      _wakeLock = await navigator.wakeLock.request('screen');
+      _wakeLock.addEventListener('release', () => { _wakeLock = null; });
+      console.log('[JB][KEEPALIVE] Wake lock acquired');
+    } catch (e) { _wakeLock = null; }
+  }
+
+  function releaseWakeLock() {
+    try { if (_wakeLock) _wakeLock.release(); } catch(_) {}
+    _wakeLock = null;
+  }
+
+  /* --- worker ticker --- */
+
+  let _kaWorker = null;
+
+  function startKaWorker() {
+    if (!ka.worker || _kaWorker) return;
+    try {
+      const src = 'let n=0; setInterval(function(){ n++; postMessage(n); }, 1000);';
+      const blob = new Blob([src], { type:'application/javascript' });
+      const url = URL.createObjectURL(blob);
+      _kaWorker = new Worker(url);
+      URL.revokeObjectURL(url);
+      _kaWorker.onmessage = () => {
+        try { tabs.beat(); } catch(_) {}
+        kickLoop(null);
+      };
+      console.log('[JB][KEEPALIVE] Worker ticker started');
+    } catch (e) {
+      // Blocked by CSP on some setups — the audio trick alone still helps.
+      console.warn('[JB][KEEPALIVE] Worker failed:', e.message);
+      _kaWorker = null;
+    }
+  }
+
+  function stopKaWorker() {
+    try { if (_kaWorker) _kaWorker.terminate(); } catch(_) {}
+    _kaWorker = null;
+  }
+
+  /* --- visibility handling --- */
+
+  function initKeepAliveExtras() {
+    startKaAudio();
+    startKaWorker();
+    requestWakeLock();
+
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) return;
+      // Back in view: re-acquire what the browser took away, then catch up.
+      requestWakeLock();
+      if (_kaCtx && _kaCtx.state === 'suspended') _kaCtx.resume().catch(()=>{});
+      try { tabs.beat(); } catch(_) {}
+      kickLoop('tab visible');
+    });
+
+    // Some browsers fire these instead of / as well as visibilitychange.
+    window.addEventListener('focus', () => kickLoop(null));
+    window.addEventListener('online', () => kickLoop('network back'));
+  }
+
   /* === WATCHDOG — self-healing main loop === */
 
   const WATCHDOG_TIMEOUT = 60000; // restart only if loop hasn't ticked in 60s (well beyond any normal interval)
+
+  // When the tab is hidden the browser legitimately clamps timers to ~1/min, so
+  // a 60s threshold would fire constantly and reload the page in a loop. Give
+  // hidden tabs a far longer leash — the worker ticker keeps things moving.
+  function watchdogTimeout() { return document.hidden ? 6 * 60 * 1000 : WATCHDOG_TIMEOUT; }
   let _lastLoopTick = Date.now();
   let _watchdogIv = null;
   let _watchdogRestarts = 0;
@@ -5237,13 +6137,20 @@
       if (paused || inLock || inBreak) { _watchdogRestarts = 0; return; }
 
       // Only restart if genuinely stalled well beyond any normal loop interval
-      if (elapsed > WATCHDOG_TIMEOUT) {
+      if (elapsed > watchdogTimeout()) {
         _watchdogRestarts++;
         console.warn(`[JB][WATCHDOG] Loop stalled ${Math.round(elapsed/1000)}s — restart #${_watchdogRestarts}`);
         if (_watchdogRestarts <= 3) {
           st.acting = false; st.action = ''; GM_setValue('cbActStart', 0); saveSt();
           _lastLoopTick = Date.now(); // mark so we don't immediately re-fire
-          setTimeout(mainLoop, 500);
+          schedLoop(500);
+        } else if (document.hidden) {
+          // Never reload a hidden tab — a throttled tab isn't a broken one, and
+          // reloading in the background is how overnight runs got lost.
+          console.warn('[JB][WATCHDOG] Hidden tab — kicking loop instead of reloading');
+          _watchdogRestarts = 0;
+          _lastLoopTick = Date.now();
+          schedLoop(1000);
         } else {
           console.error('[JB][WATCHDOG] Too many restarts, reloading');
           tgMsg('watchdog', `⚠️ <b>Watchdog</b>\n${st.player||'?'} | reloading`);
@@ -5631,10 +6538,10 @@
     if (!tabs.isMaster) {
       if (wasMaster) console.log(APP_TAG, 'Lost master');
       setStatus('⏸ Secondary tab');
-      setTimeout(mainLoop, 3000); return;
+      schedLoop(3000); return;
     }
 
-    if (paused) { setTimeout(mainLoop, 1800+Math.floor(Math.random()*1400)); return; }
+    if (paused) { schedLoop(1800+Math.floor(Math.random()*1400)); return; }
 
     // HEALTH MONITORING — runs at all times, bypasses every break.
     // Always check low-HP alerting, and if HP is critically low let health auto-buy
@@ -5651,32 +6558,32 @@
         console.log(`[JB][HEALTH] HP ${_hp}% < ${cfg.minHealth}% during break — buying health (bypassing break)`);
         setStatus(`💊 Emergency health (${_hp}%) — break paused`);
         checkHealth();
-        setTimeout(mainLoop, 2500); return;
+        schedLoop(2500); return;
       }
     }
 
     // Break system checks — highest priority (health already handled above)
     if (handleSleep()) {
       setStatus(getBreakStatus().msg);
-      setTimeout(mainLoop, 30000); return;
+      schedLoop(30000); return;
     }
     coffeeJustEnded(); lunchJustEnded(); // clear ended breaks
     if (isCoffeeTime()) {
       const bs = getBreakStatus();
       setStatus(bs.msg);
-      setTimeout(mainLoop, 10000); return;
+      schedLoop(10000); return;
     }
     if (isLunchTime()) {
       const bs = getBreakStatus();
       setStatus(bs.msg);
-      setTimeout(mainLoop, 10000); return;
+      schedLoop(10000); return;
     }
 
     checkCaptcha(); checkNewMsgs(); checkLogout();
 
     if (checkSqlCheck()) {
       paused = true; setStatus('⚠️ STAFF CHECK — paused');
-      setTimeout(mainLoop, 10000); return;
+      schedLoop(10000); return;
     }
 
     checkStuck();
@@ -5684,17 +6591,17 @@
     if (isOnCaptcha()) {
       if (resume.on) { setStatus('Script Check — monitoring...'); localStorage.setItem('cbScriptCheck','1'); startScMonitor(); }
       else setStatus('Script Check — paused');
-      setTimeout(mainLoop, 1800+Math.floor(Math.random()*1400)); return;
+      schedLoop(1800+Math.floor(Math.random()*1400)); return;
     } else {
       if (localStorage.getItem('cbScriptCheck') === '1') { localStorage.removeItem('cbScriptCheck'); _scActive = false; }
     }
 
-    if (!st.player) { getPlayerName(); setTimeout(mainLoop, 3000); return; }
+    if (!st.player) { getPlayerName(); schedLoop(3000); return; }
 
     checkJailAny();
 
-    if (handleOcPage()) { setTimeout(mainLoop, 3000); return; }
-    if (handleDtmPage()) { setTimeout(mainLoop, 3000); return; }
+    if (handleOcPage()) { schedLoop(3000); return; }
+    if (handleDtmPage()) { schedLoop(3000); return; }
 
     // OC creation flow
     if (st.createOC && !st.inJail) {
@@ -5707,10 +6614,10 @@
       }
       if (ocSt !== 'idle') {
         const onOc = /\/authenticated\/organizedcrime\.aspx/i.test(location.pathname) && !/p=dtm/i.test(location.search);
-        if (onOc) { try { if (await handleCreateOC()) { setTimeout(mainLoop, 3000); return; } } catch(_){} }
+        if (onOc) { try { if (await handleCreateOC()) { schedLoop(3000); return; } } catch(_){} }
         else {
           const next = parseInt(localStorage.getItem(LS_OC_NEXT)||'0',10);
-          if (next > 0 && Date.now() >= next && !st.acting) { window.location.href = OC_PATH+'?'+Date.now(); setTimeout(mainLoop, 5000); return; }
+          if (next > 0 && Date.now() >= next && !st.acting) { window.location.href = OC_PATH+'?'+Date.now(); schedLoop(5000); return; }
         }
       }
     }
@@ -5726,10 +6633,10 @@
       }
       if (dtmSt !== 'idle') {
         const onDtm = /\/authenticated\/organizedcrime\.aspx/i.test(location.pathname) && /p=dtm/i.test(location.search);
-        if (onDtm) { try { if (await handleCreateDTM()) { setTimeout(mainLoop, 3000); return; } } catch(_){} }
+        if (onDtm) { try { if (await handleCreateDTM()) { schedLoop(3000); return; } } catch(_){} }
         else {
           const next = parseInt(localStorage.getItem(LS_CREATE_DTM_NEXT)||'0',10);
-          if (next > 0 && Date.now() >= next && !st.acting) { window.location.href = DTM_PAGE+'&_='+Date.now(); setTimeout(mainLoop, 5000); return; }
+          if (next > 0 && Date.now() >= next && !st.acting) { window.location.href = DTM_PAGE+'&_='+Date.now(); schedLoop(5000); return; }
         }
       }
     }
@@ -5741,13 +6648,13 @@
       // Auto-travel: if we need to be in hot city (for DTM list or OC creation)
       if (st.autoTravel) {
         const handled = await doAutoTravel();
-        if (handled) { setTimeout(mainLoop, 3000); return; }
+        if (handled) { schedLoop(3000); return; }
       }
 
       // Auto-add to DTM list: in hot city + DTM ready
       if (st.autoDtmList) {
         const handled = await doAutoAddDtmList();
-        if (handled) { setTimeout(mainLoop, 3000); return; }
+        if (handled) { schedLoop(3000); return; }
       }
     }
 
@@ -5783,7 +6690,7 @@
       if (onMail || (Date.now() - lastMail > MAIL_INT_MS)) {
         localStorage.setItem('cbLastMailTs', String(Date.now()));
         try { await checkMail(); } catch(_){}
-        if (localStorage.getItem(LS_PEND_DTM) || localStorage.getItem(LS_PEND_OC)) { setTimeout(mainLoop, 500); return; }
+        if (localStorage.getItem(LS_PEND_DTM) || localStorage.getItem(LS_PEND_OC)) { schedLoop(500); return; }
       }
     }
 
@@ -5791,7 +6698,7 @@
 
     if (st.health && !st.acting) {
       checkHealth();
-      if (st.buyHealth) { setTimeout(mainLoop, 1800+Math.floor(Math.random()*1400)); return; }
+      if (st.buyHealth) { schedLoop(1800+Math.floor(Math.random()*1400)); return; }
     }
 
     if (!st.acting) {
@@ -5800,7 +6707,7 @@
 
       if (!st.crime && !st.gta && !st.booze && !st.jail && !st.garage && !st.health && !st.autoOC && !st.autoDTM) {
         if (now % 30000 < 2000) setStatus('Idle');
-        setTimeout(mainLoop, 5000); return;
+        schedLoop(5000); return;
       }
 
       if (st.inJail) {
@@ -5813,9 +6720,9 @@
         }
       } else {
         if (st.pending) {
-          if (st.pending === 'crime' && st.crime) { if(pg==='crimes') doCrime(); else safeNav('/authenticated/crimes.aspx?'+Date.now()); setTimeout(mainLoop, 1800+Math.floor(Math.random()*1400)); return; }
-          if (st.pending === 'gta' && st.gta) { if(pg==='gta') doGta(); else safeNav('/authenticated/crimes.aspx?p=g&'+Date.now()); setTimeout(mainLoop, 1800+Math.floor(Math.random()*1400)); return; }
-          if (st.pending === 'booze' && st.booze) { if(pg==='booze') doBooze(); else safeNav('/authenticated/crimes.aspx?p=b&'+Date.now()); setTimeout(mainLoop, 1800+Math.floor(Math.random()*1400)); return; }
+          if (st.pending === 'crime' && st.crime) { if(pg==='crimes') doCrime(); else safeNav('/authenticated/crimes.aspx?'+Date.now()); schedLoop(1800+Math.floor(Math.random()*1400)); return; }
+          if (st.pending === 'gta' && st.gta) { if(pg==='gta') doGta(); else safeNav('/authenticated/crimes.aspx?p=g&'+Date.now()); schedLoop(1800+Math.floor(Math.random()*1400)); return; }
+          if (st.pending === 'booze' && st.booze) { if(pg==='booze') doBooze(); else safeNav('/authenticated/crimes.aspx?p=b&'+Date.now()); schedLoop(1800+Math.floor(Math.random()*1400)); return; }
           st.pending = ''; saveSt();
         }
 
@@ -5848,7 +6755,7 @@
       }
     }
 
-    setTimeout(mainLoop, 1800+Math.floor(Math.random()*1400));
+    schedLoop(1800+Math.floor(Math.random()*1400));
   }
 
   /* === INIT === */
@@ -5862,11 +6769,15 @@
     startTgPump();
     startCriticalPump();
     startTimers();
+    try { migrateOwList(); } catch(_) {}
     owStart();
     startWatchdog();
     startKeepAlive();
+    initKeepAliveExtras();
     initServerTime();
     try { initHot(); } catch(_){}
+    try { propWatchStart(); } catch(_){}
+    try { initPlayerHover(); } catch(_){}
 
     if (tabs.isMaster) setStatus(`${APP_NAME} ${APP_VERSION} — Master tab`);
     else setStatus('⏸ Secondary tab');
@@ -5874,7 +6785,9 @@
     checkJailAny();
 
     window.addEventListener('beforeunload', () => {
-      tabs.release(); owStop();
+      tabs.release(); owStop(); propWatchStop();
+      stopKaWorker(); stopKaAudio(); releaseWakeLock();
+      if (_loopTimer) { clearTimeout(_loopTimer); _loopTimer = null; }
       if (owFlashTimer) { clearInterval(owFlashTimer); owFlashTimer = null; }
     });
 
@@ -5882,7 +6795,7 @@
       if (e.key === LS_MASTER) tabs.check();
     });
 
-    setTimeout(() => { st.lastJailCk = 0; mainLoop(); }, 1500);
+    setTimeout(() => { st.lastJailCk = 0; runLoop(); }, 1500);
   }
 
   init();
