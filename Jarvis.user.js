@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Jarvis Bot 2000.210
+// @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.210
-// @description  Jarvis Bot 2000.210 — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
+// @version      2000.226
+// @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
 // @match        *://www.tmn2010.net/authenticated/*
@@ -31,7 +31,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.210
+/*  Jarvis Bot 2000.226
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -118,7 +118,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.210';
+  const APP_VERSION = '2000.226';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -177,14 +177,30 @@
 
   /* === PAGE EXCLUSIONS === */
 
+  /* TEMPORARY (2000.226) — all exclusions except the forum are lifted so the XP
+   * interceptor actually runs on statistics.aspx?p=p, the one page confirmed to
+   * return real JSON from hndlr.ashx (its own poll uses t=80). Previously that
+   * page was skipped before installXpInterceptor() ever ran, so Jarvis could
+   * never see the data even when it was being served.
+   *
+   * Restore list when the test is done:
+   *   '/authenticated/personal.aspx', '/authenticated/store.aspx?p=b',
+   *   '/authenticated/statistics.aspx?p=C', '/authenticated/statistics.aspx?p=G',
+   *   '/authenticated/statistics.aspx?p=p', '/authenticated/statistics.aspx?p=n'
+   */
   const SKIP_PAGES = [
-    '/authenticated/forum.aspx', '/authenticated/personal.aspx',
-    '/authenticated/store.aspx?p=b', '/authenticated/statistics.aspx?p=C',
-    '/authenticated/statistics.aspx?p=G', '/authenticated/statistics.aspx?p=p',
-    '/authenticated/statistics.aspx?p=n'
+    '/authenticated/forum.aspx'
   ];
-  const _curPath = (window.location.pathname + window.location.search).toLowerCase();
-  if (SKIP_PAGES.some(p => _curPath.includes(p.toLowerCase()))) {
+  // Query-string values are matched case-sensitively (path is not) — e.g.
+  // "?p=C" must not accidentally exclude "?p=c".
+  const _curPathLower = window.location.pathname.toLowerCase();
+  const _curSearch = window.location.search;
+  const _curPath = _curPathLower + _curSearch;
+  if (SKIP_PAGES.some(p => {
+    const qIdx = p.indexOf('?');
+    if (qIdx === -1) return _curPathLower.includes(p.toLowerCase());
+    return _curPathLower.includes(p.slice(0, qIdx).toLowerCase()) && _curSearch.includes(p.slice(qIdx));
+  })) {
     console.log(APP_TAG, 'Excluded page, skipping:', _curPath);
     return;
   }
@@ -951,7 +967,8 @@
     { key:'crusher',     label:'Crusher events',        def:true  },
     { key:'propDrop',    label:'Property dropped',      def:true  },
     { key:'watchdog',    label:'Watchdog',              def:true  },
-    { key:'rankup',      label:'Rank up',               def:true  }
+    { key:'rankup',      label:'Rank up',               def:true  },
+    { key:'xpReport',    label:'Hourly XP report',      def:true  }
   ];
 
   const tgMsgOn = {};
@@ -2439,6 +2456,25 @@
     return { txt, clr:'#107c10' };
   }
 
+  /* === NOTE: forced stat refresh lives in the XP section (maybeForceStatRefresh) ===
+   * The comment that used to sit here argued a forced refresh was pointless,
+   * because the icon's anchor is just onclick="pstats(N)" — the same call the
+   * page's own inline setInterval already makes every 15 seconds. That reasoning
+   * was wrong, and it cost us the 222-225 arc.
+   *
+   * The call is identical; the TIMING is not. Under bot navigation a page often
+   * doesn't survive 15 seconds, so the page's own interval never fires even once
+   * and the interceptor sees nothing at all. Clicking the icon fires the poll on
+   * OUR schedule. That is why the total sat frozen at 3944.20 for three hours
+   * while the endpoint was demonstrably still serving real JSON.
+   *
+   * What WAS genuinely broken in 219 was the fallback selector: it targeted
+   * span[id*="imgMessages"], a plain <a href="mailbox.aspx"> with no handler, so
+   * clicking it navigated Jarvis to the mailbox. The re-added version clicks
+   * #ctl00_imgRefresh only, and refuses any anchor whose href looks like a real
+   * navigation.
+   */
+
   /* === OC/DTM READY ALERTS === */
 
   function checkReadyAlerts() {
@@ -2567,6 +2603,7 @@
 
     try { checkReadyAlerts(); } catch(_){}
     try { checkProtWarn(); } catch(_){}
+    try { syncXpFromBar(); } catch(_){}
     try { updateXpUI(); } catch(_){}
     try { checkXpCapResets(); } catch(_){}
     try { pumpCriticalAlerts(); } catch(_){}
@@ -3044,6 +3081,7 @@
       tgMsg('dtmBuy', `🚚 <b>DTM Done</b>\n${st.player||'?'} | 2h cooldown`);
       // Persistent lock survives the postback reload; checkStuck respects it
       localStorage.setItem('cbActionLockUntil', String(Date.now() + 8000));
+      snapshotXP('dtm');
       setTimeout(() => { compBtn.click(); }, 1500);
       return true;
     }
@@ -3732,8 +3770,10 @@
       const ladder = perRankReq.map((req, i) => {
         const isCur = i === r.idx;
         const cum = cumRankReq[i];
+        // RANKS[i+1] is the rank this step unlocks (RANKS[0] is the Scum floor at 0 XP).
+        const nm = (RANKS[i+1] && RANKS[i+1][0]) || `Step ${i+1}`;
         return `<div style="display:flex;justify-content:space-between;font-size:9px;padding:1px 4px;border-radius:2px;${isCur?'background:var(--jb-accent);color:#fff;font-weight:600':'color:var(--jb-text-ter)'}">
-          <span>Step ${i+1}${isCur?' ◄':''}</span>
+          <span>${esc(nm)}${isCur?' ◄':''}</span>
           <span>${req} XP <span style="opacity:.6">(Σ ${cum})</span></span>
         </div>`;
       }).join('');
@@ -4045,7 +4085,7 @@
     });
     if (sellCt > 0) {
       const sellBtn = document.getElementById('ctl00_main_btnSellSelected');
-      if (sellBtn) { sellBtn.click(); setTimeout(() => { st.acting=false; st.action=''; st.lastGarage=Date.now(); st.refresh=true; GM_setValue('cbActStart',0); saveSt(); window.location.href='/authenticated/crimes.aspx?'+Date.now(); }, rndDelay(DLY.normal)); return; }
+      if (sellBtn) { snapshotXP('garage'); sellBtn.click(); setTimeout(() => { st.acting=false; st.action=''; st.lastGarage=Date.now(); st.refresh=true; GM_setValue('cbActStart',0); saveSt(); window.location.href='/authenticated/crimes.aspx?'+Date.now(); }, rndDelay(DLY.normal)); return; }
     }
 
     // Repair VIP
@@ -4651,6 +4691,7 @@
             <div class="jb-sect-title">Advanced</div>
             <label class="jb-switch jb-mb"><input type="checkbox" id="jb-resume" ${resume.on?'checked':''}> Auto-Resume</label>
             <label class="jb-switch jb-mb"><input type="checkbox" id="jb-stats-on" ${stats.on?'checked':''}> Stats Collection</label>
+            <label class="jb-switch jb-mb" title="Derive XP from the status-bar rank %, which is server-rendered on every page load. Corrects the total when hndlr.ashx stops delivering. Verified accurate to 0.07 XP against a live payload."><input type="checkbox" id="jb-xpbar-on" ${GM_getValue('cbXpBarOn',true)!==false?'checked':''}> 📊 Status-bar XP fallback</label>
             <label class="jb-switch jb-mb"><input type="checkbox" id="jb-noxp-on" ${cfg.noXpLimiterOn?'checked':''}> 📉 No-XP daily limiter</label>
             <div class="jb-row jb-mb">
               <label class="jb-label">No-XP streak limit:</label>
@@ -4889,7 +4930,8 @@
             <div class="jb-sect-title">Recent gains</div>
             <div id="jb-xp-hist" style="background:var(--jb-surface-alt);border-radius:4px;padding:6px;max-height:140px;overflow-y:auto;font-size:10px"></div>
 
-            <button class="jb-btn jb-btn-danger" id="jb-xp-reset" style="width:100%;margin-top:8px">Reset XP Session</button>
+            <button class="jb-btn" id="jb-xp-report-now" style="width:100%;margin-top:8px">📤 Send XP Report Now</button>
+            <button class="jb-btn jb-btn-danger" id="jb-xp-reset" style="width:100%;margin-top:6px">Reset XP Session</button>
           </div>
         </div>
       </div>
@@ -5178,6 +5220,12 @@
     // Advanced
     _shadow.querySelector('#jb-resume').addEventListener('change', e => { resume.on = e.target.checked; saveResume(); });
     _shadow.querySelector('#jb-stats-on').addEventListener('change', e => { stats.on = e.target.checked; saveStats(); });
+    const xpBarCb = _shadow.querySelector('#jb-xpbar-on');
+    if (xpBarCb) xpBarCb.addEventListener('change', e => {
+      GM_setValue('cbXpBarOn', e.target.checked);
+      _lastBarXp = 0; _barXpLogged = false;   // re-baseline so it re-reads on the next tick
+      setStatus(e.target.checked ? 'Status-bar XP on' : 'Status-bar XP off');
+    });
     const noXpCb = _shadow.querySelector('#jb-noxp-on');
     if (noXpCb) noXpCb.addEventListener('change', e => { cfg.noXpLimiterOn = e.target.checked; GM_setValue('cbNoXpLimiterOn', cfg.noXpLimiterOn); setStatus(cfg.noXpLimiterOn?'No-XP limiter on':'No-XP limiter off'); });
     const noXpStreak = _shadow.querySelector('#jb-noxp-streak');
@@ -5252,6 +5300,14 @@
       resetXpSession();
       renderXpCharts();
       setStatus('XP session reset');
+    });
+    // Fire a report immediately and re-baseline, so the next scheduled one measures
+    // from now rather than double-counting this period.
+    const xpReportNow = _shadow.querySelector('#jb-xp-report-now');
+    if (xpReportNow) xpReportNow.addEventListener('click', () => {
+      if (!tg.enabled || !tg.token || !tg.chat) { setStatus('⚠️ Telegram not configured'); return; }
+      try { sendXpReport(); resetXpReportClock(); setStatus('📤 XP report sent'); }
+      catch(e) { setStatus('⚠️ XP report failed'); console.warn(APP_TAG, e); }
     });
 
     function renderWl() {
@@ -5724,6 +5780,161 @@
   const perRankReq = [5, 15, 60, 60, 80, 100, 130, 150, 200, 300, 400, 500, 1000, 2000, 3000, 3000];
   const cumRankReq = (() => { let s = 0; return perRankReq.map(v => (s += v)); })(); // [5,20,80,140,...]
 
+  /* === RANK NAMES + ABSOLUTE THRESHOLDS ===
+   * The 17 ranks in order with the cumulative XP needed to REACH each one. Taken
+   * from the moderator reference script's own RANKS table, which cross-validates
+   * perRankReq exactly: every gap here equals the matching perRankReq entry
+   * (5,15,60,60,80,100,130,150,200,300,400,500,1000,2000,3000,3000). This closes
+   * the long-standing gap where the ladder could only label steps "Step N" and
+   * XP-to-next was approximate — we now have real names and exact thresholds.
+   */
+  const RANKS = [
+    ['Scum', 0], ['Wannabe', 5], ['Goon', 20], ['Thug', 80], ['Criminal', 140],
+    ['Wanted Criminal', 220], ['Gangster', 320], ['Hitman', 450], ['Hired Gunner', 600],
+    ['Assassin', 800], ['Boss', 1100], ['Don', 1500], ['Enemy of the State', 2000],
+    ['Global Threat', 3000], ['Global Dominator', 5000], ['Global Disaster', 8000],
+    ['Legend', 11000]
+  ];
+
+  // Progress toward the next rank for a given cumulative XP value.
+  // Returns { rank, next, pct, toNext }; next is null at max rank (Legend).
+  function xpRankProgress(xp) {
+    if (!Number.isFinite(xp) || xp < 0) return null;
+    let idx = 0;
+    for (let i = 0; i < RANKS.length; i++) { if (xp >= RANKS[i][1]) idx = i; else break; }
+    const [rank, base] = RANKS[idx];
+    if (idx >= RANKS.length - 1) return { rank, next: null, pct: 100, toNext: 0 };
+    const [nextRank, nextBase] = RANKS[idx + 1];
+    const span = nextBase - base;
+    const pct = span > 0 ? Math.min(100, Math.max(0, ((xp - base) / span) * 100)) : 0;
+    return { rank, next: nextRank, pct, toNext: parseFloat((nextBase - xp).toFixed(2)) };
+  }
+
+  /* === STATUS-BAR XP FALLBACK (2000.226) ===
+   * hndlr.ashx?m=pst is unreliable in practice: with Jarvis running, three
+   * consecutive hourly reports showed the total frozen at exactly 3944.20 — not
+   * one usable value in 3+ hours. Meanwhile the game's own status bar reported
+   * 54.4% toward Global Dominator while our stored total implied 47.2%, i.e. the
+   * server knew about ~145 XP we never received.
+   *
+   * The status bar is server-rendered on EVERY authenticated page load and gives
+   * us the rank NAME plus a percentage toward the next rank (both already parsed
+   * by readBar). With the real RANKS thresholds we can invert that into an
+   * absolute XP figure:  xp = base + (pct/100) * (nextBase - base)
+   *
+   * Verified against a live hndlr payload: bar 58.42% → 3000 + 0.5842*2000 =
+   * 4168.40, actual Experience 4168.4668. Accurate to 0.07 XP. The same payload
+   * carried RankId 14, confirming the RANKS order (Global Threat is index 13,
+   * game ids are 1-based).
+   *
+   * Resolution is one step of the displayed precision. The bar shows two decimals
+   * ("58,42%"), so that's 0.01% of the rank span — 0.2 XP at Global Threat, fine
+   * enough to see individual actions. Where it only renders one decimal the value
+   * simply moves in larger steps; the floor below is deliberately set at the finer
+   * precision so real movement is never discarded.
+   *
+   * The XHR interceptor is left completely untouched and still wins whenever it
+   * produces a fresher value — this only ever corrects upward.
+   */
+  let _lastBarXp = 0, _barXpLogged = false;
+
+  function deriveXpFromBar() {
+    const bar = readBar();
+    if (!bar || !bar.rank || !(bar.rankPct > 0)) return null;
+    const nm = String(bar.rank).trim().toLowerCase();
+    const i = RANKS.findIndex(r => r[0].toLowerCase() === nm);
+    if (i < 0 || i >= RANKS.length - 1) return null;   // unknown name, or Legend (no next rank)
+    const base = RANKS[i][1], nextBase = RANKS[i + 1][1];
+    const span = nextBase - base;
+    if (!(span > 0)) return null;
+    return {
+      xp:   parseFloat((base + (bar.rankPct / 100) * span).toFixed(2)),
+      step: span / 10000,                               // one 0.01% increment — the bar's finest step
+      rank: RANKS[i][0]
+    };
+  }
+
+  // Feeds the derived value into the EXISTING onExperienceRead() — no change to
+  // the interceptor or to how gains are recorded, just a second source for it.
+  function syncXpFromBar() {
+    if (GM_getValue('cbXpBarOn', true) === false) return;
+    const d = deriveXpFromBar();
+    if (!d) return;
+    if (!_barXpLogged) {
+      _barXpLogged = true;
+      console.log(`${APP_TAG}[XP] Status-bar source: ${d.rank} → ${d.xp} (±${d.step} resolution)`);
+    }
+    // Ignore movement smaller than the bar can actually resolve — otherwise
+    // rounding noise would fire a "gain" every tick.
+    if (_lastBarXp && Math.abs(d.xp - _lastBarXp) < d.step) return;
+    _lastBarXp = d.xp;
+    // Only ever correct upward: if the interceptor has a fresher (higher) figure,
+    // leave it alone rather than dragging the total backwards.
+    if (xpState.total > 0 && d.xp <= xpState.total) return;
+    onExperienceRead(d.xp);
+  }
+
+  /* === ON-DEMAND STAT REFRESH (re-added 2000.226) ===
+   * Fires the game's own status poll instead of waiting for its 15s interval,
+   * which under bot navigation frequently never elapses at all. Clicking
+   * #ctl00_imgRefresh runs onclick="pstats(N)" → $.getJSON('hndlr.ashx?m=pst…'),
+   * which installXpInterceptor() then observes. Ported from the reference
+   * script's maybeForceStatRefresh, with its unenforced snapshot-age guard
+   * actually implemented (see below).
+   */
+  const STAT_REFRESH_MIN_MS = 60000;
+  const STAT_REFRESH_MAX_MS = 180000;
+  // A read fired too soon after an action returns the PRE-action value, which
+  // lands as a false "+0" and (with the limiter on) feeds the no-XP streak. The
+  // reference script documents this 4s floor but computes _snapAge and never uses
+  // it, so the guard it describes doesn't actually run. Enforced properly here.
+  const XP_SNAP_MIN_AGE_MS = 4000;
+
+  function forceStatRefresh() {
+    try {
+      const img = document.getElementById('ctl00_imgRefresh');
+      if (!img) return false;
+      const link = img.closest('a');
+      if (!link) return false;
+      // Never click anything that would navigate — that was the 219 bug, where a
+      // fallback selector hit the mailbox link and moved Jarvis off the page.
+      const href = (link.getAttribute('href') || '').trim();
+      if (href && !/^(#|javascript:)/i.test(href)) {
+        dlog(APP_TAG, '[XP] Refresh anchor looks navigational — not clicking:', href);
+        return false;
+      }
+      link.click();
+      return true;
+    } catch (e) { return false; }
+  }
+
+  function maybeForceStatRefresh() {
+    if (paused || _navigating || st.acting || st.inJail) return false;
+    // The refresh control only exists on ordinary game pages.
+    const p = window.location.pathname.toLowerCase();
+    if (p.includes('/statistics.aspx') || p.includes('/travel.aspx') || p.includes('/mailbox.aspx')) return false;
+
+    const snap = GM_getValue('cbXpSnapshot', null);
+    const snapT = (snap && snap.t) ? snap.t : 0;
+    const age = snapT ? (Date.now() - snapT) : Infinity;
+    const bypassedFor = GM_getValue('cbXpRefreshBypassedFor', 0);
+    // An action just fired: bypass the throttle so its gain is read and attributed
+    // before the next action overwrites the snapshot — but only ONCE per snapshot,
+    // or a lingering one triggers a refresh every single tick.
+    const snapFresh = snapT && age >= XP_SNAP_MIN_AGE_MS && age < 60000 && snapT !== bypassedFor;
+
+    const last = GM_getValue('cbLastStatRefresh', 0);
+    const interval = STAT_REFRESH_MIN_MS + Math.floor(Math.random() * (STAT_REFRESH_MAX_MS - STAT_REFRESH_MIN_MS));
+    if (!snapFresh && Date.now() - last < interval) return false;
+
+    if (snapFresh) GM_setValue('cbXpRefreshBypassedFor', snapT);
+    GM_setValue('cbLastStatRefresh', Date.now());
+    const ok = forceStatRefresh();
+    if (ok && snapFresh) console.log(`${APP_TAG}[XP] Stat refresh (${snap.action} +${Math.round(age/1000)}s)`);
+    else if (ok) dlog(APP_TAG, '[XP] Stat refresh (routine)');
+    return ok;
+  }
+
   // Rank state captured from the status bar each tick (name + % toward next rank).
   const rankState = {
     name:    GM_getValue('cbRankName', ''),
@@ -5910,6 +6121,96 @@
         console.log(`${APP_TAG}[XP] ${action} no-XP cap reset — re-enabled (new game-day)`);
       }
     });
+  }
+
+  /* === HOURLY XP REPORT → TELEGRAM (with rank-up ETA) ===
+   * Ported from the moderator reference script's initHourlyXPReport. Sends a
+   * digest every hour: XP gained in the last period + rate, session total + rate,
+   * cumulative total with rank and % to next, and a projected time-to-next-rank
+   * at the current pace.
+   *
+   * Deliberately persisted + polled from the main loop rather than run off a long
+   * setTimeout: Jarvis navigates every few seconds, so any timer longer than a
+   * page lifetime would never survive to fire. The due-time lives in GM storage
+   * and each tick self-gates on it, which is what makes it reload-proof.
+   * Master tab only, so multiple tabs don't each send their own copy.
+   */
+  const XP_REPORT_INTERVAL_MS = 60 * 60 * 1000;
+
+  function xpFmtEta(h) {
+    if (h < 1) return `${Math.max(1, Math.round(h * 60))}m`;
+    if (h < 48) return `${Math.round(h)}h`;
+    return `${Math.floor(h / 24)}d ${Math.round(h % 24)}h`;
+  }
+
+  // Reset the report clock and re-baseline the period delta (used by the manual
+  // "Send now" button so the next scheduled report measures from that point).
+  function resetXpReportClock(fireInMs) {
+    const now = Date.now();
+    GM_setValue('cbXpReportNext', now + (fireInMs != null ? fireInMs : XP_REPORT_INTERVAL_MS));
+    GM_setValue('cbXpReportLastTotal', xpState.total || 0);
+    GM_setValue('cbXpReportLastAt', now);
+  }
+
+  function sendXpReport() {
+    const now = Date.now();
+    const curTotal = xpState.total || 0;
+    const prevTotal = GM_getValue('cbXpReportLastTotal', 0) || 0;
+    const prevAt = GM_getValue('cbXpReportLastAt', 0) || 0;
+
+    // Period delta — only meaningful once a baseline exists and XP hasn't gone backwards.
+    const periodGain = (prevTotal > 0 && curTotal >= prevTotal) ? parseFloat((curTotal - prevTotal).toFixed(2)) : null;
+    const periodHrs = prevAt > 0 ? (now - prevAt) / 3600000 : 0;
+    const periodRate = (periodGain != null && periodHrs > 0.1) ? (periodGain / periodHrs).toFixed(2) : '—';
+
+    const sessionXP = xpState.sessionGain || 0;
+    const sMins = xpState.sessionStart > 0 ? (now - xpState.sessionStart) / 60000 : 0;
+    const sessionRate = sMins > 0.5 ? ((sessionXP / sMins) * 60).toFixed(2) : '—';
+
+    // Rank + projected time to the next one, using the real threshold table.
+    let rankStr = '', etaLine = '';
+    try {
+      const rp = xpRankProgress(curTotal);
+      if (rp) {
+        rankStr = rp.next ? ` (${rp.pct.toFixed(1)}% → ${esc(rp.next)})` : ` (${esc(rp.rank)} — max)`;
+        if (rp.next && rp.toNext > 0) {
+          // Prefer the last period's real rate; fall back to the session rate.
+          let rate = parseFloat(periodRate);
+          if (!Number.isFinite(rate) || rate <= 0) rate = parseFloat(sessionRate);
+          if (Number.isFinite(rate) && rate > 0) {
+            etaLine = `\n⏳ ${esc(rp.next)} in ~${xpFmtEta(rp.toNext / rate)} at current pace (${rp.toNext.toFixed(2)} XP to go)`;
+          } else {
+            etaLine = `\n⏳ ${rp.toNext.toFixed(2)} XP to ${esc(rp.next)} (no pace yet)`;
+          }
+        }
+      }
+    } catch(_){}
+
+    const lastLine = periodGain != null ? `Last hour: +${periodGain} (${periodRate}/hr)` : 'Last hour: baseline set';
+    tgMsg('xpReport',
+      `📊 <b>Hourly XP — ${esc(st.player||'?')}</b>\n⭐ ${lastLine}\n` +
+      `🕐 Session: +${sessionXP.toFixed(2)} (${sessionRate}/hr)\n` +
+      `🏆 Total: ${curTotal.toFixed(2)}${rankStr}${etaLine}`);
+
+    GM_setValue('cbXpReportLastTotal', curTotal);
+    GM_setValue('cbXpReportLastAt', now);
+    console.log(`${APP_TAG}[XP] Hourly report sent (${periodGain != null ? '+'+periodGain : 'baseline'})`);
+  }
+
+  // Called each main-loop tick; self-gates on the persisted due time.
+  function maybeSendXpReport() {
+    if (!tabs.isMaster || paused) return;
+    if (GM_getValue('cbXpReportOn', true) === false) return;
+    const due = GM_getValue('cbXpReportNext', 0);
+    if (!due) {                                   // first run — set the baseline, don't send
+      GM_setValue('cbXpReportNext', Date.now() + XP_REPORT_INTERVAL_MS);
+      GM_setValue('cbXpReportLastTotal', xpState.total || 0);
+      GM_setValue('cbXpReportLastAt', Date.now());
+      return;
+    }
+    if (Date.now() < due) return;
+    GM_setValue('cbXpReportNext', Date.now() + XP_REPORT_INTERVAL_MS);
+    try { sendXpReport(); } catch(e) { console.warn(APP_TAG, 'XP report err', e); }
   }
 
   /* === XP API INTERCEPTOR ===
@@ -6695,6 +6996,8 @@
     }
 
     try { checkReadyAlerts(); } catch(_){}
+    try { maybeSendXpReport(); } catch(_){}
+    try { maybeForceStatRefresh(); } catch(_){}
 
     if (st.health && !st.acting) {
       checkHealth();
