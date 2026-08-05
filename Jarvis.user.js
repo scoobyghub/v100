@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.226
+// @version      2000.230
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -27,11 +27,12 @@
 // @grant        GM_xmlhttpRequest
 // @connect      api.telegram.org
 // @connect      raw.githubusercontent.com
+// @connect      starvinggeeks.net
 // @updateURL    https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.meta.js
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.226
+/*  Jarvis Bot 2000.230
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -118,7 +119,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.226';
+  const APP_VERSION = '2000.230';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -177,19 +178,16 @@
 
   /* === PAGE EXCLUSIONS === */
 
-  /* TEMPORARY (2000.226) — all exclusions except the forum are lifted so the XP
-   * interceptor actually runs on statistics.aspx?p=p, the one page confirmed to
-   * return real JSON from hndlr.ashx (its own poll uses t=80). Previously that
-   * page was skipped before installXpInterceptor() ever ran, so Jarvis could
-   * never see the data even when it was being served.
-   *
-   * Restore list when the test is done:
-   *   '/authenticated/personal.aspx', '/authenticated/store.aspx?p=b',
-   *   '/authenticated/statistics.aspx?p=C', '/authenticated/statistics.aspx?p=G',
-   *   '/authenticated/statistics.aspx?p=p', '/authenticated/statistics.aspx?p=n'
+  /* 2000.225 temporarily cut this to the forum only, to test whether
+   * statistics.aspx?p=p was special for XP capture. It wasn't — the real cause
+   * was timing (see maybeForceStatRefresh in the XP section), so the full list
+   * is restored here.
    */
   const SKIP_PAGES = [
-    '/authenticated/forum.aspx'
+    '/authenticated/forum.aspx', '/authenticated/personal.aspx',
+    '/authenticated/store.aspx?p=b', '/authenticated/statistics.aspx?p=C',
+    '/authenticated/statistics.aspx?p=G', '/authenticated/statistics.aspx?p=p',
+    '/authenticated/statistics.aspx?p=n'
   ];
   // Query-string values are matched case-sensitively (path is not) — e.g.
   // "?p=C" must not accidentally exclude "?p=c".
@@ -874,6 +872,14 @@
     jailInt:     GM_getValue('cbJailInt', 3),
     jailDailyLimit: GM_getValue('cbJailDailyLimit', 2000),
     jailCheckInt:GM_getValue('cbJailCheckInt', 5),
+    // Randomised pause after leaving jail before automation resumes — a human
+    // doesn't carry straight on the instant the cell door opens. Seconds.
+    jailDelayOn:  GM_getValue('cbJailDelayOn', false),
+    jailDelayMin: GM_getValue('cbJailDelayMin', 15),
+    jailDelayMax: GM_getValue('cbJailDelayMax', 90),
+    // Don't start a jail bust when a crime/GTA/booze/travel is due within this
+    // many seconds — a failed bust jails you and blocks the action. 0 disables.
+    jailYieldSec: GM_getValue('cbJailYieldSec', 30),
     boozeInt:    GM_getValue('cbBoozeInt', 120),
     boozeBuy:    GM_getValue('cbBoozeBuy', 5),
     boozeSell:   GM_getValue('cbBoozeSell', 1),
@@ -1268,6 +1274,7 @@
     gtas:      GM_getValue('cbSelGtas', [5]),
     player:    GM_getValue('cbPlayer', ''),
     inJail:    GM_getValue('cbInJail', false),
+    jailReleaseUntil: GM_getValue('cbJailReleaseUntil', 0),
     collapsed: {
       crime: GM_getValue('cbCollCrime', false),
       gta:   GM_getValue('cbCollGta', false),
@@ -1582,6 +1589,7 @@
       cbLastCrime:st.lastCrime, cbLastGta:st.lastGta, cbLastJail:st.lastJail,
       cbLastBooze:st.lastBooze, cbLastHealth:st.lastHealth, cbLastGarage:st.lastGarage,
       cbSelCrimes:st.crimes, cbSelGtas:st.gtas, cbPlayer:st.player, cbInJail:st.inJail,
+      cbJailReleaseUntil:st.jailReleaseUntil,
       cbCollCrime:st.collapsed.crime, cbCollGta:st.collapsed.gta, cbCollBooze:st.collapsed.booze,
       cbMinimized:st.minimized, cbLastJailCk:st.lastJailCk, cbAction:st.action,
       cbRefresh:st.refresh, cbPending:st.pending, cbBuyHealth:st.buyHealth,
@@ -3266,6 +3274,125 @@
 
   function propWatchStop() { if (propTimer) clearInterval(propTimer); propTimer = null; }
 
+  /* === STARVINGGEEKS LISTS (READ-ONLY) ===
+   * Fetches three name lists the user maintains on their own server and uses them
+   * to colour player profile links: watched (orange), safe (green), allied (blue).
+   * 5-minute TTL, cached in GM storage so a failed fetch keeps the previous list
+   * rather than blanking the colours.
+   *
+   * STRICTLY READ-ONLY — three GETs and nothing else. The reference script also
+   * carries add-player-profile.php (pushes profiles up) and a 12s check-in to a
+   * Cloudflare worker; neither is ported, and neither should be. Data flows one
+   * way only: down.
+   *
+   * Uses GM_xmlhttpRequest rather than the reference's plain fetch(), so it works
+   * regardless of whether the endpoint sends CORS headers. That needs
+   * @connect starvinggeeks.net, which is why the header is now 33 lines.
+   */
+  const SG_SAFE_URL    = 'https://starvinggeeks.net/helper/safe.php';
+  const SG_ALLIED_URL  = 'https://starvinggeeks.net/helper/allied.php';
+  const SG_WATCHED_URL = 'https://starvinggeeks.net/helper/watched.php';
+  const SG_TTL_MS = 5 * 60 * 1000;
+
+  const sgCfg = { on: GM_getValue('cbSgOn', false) };
+  function saveSgCfg() { GM_setValue('cbSgOn', sgCfg.on); }
+
+  let sgSafe    = GM_getValue('cbSgSafe', []) || [];
+  let sgAllied  = GM_getValue('cbSgAllied', []) || [];
+  let sgWatched = GM_getValue('cbSgWatched', []) || [];
+
+  function sgGetJson(url) {
+    return new Promise((res, rej) => {
+      GM_xmlhttpRequest({
+        method:'GET', url, timeout:15000,
+        headers:{'Cache-Control':'no-cache'},
+        onload: r => {
+          if (r.status < 200 || r.status >= 300) return rej(new Error('HTTP ' + r.status));
+          try { res(JSON.parse(r.responseText)); } catch(e) { rej(new Error('bad JSON')); }
+        },
+        onerror:   () => rej(new Error('network')),
+        ontimeout: () => rej(new Error('timeout'))
+      });
+    });
+  }
+
+  // Accepts either ["name", …] or [{name:"…"}, …] — watched.php returns objects.
+  function sgNorm(rows) {
+    return (Array.isArray(rows) ? rows : [])
+      .map(n => String(n && typeof n === 'object' && n.name != null ? n.name : n).trim().toLowerCase())
+      .filter(Boolean);
+  }
+
+  let _sgFetching = false;
+  async function fetchSgLists(force) {
+    if (!sgCfg.on || _sgFetching) return;
+    const last = GM_getValue('cbSgLastFetch', 0);
+    if (!force && Date.now() - last < SG_TTL_MS) return;
+    _sgFetching = true;
+    GM_setValue('cbSgLastFetch', Date.now());   // stamp first, so a failing endpoint isn't hammered
+    const pull = async (url, key, label) => {
+      try {
+        const list = sgNorm(await sgGetJson(url));
+        GM_setValue(key, list);
+        console.log(`${APP_TAG}[SG] ${label}: ${list.length} names`);
+        return list;
+      } catch (e) {
+        console.warn(`${APP_TAG}[SG] ${label} fetch failed: ${e.message} — keeping previous list`);
+        return null;
+      }
+    };
+    const [s, a, w] = await Promise.all([
+      pull(SG_SAFE_URL,    'cbSgSafe',    'safe'),
+      pull(SG_ALLIED_URL,  'cbSgAllied',  'allied'),
+      pull(SG_WATCHED_URL, 'cbSgWatched', 'watched')
+    ]);
+    if (s) sgSafe = s;
+    if (a) sgAllied = a;
+    if (w) sgWatched = w;
+    _sgFetching = false;
+    try { colourPlayerLinks(); } catch(_){}
+  }
+
+  // Precedence follows the reference implementation: watched > safe > allied.
+  // (Its own hover code applies safe > allied and skips watched — an
+  // inconsistency there; one order is used everywhere here.)
+  function sgLookup(name) {
+    const n = String(name || '').trim().toLowerCase();
+    if (!n) return null;
+    if (sgWatched.includes(n)) return { colour:'#ff7a18', badge:'👁️ WATCHED' };
+    if (sgSafe.includes(n))    return { colour:'#00a550', badge:'✅ SAFE' };
+    if (sgAllied.includes(n))  return { colour:'#4466ff', badge:'🤝 ALLIED' };
+    return null;
+  }
+
+  function colourPlayerLinks(root) {
+    if (!sgCfg.on) return;
+    (root || document).querySelectorAll('a[href*="profile.aspx?id="]').forEach(a => {
+      const hit = sgLookup(a.textContent);
+      if (!hit) return;
+      a.style.color = hit.colour;
+      a.style.fontWeight = 'bold';
+    });
+  }
+
+  let _sgInited = false, _sgPaintTimer = null;
+  function scheduleColourPaint() {
+    if (_sgPaintTimer) return;   // coalesce mutation bursts into one repaint
+    _sgPaintTimer = setTimeout(() => {
+      _sgPaintTimer = null;
+      try { colourPlayerLinks(); } catch(_){}
+    }, 250);
+  }
+
+  function initSgLists() {
+    if (_sgInited || !sgCfg.on || !document.body) return;
+    _sgInited = true;
+    fetchSgLists();
+    colourPlayerLinks();
+    // Re-colour links added by postbacks/AJAX.
+    new MutationObserver(scheduleColourPaint).observe(document.body, { childList:true, subtree:true });
+  }
+
   /* === PLAYER HOVER TOOLTIP ===
    * Hover any player profile link to get a quick card — rank, wealth, network,
    * join date, new-player protection — fetched same-origin from the game's own
@@ -3345,6 +3472,8 @@
           const info = await fetchProfile(id);
           if (cancelled || !info) return;
           let html = `<b style="font-size:13px">${esc(info.name)}</b>`;
+          const sg = sgLookup(info.name);
+          if (sg) html += ` <span style="color:${sg.colour};font-size:11px;font-weight:bold">${sg.badge}</span>`;
           html += `<br><span style="color:#aaa">Rank:</span> ${esc(info.rank)}`;
           html += `<br><span style="color:#aaa">Wealth:</span> ${esc(info.wealth)}`;
           html += `<br><span style="color:#aaa">Network:</span> ${esc(info.network) || '—'}`;
@@ -3415,6 +3544,71 @@
     setStatus('Could not identify player');
   }
 
+  /* === POST-RELEASE JAIL HOLD ===
+   * Resuming crimes the instant you're out of jail is a very machine-like tell.
+   * On the in-jail → free transition we roll a one-off random pause and park it
+   * in st.jailReleaseUntil (persisted, so it survives the page reloads Jarvis
+   * does while checking jail). mainLoop gates on jailHoldActive() right after
+   * checkJailAny(), so nothing else runs until it expires.
+   */
+  function startJailHold() {
+    if (!cfg.jailDelayOn) return;
+    const lo = Math.max(0, Number(cfg.jailDelayMin) || 0);
+    const hi = Math.max(lo, Number(cfg.jailDelayMax) || lo);
+    const secs = lo + Math.floor(Math.random() * (hi - lo + 1));
+    st.jailReleaseUntil = Date.now() + secs * 1000;
+    saveSt();
+    console.log(`${APP_TAG}[JAIL] Released — holding ${secs}s before resuming`);
+  }
+
+  function jailHoldRemainingSec() {
+    return st.jailReleaseUntil ? Math.max(0, Math.ceil((st.jailReleaseUntil - Date.now()) / 1000)) : 0;
+  }
+
+  function jailHoldActive() {
+    if (!st.jailReleaseUntil) return false;
+    // Honour a hold already in flight even if the toggle was switched off mid-way,
+    // but clear it so it can't linger.
+    if (!cfg.jailDelayOn) { st.jailReleaseUntil = 0; saveSt(); return false; }
+    if (Date.now() >= st.jailReleaseUntil) {
+      st.jailReleaseUntil = 0; saveSt();
+      console.log(`${APP_TAG}[JAIL] Hold finished — resuming`);
+      return false;
+    }
+    return true;
+  }
+
+  /* === JAIL YIELD ===
+   * A bust is the one action that can cost you the next one: fail it and you're
+   * jailed, which blocks crime/GTA/booze until you're out again. So when another
+   * action is about to come due, stand aside and let it go first.
+   *
+   * Travel is included, but only when auto-travel would genuinely act — enabled,
+   * hot city known, and not already in it. Without that check a ready travel
+   * timer while sitting in the hot city would block jail permanently.
+   */
+  function jailShouldHoldOff() {
+    const sec = Math.max(0, Number(cfg.jailYieldSec) || 0);
+    if (sec <= 0) return false;                 // slider at 0 = feature off
+    const within = sec * 1000, now = Date.now();
+
+    const checks = [
+      [st.crime, st.lastCrime, cfg.crimeInt],
+      [st.gta,   st.lastGta,   cfg.gtaInt],
+      [st.booze, st.lastBooze, cfg.boozeInt]
+    ];
+    for (const [on, last, intSec] of checks) {
+      if (!on) continue;
+      if ((intSec * 1000) - (now - last) <= within) return true;
+    }
+
+    if (st.autoTravel && getHot() && !isInHot()) {
+      const t = getTravel();
+      if (t && (t.ready || (t.remaining * 1000) <= within)) return true;
+    }
+    return false;
+  }
+
   /* === JAIL DETECTION === */
 
   function processJail() {
@@ -3440,6 +3634,7 @@
       st.acting = false; st.action = ''; st.refresh = true; GM_setValue('cbActStart',0);
     } else if (was && !inJail) {
       st.refresh = true;
+      startJailHold();   // out of jail — pause before carrying on
     }
     saveSt();
   }
@@ -3683,6 +3878,11 @@
 
   function updateJailCountUI() {
     if (!_shadow) return;
+    const hEl = _shadow.querySelector('#jb-jail-hold');
+    if (hEl) {
+      const rem = jailHoldActive() ? jailHoldRemainingSec() : 0;
+      hEl.textContent = rem > 0 ? `⏳ ${rem}s · ` : '';
+    }
     const el = _shadow.querySelector('#jb-jail-count');
     if (el) {
       const n = getJailCount();
@@ -4515,9 +4715,10 @@
               <div class="jb-switch"><input type="checkbox" id="jb-wl-on"> <span id="jb-wl-link" style="cursor:pointer;text-decoration:underline;color:var(--jb-accent)">Whitelist</span></div>
               <div class="jb-switch"><input type="checkbox" id="jb-create-oc"> <span id="jb-oc-link" style="cursor:pointer;text-decoration:underline;color:var(--jb-accent)">Create OC</span></div>
               <div class="jb-switch"><input type="checkbox" id="jb-create-dtm"> <span id="jb-dtm-link" style="cursor:pointer;text-decoration:underline;color:var(--jb-accent)">Create DTM</span></div>
-              <div class="jb-switch"><input type="checkbox" id="jb-ow-on"> <span id="jb-ow-link" style="cursor:pointer;text-decoration:underline;color:var(--jb-accent)">🟢 Watch</span></div>
+              <div class="jb-switch" title="Master switch for Online Watch — off means neither group can fire. Enable/disable Group 1 and Group 2 individually inside the Watch window."><input type="checkbox" id="jb-ow-on"> <span id="jb-ow-link" style="cursor:pointer;text-decoration:underline;color:var(--jb-accent)">🟢 Watch</span></div>
               <label class="jb-switch" title="Property drop watch"><input type="checkbox" id="jb-prop-on"> 🏠 Props</label>
               <label class="jb-switch" title="Player hover tooltip (reload to apply)"><input type="checkbox" id="jb-hover-on"> 🔍 Hover</label>
+              <label class="jb-switch" title="Colour player links from your Starvinggeeks lists — watched (orange), safe (green), allied (blue). Read-only: three GETs, nothing is ever sent."><input type="checkbox" id="jb-sg-on"> 🎨 SG lists</label>
               <label class="jb-switch"><input type="checkbox" id="jb-notify-ready"> 🔔 Alerts</label>
               <label class="jb-switch"><input type="checkbox" id="jb-auto-travel" ${st.autoTravel?'checked':''}> ✈️ Auto Travel</label>
               <label class="jb-switch"><input type="checkbox" id="jb-auto-dtmlist" ${st.autoDtmList?'checked':''}> 📋 DTM List</label>
@@ -4528,7 +4729,7 @@
 
       <div class="jb-jail-counter" id="jb-jail-counter-row" style="display:flex;justify-content:space-between;align-items:center;padding:3px 10px;font-size:10px;border-top:1px solid var(--jb-border);color:var(--jb-text-ter)">
         <span>⛓️ Jail attempts today:</span>
-        <span id="jb-jail-count" style="font-weight:600">0/2000</span>
+        <span><span id="jb-jail-hold" style="color:var(--jb-warning)"></span><span id="jb-jail-count" style="font-weight:600">0/2000</span></span>
       </div>
 
       <div class="jb-footer" id="jb-status">Ready</div>
@@ -4601,6 +4802,20 @@
               <label class="jb-label">Daily limit:</label>
               <input class="jb-input jb-input-sm" type="number" id="jb-jail-limit" value="${cfg.jailDailyLimit}" min="50" max="4000" step="50">
               <span class="jb-sub">(50–4000)</span>
+            </div>
+            <div class="jb-row" title="Don't start a jail bust when a crime, GTA, booze or auto-travel is due within this many seconds — a failed bust jails you and blocks that action. Slide to 0 to disable.">
+              <label class="jb-label" style="white-space:nowrap">Yield to actions:</label>
+              <input type="range" id="jb-jailyield" min="0" max="90" step="5" value="${cfg.jailYieldSec}" style="flex:1;accent-color:var(--jb-accent)">
+              <span class="jb-sub" id="jb-jailyield-val" style="min-width:30px;text-align:right">${cfg.jailYieldSec}s</span>
+            </div>
+            <div class="jb-sub jb-mb" style="color:var(--jb-text-ter);font-size:9px">0 = never yield, jail competes with everything else.</div>
+            <label class="jb-switch jb-mb" title="After getting out of jail, wait a random gap before resuming. Carrying straight on the instant you're released is an obvious tell."><input type="checkbox" id="jb-jaildelay-on" ${cfg.jailDelayOn?'checked':''}> ⏳ Pause after release</label>
+            <div class="jb-row jb-mb">
+              <label class="jb-label">Wait:</label>
+              <input class="jb-input jb-input-sm" type="number" id="jb-jaildelay-min" value="${cfg.jailDelayMin}" min="0" max="600">
+              <span class="jb-sub">to</span>
+              <input class="jb-input jb-input-sm" type="number" id="jb-jaildelay-max" value="${cfg.jailDelayMax}" min="0" max="600">
+              <span class="jb-sub">s</span>
             </div>
             <div class="jb-sub jb-mb">Today: <span id="jb-jail-count-settings">${getJailCount()}/${cfg.jailDailyLimit}</span> · resets 00:00 game time
               <button class="jb-btn jb-btn-outline" id="jb-jail-reset" style="margin-left:6px;padding:1px 6px;font-size:9px">Reset now</button>
@@ -5017,6 +5232,14 @@
         pcb.addEventListener('change', e => { propWatch.on = e.target.checked; savePropWatch(); propWatchStart(); }); } }
     try { renderPropUI(); } catch(_){}
 
+    { const scb = _shadow.querySelector('#jb-sg-on');
+      if (scb) { scb.checked = sgCfg.on;
+        scb.addEventListener('change', e => {
+          sgCfg.on = e.target.checked; saveSgCfg();
+          if (sgCfg.on) { try { initSgLists(); fetchSgLists(true); } catch(_){} setStatus('🎨 SG lists on'); }
+          else setStatus('🎨 SG lists off — reload to clear colours');
+        }); } }
+
     { const hcb = _shadow.querySelector('#jb-hover-on');
       if (hcb) { hcb.checked = hoverCfg.on;
         // Toggling on takes effect immediately; toggling off needs a reload to detach.
@@ -5025,8 +5248,25 @@
     _shadow.querySelector('#jb-create-oc').checked = st.createOC;
     _shadow.querySelector('#jb-create-oc').addEventListener('change', e => { st.createOC = e.target.checked; saveSt(); if(st.createOC && !getHot()) fetchHot(); });
 
-    _shadow.querySelector('#jb-ow-on').checked = ow.on;
-    _shadow.querySelector('#jb-ow-on').addEventListener('change', e => { ow.on = e.target.checked; saveOw(); owStart(); });
+    // Front-panel Watch is a MASTER switch: it reads as "watching or not", so it
+    // must reflect BOTH groups. It used to be bound to ow.on (Group 1) alone,
+    // which meant a Group 2 player could still fire its actions — including a
+    // logout — while the panel showed Watch as off.
+    _shadow.querySelector('#jb-ow-on').checked = owEnabled();
+    _shadow.querySelector('#jb-ow-on').addEventListener('change', e => {
+      if (e.target.checked) {
+        // Restore whichever groups were on before, defaulting to Group 1 so the
+        // switch always actually does something.
+        const w1 = GM_getValue('cbOwWas1', true), w2 = GM_getValue('cbOwWas2', false);
+        ow.on = w1; ow.on2 = w2;
+        if (!ow.on && !ow.on2) ow.on = true;
+      } else {
+        GM_setValue('cbOwWas1', ow.on); GM_setValue('cbOwWas2', ow.on2);
+        ow.on = false; ow.on2 = false;
+      }
+      saveOw(); owStart(); renderOwUI();
+      setStatus(owEnabled() ? `🟢 Watch on (G1:${ow.on?'on':'off'} G2:${ow.on2?'on':'off'})` : '🟢 Watch off — both groups');
+    });
 
     _shadow.querySelector('#jb-notify-ready').checked = st.notifyReady;
     _shadow.querySelector('#jb-notify-ready').addEventListener('change', e => { st.notifyReady = e.target.checked; saveSt(); });
@@ -5126,6 +5366,34 @@
       const sEl = _shadow.querySelector('#jb-jail-count-settings');
       if (sEl) sEl.textContent = `${getJailCount()}/${cfg.jailDailyLimit}`;
     });
+    { const y = _shadow.querySelector('#jb-jailyield');
+      if (y) y.addEventListener('input', e => {
+        cfg.jailYieldSec = Math.max(0, Math.min(90, parseInt(e.target.value,10)||0));
+        GM_setValue('cbJailYieldSec', cfg.jailYieldSec);
+        const v = _shadow.querySelector('#jb-jailyield-val');
+        if (v) v.textContent = cfg.jailYieldSec + 's';
+      }); }
+    { const d = _shadow.querySelector('#jb-jaildelay-on');
+      if (d) d.addEventListener('change', e => {
+        cfg.jailDelayOn = e.target.checked; GM_setValue('cbJailDelayOn', cfg.jailDelayOn);
+        if (!cfg.jailDelayOn && st.jailReleaseUntil) { st.jailReleaseUntil = 0; saveSt(); }
+        setStatus(cfg.jailDelayOn ? '⏳ Post-jail pause on' : '⏳ Post-jail pause off');
+      }); }
+    { const mn = _shadow.querySelector('#jb-jaildelay-min');
+      if (mn) mn.addEventListener('change', e => {
+        cfg.jailDelayMin = Math.max(0, Math.min(600, parseInt(e.target.value,10)||0));
+        if (cfg.jailDelayMax < cfg.jailDelayMin) {   // keep the range coherent
+          cfg.jailDelayMax = cfg.jailDelayMin;
+          GM_setValue('cbJailDelayMax', cfg.jailDelayMax);
+          const mx = _shadow.querySelector('#jb-jaildelay-max'); if (mx) mx.value = cfg.jailDelayMax;
+        }
+        e.target.value = cfg.jailDelayMin; GM_setValue('cbJailDelayMin', cfg.jailDelayMin);
+      }); }
+    { const mx = _shadow.querySelector('#jb-jaildelay-max');
+      if (mx) mx.addEventListener('change', e => {
+        cfg.jailDelayMax = Math.max(cfg.jailDelayMin, Math.min(600, parseInt(e.target.value,10)||0));
+        e.target.value = cfg.jailDelayMax; GM_setValue('cbJailDelayMax', cfg.jailDelayMax);
+      }); }
     _shadow.querySelector('#jb-jail-reset').addEventListener('click', () => {
       GM_setValue('cbJailCount', 0);
       GM_setValue('cbJailCountDay', gameDayStr());
@@ -5361,14 +5629,15 @@
     });
 
     // Online Watch modal
-    _shadow.querySelector('#jb-ow-on').addEventListener('change', e => { ow.on = e.target.checked; saveOw(); owStart(); });
+    // (the front-panel #jb-ow-on handler is registered once, further up — it used
+    // to be bound here a second time as well, so every toggle restarted the scan
+    // timer twice)
     const owModalOn = _shadow.querySelector('#jb-ow-modal-on');
     if (owModalOn) owModalOn.addEventListener('change', e => {
-      ow.on = e.target.checked; saveOw(); owStart();
-      const main = _shadow.querySelector('#jb-ow-on'); if(main) main.checked = ow.on;
+      ow.on = e.target.checked; saveOw(); owStart(); renderOwUI();
     });
     { const g2 = _shadow.querySelector('#jb-ow-modal-on2');
-      if (g2) g2.addEventListener('change', e => { ow.on2 = e.target.checked; saveOw(); owStart(); }); }
+      if (g2) g2.addEventListener('change', e => { ow.on2 = e.target.checked; saveOw(); owStart(); renderOwUI(); }); }
     _shadow.querySelector('#jb-ow-close').addEventListener('click', () => closeModal2('#jb-ow-modal'));
     _shadow.querySelector('#jb-ow-sec').addEventListener('change', e => { ow.sec = Math.max(OW_MIN_SEC,Math.min(3600,parseInt(e.target.value)||OW_DEF_SEC)); saveOw(); owStart(); });
     _shadow.querySelector('#jb-ow-notify').addEventListener('change', e => { ow.notify = e.target.checked; saveOw(); if(ow.notify) askNotifyPerm(); });
@@ -5392,7 +5661,7 @@
 
     // Implement renderOwUI properly now
     renderOwUI = function() {
-      const mainCb = _shadow.querySelector('#jb-ow-on'); if(mainCb) mainCb.checked = ow.on;
+      const mainCb = _shadow.querySelector('#jb-ow-on'); if(mainCb) mainCb.checked = owEnabled();
       const modalCb = _shadow.querySelector('#jb-ow-modal-on'); if(modalCb) modalCb.checked = ow.on;
       const modalCb2 = _shadow.querySelector('#jb-ow-modal-on2'); if(modalCb2) modalCb2.checked = ow.on2;
       const listEl = _shadow.querySelector('#jb-ow-list');
@@ -5810,7 +6079,7 @@
     return { rank, next: nextRank, pct, toNext: parseFloat((nextBase - xp).toFixed(2)) };
   }
 
-  /* === STATUS-BAR XP FALLBACK (2000.226) ===
+  /* === STATUS-BAR XP FALLBACK (2000.230) ===
    * hndlr.ashx?m=pst is unreliable in practice: with Jarvis running, three
    * consecutive hourly reports showed the total frozen at exactly 3944.20 — not
    * one usable value in 3+ hours. Meanwhile the game's own status bar reported
@@ -5874,7 +6143,7 @@
     onExperienceRead(d.xp);
   }
 
-  /* === ON-DEMAND STAT REFRESH (re-added 2000.226) ===
+  /* === ON-DEMAND STAT REFRESH (re-added 2000.230) ===
    * Fires the game's own status poll instead of waiting for its 15s interval,
    * which under bot navigation frequently never elapses at all. Clicking
    * #ctl00_imgRefresh runs onclick="pstats(N)" → $.getJSON('hndlr.ashx?m=pst…'),
@@ -6901,6 +7170,13 @@
 
     checkJailAny();
 
+    // Just released — sit still until the randomised hold expires.
+    if (jailHoldActive()) {
+      setStatus(`⛓️ Just released — resuming in ${jailHoldRemainingSec()}s`);
+      try { updateJailCountUI(); } catch(_){}
+      schedLoop(1000); return;
+    }
+
     if (handleOcPage()) { schedLoop(3000); return; }
     if (handleDtmPage()) { schedLoop(3000); return; }
 
@@ -7045,7 +7321,7 @@
         } else if (crimeRdy) { if(pg==='crimes') doCrime(); else safeNav('/authenticated/crimes.aspx?'+Date.now()); }
         else if (gtaRdy) { if(pg==='gta') doGta(); else safeNav('/authenticated/crimes.aspx?p=g&'+Date.now()); }
         else if (boozeRdy) { if(pg==='booze') doBooze(); else safeNav('/authenticated/crimes.aspx?p=b&'+Date.now()); }
-        else if (jailRdy) { if(pg==='jail') doJailbreak(); else safeNav('/authenticated/jail.aspx?'+Date.now()); }
+        else if (jailRdy && !jailShouldHoldOff()) { if(pg==='jail') doJailbreak(); else safeNav('/authenticated/jail.aspx?'+Date.now()); }
         else if (garageRdy) { if(pg==='garage') doGarage(); else safeNav('/authenticated/playerproperty.aspx?p=g&'+Date.now()); }
         else {
           const cr = Math.max(0, Math.ceil((cfg.crimeInt*1000-(now-st.lastCrime))/1000));
@@ -7053,7 +7329,9 @@
           const br = Math.max(0, Math.ceil((cfg.boozeInt*1000-(now-st.lastBooze))/1000));
           const jr = Math.max(0, Math.ceil((cfg.jailInt*1000-(now-st.lastJail))/1000));
           const gar= Math.max(0, Math.ceil((cfg.garageInt*1000-(now-st.lastGarage))/60000));
-          setStatus(`C:${cr}s G:${gr}s B:${br}s J:${jr}s Gar:${gar}m`);
+          // ⏸J = jail is ready but yielding to an action that's due shortly
+          const yieldMark = (jailRdy && jailShouldHoldOff()) ? ' ⏸J' : '';
+          setStatus(`C:${cr}s G:${gr}s B:${br}s J:${jr}s Gar:${gar}m${yieldMark}`);
         }
       }
     }
@@ -7080,6 +7358,7 @@
     initServerTime();
     try { initHot(); } catch(_){}
     try { propWatchStart(); } catch(_){}
+    try { initSgLists(); } catch(_){}
     try { initPlayerHover(); } catch(_){}
 
     if (tabs.isMaster) setStatus(`${APP_NAME} ${APP_VERSION} — Master tab`);
