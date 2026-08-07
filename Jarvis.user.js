@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.230
+// @version      2000.231
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -32,7 +32,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.230
+/*  Jarvis Bot 2000.231
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -119,7 +119,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.230';
+  const APP_VERSION = '2000.231';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -930,7 +930,9 @@
     sqlCheck:    GM_getValue('cbNotifySqlCheck', true),
     logout:      GM_getValue('cbNotifyLogout', true),
     lastMsgCheck:GM_getValue('cbLastMsgCheck', 0),
-    msgCheckInt: GM_getValue('cbMsgCheckInt', 60)
+    // Seconds between background inbox polls. This is the ONLY thing that finds
+    // new mail while Jarvis is sitting idle — see mailIntervalMs() for why.
+    msgCheckInt: GM_getValue('cbMsgCheckInt', 30)
   };
 
   function saveTg() {
@@ -939,6 +941,14 @@
     GM_setValue('cbNotifyMessages', tg.messages); GM_setValue('cbNotifyScriptTest', tg.scriptTest);
     GM_setValue('cbNotifyStaffMail', tg.staffMail); GM_setValue('cbMsgCheckInt', tg.msgCheckInt);
     GM_setValue('cbNotifySqlCheck', tg.sqlCheck); GM_setValue('cbNotifyLogout', tg.logout);
+  }
+
+  // One-time: the poll was hardcoded at 60s while this setting sat unread, so
+  // existing installs still carry that stale 60. Move them to the new 30s default
+  // once; after that the settings field is authoritative and is left alone.
+  if (!GM_getValue('cbMsgCheckIntMigrated', false)) {
+    GM_setValue('cbMsgCheckIntMigrated', true);
+    if (Number(tg.msgCheckInt) === 60) { tg.msgCheckInt = 30; GM_setValue('cbMsgCheckInt', 30); }
   }
 
   // Per-message Telegram toggles. Each sendTg now carries a key; if its toggle is
@@ -2675,7 +2685,28 @@
   }
   const LS_PEND_DTM      = 'cbPendDtmUrl';
   const LS_PEND_OC       = 'cbPendOcUrl';
-  const MAIL_INT_MS      = 60000;
+  /* Background inbox poll interval.
+   *
+   * There are two ways new mail gets noticed, and only one of them works when
+   * Jarvis is idle:
+   *
+   *  1. checkNewMsgs() reads the on-page envelope indicator. That is rendered by
+   *     the SERVER, so it only refreshes when a page actually loads. With jail
+   *     enabled Jarvis navigates every few seconds, so this catches mail almost
+   *     instantly and the poll below barely matters.
+   *  2. checkMail() background-fetches the inbox on a timer. This is the only
+   *     mechanism that works while the page sits still.
+   *
+   * Turn jail off and, in Away mode, the page can sit unchanged for minutes —
+   * the AFK band alone runs 8-20 minutes — so route 1 goes silent entirely and
+   * detection latency becomes exactly this interval. It was hardcoded at 60s
+   * while tg.msgCheckInt was loaded, saved and never read; now the setting
+   * actually drives it.
+   */
+  function mailIntervalMs() {
+    const s = Number(tg.msgCheckInt);
+    return Math.max(15, Math.min(300, Number.isFinite(s) && s > 0 ? s : 30)) * 1000;
+  }
   const GM_TIMEOUT       = 20000;
   const INVITE_STALE     = 15*60*1000;
   const SCRIPT_TEST_STALE= 5*60*1000;
@@ -4874,6 +4905,12 @@
               <label class="jb-label">Chat ID</label>
               <input class="jb-input" id="jb-tg-chat" value="${tg.chat}" placeholder="From @userinfobot">
             </div>
+            <div class="jb-row" title="How often the inbox is polled in the background. This is the ONLY thing that spots new mail while Jarvis is idle — the on-page envelope only updates when a page loads, so with jail off and Away cadence the page can sit still for many minutes.">
+              <label class="jb-label" style="white-space:nowrap">Mail check (s):</label>
+              <input class="jb-input jb-input-sm" type="number" id="jb-msg-int" value="${tg.msgCheckInt}" min="15" max="300" step="5">
+              <span class="jb-sub">15–300</span>
+            </div>
+            <div class="jb-sub jb-mb" style="color:var(--jb-text-ter);font-size:9px">Lower = faster mail and staff-check alerts when idle.</div>
             <div class="jb-grid jb-mb">
               <label class="jb-switch"><input type="checkbox" id="jb-tg-captcha" ${tg.captcha?'checked':''}> Script Check</label>
               <label class="jb-switch"><input type="checkbox" id="jb-tg-msgs" ${tg.messages?'checked':''}> Messages</label>
@@ -5458,6 +5495,15 @@
     _shadow.querySelector('#jb-tg-staff').addEventListener('change', e => { tg.staffMail = e.target.checked; saveTg(); });
     _shadow.querySelector('#jb-tg-sql').addEventListener('change', e => { tg.sqlCheck = e.target.checked; saveTg(); });
     _shadow.querySelector('#jb-tg-logout').addEventListener('change', e => { tg.logout = e.target.checked; saveTg(); });
+    { const mi = _shadow.querySelector('#jb-msg-int');
+      if (mi) mi.addEventListener('change', e => {
+        tg.msgCheckInt = Math.max(15, Math.min(300, parseInt(e.target.value,10)||30));
+        e.target.value = tg.msgCheckInt; saveTg();
+        // Clear the last-poll stamp so a shortened interval takes effect now
+        // rather than after the old, longer one has elapsed.
+        localStorage.setItem('cbLastMailTs','0');
+        setStatus(`📬 Mail check every ${tg.msgCheckInt}s`);
+      }); }
     _shadow.querySelector('#jb-tg-test').addEventListener('click', testTg);
 
     // Per-message Telegram toggles
@@ -6079,7 +6125,7 @@
     return { rank, next: nextRank, pct, toNext: parseFloat((nextBase - xp).toFixed(2)) };
   }
 
-  /* === STATUS-BAR XP FALLBACK (2000.230) ===
+  /* === STATUS-BAR XP FALLBACK (2000.231) ===
    * hndlr.ashx?m=pst is unreliable in practice: with Jarvis running, three
    * consecutive hourly reports showed the total frozen at exactly 3944.20 — not
    * one usable value in 3+ hours. Meanwhile the game's own status bar reported
@@ -6143,7 +6189,7 @@
     onExperienceRead(d.xp);
   }
 
-  /* === ON-DEMAND STAT REFRESH (re-added 2000.230) ===
+  /* === ON-DEMAND STAT REFRESH (re-added 2000.231) ===
    * Fires the game's own status poll instead of waiting for its 15s interval,
    * which under bot navigation frequently never elapses at all. Clicking
    * #ctl00_imgRefresh runs onclick="pstats(N)" → $.getJSON('hndlr.ashx?m=pst…'),
@@ -7264,7 +7310,7 @@
     if ((st.autoOC || st.autoDTM || (tg.enabled && (tg.messages||tg.scriptTest||tg.staffMail))) && tabs.isMaster) {
       const lastMail = parseInt(localStorage.getItem('cbLastMailTs')||'0',10);
       const onMail = curPage() === 'mailbox';
-      if (onMail || (Date.now() - lastMail > MAIL_INT_MS)) {
+      if (onMail || (Date.now() - lastMail > mailIntervalMs())) {
         localStorage.setItem('cbLastMailTs', String(Date.now()));
         try { await checkMail(); } catch(_){}
         if (localStorage.getItem(LS_PEND_DTM) || localStorage.getItem(LS_PEND_OC)) { schedLoop(500); return; }
