@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.231
+// @version      2000.232
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -32,7 +32,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.231
+/*  Jarvis Bot 2000.232
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -119,7 +119,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.231';
+  const APP_VERSION = '2000.232';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -893,7 +893,17 @@
     noXpLimiterOn:   GM_getValue('cbNoXpLimiterOn', false),
     // Cadence mode: true = Away (max camouflage, slow, right-skewed long tail);
     // false = At-PC (fast, fires shortly after cooldown for high throughput).
-    awayMode:        GM_getValue('cbAwayMode', true)
+    awayMode:        GM_getValue('cbAwayMode', true),
+    /* Performance tuning — the only costs that had no switch of their own.
+     * Everything else expensive (hover, SG lists, props, silent audio, worker
+     * ticker) already has its own toggle. These are for a low-RAM device where
+     * the tab gets discarded: longer polls mean fewer parsed documents held in
+     * memory at once, and shorter XP arrays mean less kept in GM storage and
+     * re-serialised on every read. */
+    timerDispSec: GM_getValue('cbTimerDispSec', 5),    // panel refresh
+    bgPollSec:    GM_getValue('cbBgPollSec', 60),      // OC/DTM/travel background fetches
+    xpSampleCap:  GM_getValue('cbXpSampleCap', 400),   // chart points retained
+    xpHistoryCap: GM_getValue('cbXpHistoryCap', 40)    // recent-gains rows retained
   };
 
   /* === DELAY SYSTEM === */
@@ -2545,7 +2555,7 @@
     travel: GM_getValue('cbCacheTravel',''), hp: GM_getValue('cbCacheHp',''),
     prot: GM_getValue('cbCacheProt',''), hotCity: ''
   };
-  let _timerDispIv = null, _timerFetchIv = null;
+  let _timerDispIv = null, _timerFetchIv = null, _protIv = null;
 
   function clrForTimer(clr) {
     if (clr === 'green') return 'var(--jb-success)';
@@ -2645,14 +2655,34 @@
         if (el && _timerCache[k]) el.innerHTML = _timerCache[k];
       });
     }
-    if (!_timerDispIv) _timerDispIv = setInterval(updateTimers, 5000);
-    if (!_timerFetchIv) _timerFetchIv = setInterval(() => {
-      if (!st.inJail && !paused && !st.acting) { collectTimers(); fetchTravel(); }
-    }, 60000);
+    restartTimerIntervals();
     setTimeout(collectTimers, 3000);
     setTimeout(fetchTravel, 4000);
     setTimeout(fetchProt, 5000);
-    setInterval(fetchProt, 120000);
+  }
+
+  /* Rebuilt rather than created once, so the Performance settings apply live.
+   * Each background fetch parses a whole document with DOMParser, so on a
+   * low-RAM device stretching this is the single biggest lever available
+   * without turning a feature off entirely.
+   * The protection poll piggybacks at 2x the interval — it changes by the hour,
+   * not the minute. It used to be a bare setInterval with no handle, so it could
+   * never be cleared or retuned.
+   */
+  function restartTimerIntervals() {
+    if (_timerDispIv)  { clearInterval(_timerDispIv);  _timerDispIv = null; }
+    if (_timerFetchIv) { clearInterval(_timerFetchIv); _timerFetchIv = null; }
+    if (_protIv)       { clearInterval(_protIv);       _protIv = null; }
+
+    const dispMs = Math.max(2, Math.min(60, Number(cfg.timerDispSec) || 5)) * 1000;
+    const pollMs = Math.max(30, Math.min(900, Number(cfg.bgPollSec) || 60)) * 1000;
+
+    _timerDispIv = setInterval(updateTimers, dispMs);
+    _timerFetchIv = setInterval(() => {
+      if (!st.inJail && !paused && !st.acting) { collectTimers(); fetchTravel(); }
+    }, pollMs);
+    _protIv = setInterval(fetchProt, pollMs * 2);
+    dlog(APP_TAG, `[PERF] timers: display ${dispMs/1000}s, background ${pollMs/1000}s`);
   }
 
 
@@ -4797,6 +4827,28 @@
             <label class="jb-switch jb-mb" title="Verbose console logging for diagnostics. Off keeps the console quiet (real events still log)."><input type="checkbox" id="jb-debug" ${_debug?'checked':''}> 🐛 Verbose debug logging</label>
 
             <hr class="jb-sep">
+            <div class="jb-sect-title">Performance (low-RAM devices)</div>
+            <div class="jb-sub jb-mb" style="line-height:1.5">For an old tablet: raise these to cut memory and CPU. Everything else costly — Hover, SG lists, Props, Silent audio, Worker ticker — already has its own switch on the panel or above.</div>
+            <div class="jb-row">
+              <label class="jb-label" style="white-space:nowrap">Panel refresh (s):</label>
+              <input class="jb-input jb-input-sm" type="number" id="jb-perf-disp" value="${cfg.timerDispSec}" min="2" max="60">
+              <span class="jb-sub">2–60 · default 5</span>
+            </div>
+            <div class="jb-row">
+              <label class="jb-label" style="white-space:nowrap">Background polls (s):</label>
+              <input class="jb-input jb-input-sm" type="number" id="jb-perf-poll" value="${cfg.bgPollSec}" min="30" max="900" step="30">
+              <span class="jb-sub">30–900 · default 60</span>
+            </div>
+            <div class="jb-sub jb-mb" style="color:var(--jb-text-ter);font-size:9px">Each background poll parses a whole page into memory (OC, DTM, travel; protection at 2× this). Biggest single lever on a slow device.</div>
+            <div class="jb-row">
+              <label class="jb-label" style="white-space:nowrap">XP chart points:</label>
+              <input class="jb-input jb-input-sm" type="number" id="jb-perf-samples" value="${cfg.xpSampleCap}" min="20" max="400" step="20">
+              <label class="jb-label" style="white-space:nowrap">History rows:</label>
+              <input class="jb-input jb-input-sm" type="number" id="jb-perf-hist" value="${cfg.xpHistoryCap}" min="5" max="40" step="5">
+            </div>
+            <div class="jb-sub jb-mb" style="color:var(--jb-text-ter);font-size:9px">Both arrays are rewritten to storage on every XP read, so shorter is cheaper. Lowering trims on the next read and cannot be undone.</div>
+
+            <hr class="jb-sep">
             <div class="jb-sect-title">Crimes</div>
             <div id="jb-crime-opts" class="jb-mb"></div>
             <div class="jb-row">
@@ -5375,6 +5427,31 @@
       if (k) k.addEventListener('change', e => { ka.worker = e.target.checked; saveKa(); if (ka.worker) startKaWorker(); else stopKaWorker(); }); }
     { const d = _shadow.querySelector('#jb-debug');
       if (d) d.addEventListener('change', e => { _debug = e.target.checked; GM_setValue('cbDebug', _debug); }); }
+
+    // Performance — display/poll changes restart the timers immediately, so
+    // there's no reload needed to feel the effect on a struggling device.
+    { const pd = _shadow.querySelector('#jb-perf-disp');
+      if (pd) pd.addEventListener('change', e => {
+        cfg.timerDispSec = Math.max(2, Math.min(60, parseInt(e.target.value,10)||5));
+        e.target.value = cfg.timerDispSec; GM_setValue('cbTimerDispSec', cfg.timerDispSec);
+        restartTimerIntervals(); setStatus(`⚙️ Panel refresh ${cfg.timerDispSec}s`);
+      }); }
+    { const pp = _shadow.querySelector('#jb-perf-poll');
+      if (pp) pp.addEventListener('change', e => {
+        cfg.bgPollSec = Math.max(30, Math.min(900, parseInt(e.target.value,10)||60));
+        e.target.value = cfg.bgPollSec; GM_setValue('cbBgPollSec', cfg.bgPollSec);
+        restartTimerIntervals(); setStatus(`⚙️ Background polls ${cfg.bgPollSec}s`);
+      }); }
+    { const ps = _shadow.querySelector('#jb-perf-samples');
+      if (ps) ps.addEventListener('change', e => {
+        cfg.xpSampleCap = Math.max(20, Math.min(400, parseInt(e.target.value,10)||400));
+        e.target.value = cfg.xpSampleCap; GM_setValue('cbXpSampleCap', cfg.xpSampleCap);
+      }); }
+    { const ph = _shadow.querySelector('#jb-perf-hist');
+      if (ph) ph.addEventListener('change', e => {
+        cfg.xpHistoryCap = Math.max(5, Math.min(40, parseInt(e.target.value,10)||40));
+        e.target.value = cfg.xpHistoryCap; GM_setValue('cbXpHistoryCap', cfg.xpHistoryCap);
+      }); }
 
     _shadow.querySelectorAll('.jb-crime-cb').forEach(cb => cb.addEventListener('change', () => {
       st.crimes = [..._shadow.querySelectorAll('.jb-crime-cb:checked')].map(c => parseInt(c.value)); saveSt();
@@ -6125,7 +6202,7 @@
     return { rank, next: nextRank, pct, toNext: parseFloat((nextBase - xp).toFixed(2)) };
   }
 
-  /* === STATUS-BAR XP FALLBACK (2000.231) ===
+  /* === STATUS-BAR XP FALLBACK (2000.232) ===
    * hndlr.ashx?m=pst is unreliable in practice: with Jarvis running, three
    * consecutive hourly reports showed the total frozen at exactly 3944.20 — not
    * one usable value in 3+ hours. Meanwhile the game's own status bar reported
@@ -6189,7 +6266,7 @@
     onExperienceRead(d.xp);
   }
 
-  /* === ON-DEMAND STAT REFRESH (re-added 2000.231) ===
+  /* === ON-DEMAND STAT REFRESH (re-added 2000.232) ===
    * Fires the game's own status poll instead of waiting for its 15s interval,
    * which under bot navigation frequently never elapses at all. Clicking
    * #ctl00_imgRefresh runs onclick="pstats(N)" → $.getJSON('hndlr.ashx?m=pst…'),
@@ -6325,6 +6402,16 @@
   XP_ACTIONS.forEach(a => { xpNoGainStreak[a] = GM_getValue('cbXpStreak_'+a, 0); });
 
   function saveXpState() {
+    /* Enforce the configured caps here rather than inside onExperienceRead, so
+     * the XP capture path stays untouched. Both arrays are re-serialised into GM
+     * storage on every read, so on a low-RAM device their length is a real cost,
+     * not just a display limit. Lowering a cap in Settings takes effect on the
+     * next save. */
+    const sCap = Math.max(20, Math.min(400, Number(cfg.xpSampleCap) || 400));
+    const hCap = Math.max(5,  Math.min(40,  Number(cfg.xpHistoryCap) || 40));
+    if (xpState.samples.length > sCap) xpState.samples.splice(0, xpState.samples.length - sCap);
+    if (xpState.history.length > hCap) xpState.history.length = hCap;
+
     GM_setValue('cbXpTotal', xpState.total);
     GM_setValue('cbXpSessionGain', xpState.sessionGain);
     GM_setValue('cbXpSessionStart', xpState.sessionStart);
@@ -7412,12 +7499,30 @@
 
     checkJailAny();
 
-    window.addEventListener('beforeunload', () => {
+    /* Teardown on BOTH beforeunload and pagehide.
+     *
+     * Mobile browsers frequently skip beforeunload entirely — on Android it is
+     * unreliable by design, and a tab the OS discards never fires it at all. Each
+     * page load creates an AudioContext, a Worker and a wake lock; if teardown is
+     * skipped they accumulate across navigations, which on a low-RAM device is
+     * exactly the wrong thing. pagehide is the reliable mobile signal.
+     *
+     * Guarded so running twice is harmless — each stop function is idempotent.
+     */
+    let _tornDown = false;
+    const teardown = () => {
+      if (_tornDown) return;
+      _tornDown = true;
       tabs.release(); owStop(); propWatchStop();
       stopKaWorker(); stopKaAudio(); releaseWakeLock();
       if (_loopTimer) { clearTimeout(_loopTimer); _loopTimer = null; }
       if (owFlashTimer) { clearInterval(owFlashTimer); owFlashTimer = null; }
-    });
+      if (_timerDispIv)  { clearInterval(_timerDispIv);  _timerDispIv = null; }
+      if (_timerFetchIv) { clearInterval(_timerFetchIv); _timerFetchIv = null; }
+      if (_protIv)       { clearInterval(_protIv);       _protIv = null; }
+    };
+    window.addEventListener('beforeunload', teardown);
+    window.addEventListener('pagehide', teardown);
 
     window.addEventListener('storage', e => {
       if (e.key === LS_MASTER) tabs.check();
