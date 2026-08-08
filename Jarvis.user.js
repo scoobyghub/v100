@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.232
+// @version      2000.233
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -32,7 +32,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.232
+/*  Jarvis Bot 2000.233
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -119,7 +119,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.232';
+  const APP_VERSION = '2000.233';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -896,14 +896,12 @@
     awayMode:        GM_getValue('cbAwayMode', true),
     /* Performance tuning — the only costs that had no switch of their own.
      * Everything else expensive (hover, SG lists, props, silent audio, worker
-     * ticker) already has its own toggle. These are for a low-RAM device where
-     * the tab gets discarded: longer polls mean fewer parsed documents held in
-     * memory at once, and shorter XP arrays mean less kept in GM storage and
-     * re-serialised on every read. */
+     * ticker) already has its own toggle. For a low-RAM device where the tab
+     * gets discarded, longer polls mean fewer parsed documents held in memory
+     * at once — and unlike trimming stored history, raising these destroys
+     * nothing and is fully reversible. */
     timerDispSec: GM_getValue('cbTimerDispSec', 5),    // panel refresh
-    bgPollSec:    GM_getValue('cbBgPollSec', 60),      // OC/DTM/travel background fetches
-    xpSampleCap:  GM_getValue('cbXpSampleCap', 400),   // chart points retained
-    xpHistoryCap: GM_getValue('cbXpHistoryCap', 40)    // recent-gains rows retained
+    bgPollSec:    GM_getValue('cbBgPollSec', 60)       // OC/DTM/travel background fetches
   };
 
   /* === DELAY SYSTEM === */
@@ -4839,14 +4837,7 @@
               <input class="jb-input jb-input-sm" type="number" id="jb-perf-poll" value="${cfg.bgPollSec}" min="30" max="900" step="30">
               <span class="jb-sub">30–900 · default 60</span>
             </div>
-            <div class="jb-sub jb-mb" style="color:var(--jb-text-ter);font-size:9px">Each background poll parses a whole page into memory (OC, DTM, travel; protection at 2× this). Biggest single lever on a slow device.</div>
-            <div class="jb-row">
-              <label class="jb-label" style="white-space:nowrap">XP chart points:</label>
-              <input class="jb-input jb-input-sm" type="number" id="jb-perf-samples" value="${cfg.xpSampleCap}" min="20" max="400" step="20">
-              <label class="jb-label" style="white-space:nowrap">History rows:</label>
-              <input class="jb-input jb-input-sm" type="number" id="jb-perf-hist" value="${cfg.xpHistoryCap}" min="5" max="40" step="5">
-            </div>
-            <div class="jb-sub jb-mb" style="color:var(--jb-text-ter);font-size:9px">Both arrays are rewritten to storage on every XP read, so shorter is cheaper. Lowering trims on the next read and cannot be undone.</div>
+            <div class="jb-sub jb-mb" style="color:var(--jb-text-ter);font-size:9px">Each background poll parses a whole page into memory (OC, DTM, travel; protection at 2× this). Biggest single lever on a slow device, and nothing is lost by raising it.</div>
 
             <hr class="jb-sep">
             <div class="jb-sect-title">Crimes</div>
@@ -5441,16 +5432,6 @@
         cfg.bgPollSec = Math.max(30, Math.min(900, parseInt(e.target.value,10)||60));
         e.target.value = cfg.bgPollSec; GM_setValue('cbBgPollSec', cfg.bgPollSec);
         restartTimerIntervals(); setStatus(`⚙️ Background polls ${cfg.bgPollSec}s`);
-      }); }
-    { const ps = _shadow.querySelector('#jb-perf-samples');
-      if (ps) ps.addEventListener('change', e => {
-        cfg.xpSampleCap = Math.max(20, Math.min(400, parseInt(e.target.value,10)||400));
-        e.target.value = cfg.xpSampleCap; GM_setValue('cbXpSampleCap', cfg.xpSampleCap);
-      }); }
-    { const ph = _shadow.querySelector('#jb-perf-hist');
-      if (ph) ph.addEventListener('change', e => {
-        cfg.xpHistoryCap = Math.max(5, Math.min(40, parseInt(e.target.value,10)||40));
-        e.target.value = cfg.xpHistoryCap; GM_setValue('cbXpHistoryCap', cfg.xpHistoryCap);
       }); }
 
     _shadow.querySelectorAll('.jb-crime-cb').forEach(cb => cb.addEventListener('change', () => {
@@ -6202,7 +6183,7 @@
     return { rank, next: nextRank, pct, toNext: parseFloat((nextBase - xp).toFixed(2)) };
   }
 
-  /* === STATUS-BAR XP FALLBACK (2000.232) ===
+  /* === STATUS-BAR XP FALLBACK (2000.233) ===
    * hndlr.ashx?m=pst is unreliable in practice: with Jarvis running, three
    * consecutive hourly reports showed the total frozen at exactly 3944.20 — not
    * one usable value in 3+ hours. Meanwhile the game's own status bar reported
@@ -6266,7 +6247,7 @@
     onExperienceRead(d.xp);
   }
 
-  /* === ON-DEMAND STAT REFRESH (re-added 2000.232) ===
+  /* === ON-DEMAND STAT REFRESH (re-added 2000.233) ===
    * Fires the game's own status poll instead of waiting for its 15s interval,
    * which under bot navigation frequently never elapses at all. Clicking
    * #ctl00_imgRefresh runs onclick="pstats(N)" → $.getJSON('hndlr.ashx?m=pst…'),
@@ -6402,16 +6383,11 @@
   XP_ACTIONS.forEach(a => { xpNoGainStreak[a] = GM_getValue('cbXpStreak_'+a, 0); });
 
   function saveXpState() {
-    /* Enforce the configured caps here rather than inside onExperienceRead, so
-     * the XP capture path stays untouched. Both arrays are re-serialised into GM
-     * storage on every read, so on a low-RAM device their length is a real cost,
-     * not just a display limit. Lowering a cap in Settings takes effect on the
-     * next save. */
-    const sCap = Math.max(20, Math.min(400, Number(cfg.xpSampleCap) || 400));
-    const hCap = Math.max(5,  Math.min(40,  Number(cfg.xpHistoryCap) || 40));
-    if (xpState.samples.length > sCap) xpState.samples.splice(0, xpState.samples.length - sCap);
-    if (xpState.history.length > hCap) xpState.history.length = hCap;
-
+    /* No trimming here. 2000.233 briefly added configurable caps that trimmed on
+     * every save, but lowering one silently and permanently discarded stored
+     * chart history — a destructive setting sitting next to harmless ones.
+     * Removed in 233; onExperienceRead's own 400/40 limits are the only caps.
+     * The background-poll interval gives the real memory win and costs nothing. */
     GM_setValue('cbXpTotal', xpState.total);
     GM_setValue('cbXpSessionGain', xpState.sessionGain);
     GM_setValue('cbXpSessionStart', xpState.sessionStart);
