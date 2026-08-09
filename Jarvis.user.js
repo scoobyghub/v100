@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.237
+// @version      2000.239
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -32,7 +32,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.237
+/*  Jarvis Bot 2000.239
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -119,7 +119,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.237';
+  const APP_VERSION = '2000.239';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -295,8 +295,145 @@
       ribbonOnText:'#ffffff',
       ribbonOff:   '#334155',
       ribbonOffText:'#9ca3af'
+    },
+    /* Maximum legibility: near-black behind pure white, and every "secondary"
+       tone pulled far brighter than the other themes dare. Nothing here is
+       subtle — that is the point. Best pick for a dim room or tired eyes. */
+    contrast: {
+      bg:          '#000000',
+      surface:     '#0a0a0a',
+      surfaceAlt:  '#161616',
+      border:      '#3a3a3a',
+      borderStrong:'#6a6a6a',
+      text:        '#ffffff',
+      textSec:     '#e0e0e0',
+      textTer:     '#b0b0b0',
+      accent:      '#00b3ff',
+      accentHover: '#4dcaff',
+      accentLight: '#00131f',
+      success:     '#00e676',
+      warning:     '#ffd400',
+      danger:      '#ff5252',
+      dangerBg:    '#2b0000',
+      headerBg:    '#00b3ff',
+      headerText:  '#000000',
+      inputBg:     '#000000',
+      inputBorder: '#8a8a8a',
+      shadow:      '0 0 0 1px #6a6a6a, 0 4px 12px rgba(0,0,0,.9)',
+      switchOn:    '#00e676',
+      switchOff:   '#5a5a5a',
+      ribbonBg:    '#0a0a0a',
+      ribbonBorder:'#3a3a3a',
+      ribbonOn:    '#00e676',
+      ribbonOnText:'#000000',
+      ribbonOff:   '#3a3a3a',
+      ribbonOffText:'#e0e0e0'
+    },
+    // Deep blue dark — softer than pure dark, still high separation.
+    midnight: {
+      bg:          '#0d1b2a',
+      surface:     '#12263a',
+      surfaceAlt:  '#1b3a4d',
+      border:      '#274b6d',
+      borderStrong:'#3d6a92',
+      text:        '#e8f1f8',
+      textSec:     '#a9c4da',
+      textTer:     '#7d9db6',
+      accent:      '#4cc9f0',
+      accentHover: '#7ad9f7',
+      accentLight: '#123449',
+      success:     '#52d98a',
+      warning:     '#ffc857',
+      danger:      '#ff6b6b',
+      dangerBg:    '#3d1a1a',
+      headerBg:    'linear-gradient(180deg, #17324c, #12263a)',
+      headerText:  '#e8f1f8',
+      inputBg:     '#0d1b2a',
+      inputBorder: '#3d6a92',
+      shadow:      '0 2px 8px rgba(0,0,0,.6)',
+      switchOn:    '#4cc9f0',
+      switchOff:   '#3d6a92',
+      ribbonBg:    '#12263a',
+      ribbonBorder:'#274b6d',
+      ribbonOn:    '#4cc9f0',
+      ribbonOnText:'#04283a',
+      ribbonOff:   '#274b6d',
+      ribbonOffText:'#a9c4da'
+    },
+    // Warm and low-blue — easier for long evening sessions.
+    amber: {
+      bg:          '#1c1710',
+      surface:     '#241d14',
+      surfaceAlt:  '#2f261a',
+      border:      '#453724',
+      borderStrong:'#63502f',
+      text:        '#f5e6d0',
+      textSec:     '#d4bd9a',
+      textTer:     '#a8916f',
+      accent:      '#ffab40',
+      accentHover: '#ffc06b',
+      accentLight: '#3a2a12',
+      success:     '#a8c256',
+      warning:     '#ffd54f',
+      danger:      '#e57373',
+      dangerBg:    '#3a1f1c',
+      headerBg:    '#8a5a1a',
+      headerText:  '#fff6e6',
+      inputBg:     '#1c1710',
+      inputBorder: '#63502f',
+      shadow:      '0 2px 8px rgba(0,0,0,.55)',
+      switchOn:    '#ffab40',
+      switchOff:   '#453724',
+      ribbonBg:    '#241d14',
+      ribbonBorder:'#453724',
+      ribbonOn:    '#ffab40',
+      ribbonOnText:'#2b1c05',
+      ribbonOff:   '#453724',
+      ribbonOffText:'#d4bd9a'
+    },
+    // Bright, low-glare light alternative to the stark white Office one.
+    ocean: {
+      bg:          '#eef4f8',
+      surface:     '#ffffff',
+      surfaceAlt:  '#e3edf4',
+      border:      '#cbdce8',
+      borderStrong:'#9ebacd',
+      text:        '#10303f',
+      textSec:     '#3c5f73',
+      textTer:     '#6c8ba0',
+      accent:      '#00796b',
+      accentHover: '#00968a',
+      accentLight: '#d3ece8',
+      success:     '#2e7d32',
+      warning:     '#a1651a',
+      danger:      '#b3261e',
+      dangerBg:    '#fbe2e0',
+      headerBg:    '#00796b',
+      headerText:  '#ffffff',
+      inputBg:     '#ffffff',
+      inputBorder: '#7fa3b8',
+      shadow:      '0 1.6px 4px rgba(16,48,63,.18)',
+      switchOn:    '#00796b',
+      switchOff:   '#9ebacd',
+      ribbonBg:    '#e3edf4',
+      ribbonBorder:'#cbdce8',
+      ribbonOn:    '#00796b',
+      ribbonOnText:'#ffffff',
+      ribbonOff:   '#cbdce8',
+      ribbonOffText:'#10303f'
     }
   };
+
+  // Order + labels for the picker and the header cycle button.
+  const THEME_LIST = [
+    ['dark',     '◑ Dark'],
+    ['light',    '☀ Light'],
+    ['classic',  '🟢 Classic'],
+    ['contrast', '⬛ High contrast'],
+    ['midnight', '🌌 Midnight'],
+    ['amber',    '🔶 Amber (warm)'],
+    ['ocean',    '🌊 Ocean (light)']
+  ];
 
   let activeTheme = GM_getValue('cbTheme', 'dark');
   function T() { return THEMES[activeTheme] || THEMES.dark; }
@@ -903,6 +1040,8 @@
      * gets discarded, longer polls mean fewer parsed documents held in memory
      * at once — and unlike trimming stored history, raising these destroys
      * nothing and is fully reversible. */
+    // Panel text size: 'n' normal, 'l' large, 'x' largest (also widens the panel).
+    uiSize:       GM_getValue('cbUiSize', 'n'),
     timerDispSec: GM_getValue('cbTimerDispSec', 5),    // panel refresh
     bgPollSec:    GM_getValue('cbBgPollSec', 60),      // OC/DTM/travel background fetches
     // Anti-bot / soft-ban message detection — pauses everything and alerts.
@@ -1765,6 +1904,30 @@
     { id:4, name:'Rob a store',         el:'ctl00_main_btnCrime4' },
     { id:5, name:'Rob a bank',          el:'ctl00_main_btnCrime5' }
   ];
+
+  /* === EXCLUDED CRIMES — NEVER AUTOMATE ===
+   * ctl00_main_btnCrime6 is "Pick a player's pockets": a crime aimed at another
+   * PLAYER, not an NPC target. Everything else on the page is victimless as far
+   * as the community is concerned; this one steals from a real person and invites
+   * retaliation, so it is off-limits to automation regardless of its odds.
+   *
+   * It is absent from CRIMES and the settings list, so today it cannot be picked.
+   * That is an accident of two hardcoded bounds (this array, and the 1..5 fallback
+   * loop in doCrime) rather than a stated rule — change either and it would
+   * silently become selectable. This set makes the exclusion explicit and is
+   * enforced at the point of click, so no future edit can re-enable it by mistake.
+   *
+   * Note it is an <input type="image">, so it looks nothing like the others in the
+   * DOM and would not stand out in a selector sweep.
+   */
+  const EXCLUDED_CRIME_IDS = new Set([6]);
+  const EXCLUDED_CRIME_ELS = new Set(['ctl00_main_btnCrime6']);
+
+  function crimeAllowed(id, el) {
+    if (EXCLUDED_CRIME_IDS.has(Number(id))) return false;
+    if (el && el.id && EXCLUDED_CRIME_ELS.has(el.id)) return false;
+    return true;
+  }
   const GTAS = [
     { id:1, name:'Public parking lot',  val:'1' },
     { id:2, name:'Building parking lot',val:'2' },
@@ -4002,7 +4165,7 @@
     const el = _shadow.querySelector('#jb-smart-preview');
     if (!el) return;
     if (!cfg.smartPick) { el.textContent = 'random mode'; return; }
-    const ids = (st.crimes && st.crimes.length) ? st.crimes : [1,2,3,4,5];
+    const ids = ((st.crimes && st.crimes.length) ? st.crimes : [1,2,3,4,5]).filter(id => crimeAllowed(id));
     const rated = ids.map(id => ({ id, pct: crimeSuccessPct(id) })).filter(c => c.pct !== null);
     if (!rated.length) { el.textContent = 'open a crimes page'; return; }
     const floor = Math.max(0, Math.min(100, Number(cfg.smartMinPct) || 0));
@@ -4055,6 +4218,8 @@
     if (st.crimes.length > 0) {
       avail = st.crimes.map(id => { const c = CRIMES.find(x=>x.id===id); if(c) { const b = document.getElementById(c.el); if(b && !b.disabled) return { id, btn:b }; } return null; }).filter(Boolean);
     } else { for(let i=1;i<=5;i++) { const b = document.getElementById(`ctl00_main_btnCrime${i}`); if(b && !b.disabled) avail.push({ id:i, btn:b }); } }
+    // Drop anything excluded (pickpocket) before a pick is even considered.
+    avail = avail.filter(c => crimeAllowed(c.id, c.btn));
     if (!avail.length) {
       const rk = 'cbCrimeRetry';
       const rc = parseInt(localStorage.getItem(rk)||'0',10);
@@ -4063,8 +4228,17 @@
     }
     localStorage.removeItem('cbCrimeRetry');
     // Click immediately — humans click fast, the delay is in the cooldown
+    const chosenBtn = pickCrime(avail);
+    /* Last line of defence. The filter above should make this unreachable, but an
+     * excluded crime must never be clicked, so the check sits on the click itself
+     * rather than only on the paths that lead to it. */
+    if (!chosenBtn || (chosenBtn.id && EXCLUDED_CRIME_ELS.has(chosenBtn.id))) {
+      console.warn(APP_TAG, '[CRIME] Refusing excluded crime button:', chosenBtn && chosenBtn.id);
+      st.acting = false; st.action = ''; GM_setValue('cbActStart', 0);
+      return;
+    }
     snapshotXP('crime');
-    pickCrime(avail).click();
+    chosenBtn.click();
     incDailyCount('crime');
     st.lastCrime = now; markActed('crime', cfg.crimeInt); st.refresh = true; donePending('crime'); saveSt();
     // Short reset — just enough for the page to process the click
@@ -5281,6 +5455,54 @@
         background: transparent; color: var(--jb-accent); border: 1px solid var(--jb-accent);
       }
       .jb-btn-outline:hover { background: var(--jb-accent-light); }
+      /* Tabbed settings. The modal had grown to 18 stacked sections in one
+         scroll — finding anything meant hunting. Panes keep the daily-use panel
+         (UI 1) untouched and give UI 2 a shape you can navigate. */
+      .jb-tabs {
+        display: flex; flex-wrap: wrap; gap: 3px;
+        margin: -12px -12px 10px -12px; padding: 6px 8px;
+        background: var(--jb-surface-alt); border-bottom: 1px solid var(--jb-border);
+        position: sticky; top: 0; z-index: 2;
+      }
+      .jb-tab {
+        flex: 1 1 auto; background: transparent; color: var(--jb-text-sec);
+        border: 1px solid transparent; border-radius: 3px;
+        padding: 4px 6px; font-size: 10px; font-weight: 600; cursor: pointer;
+        font-family: inherit; white-space: nowrap; transition: background .15s, color .15s;
+      }
+      .jb-tab:hover { background: var(--jb-border); color: var(--jb-text); }
+      .jb-tab.active {
+        background: var(--jb-accent); color: #fff; border-color: var(--jb-accent);
+      }
+      .jb-pane { display: none; }
+      .jb-pane.active { display: block; }
+
+      /* Text size. Much of the panel carries INLINE font-size (9-11px) written
+         straight into the markup, so a plain font-size bump on .jb-root moves
+         almost nothing. These overrides deliberately use !important — it is the
+         only thing that beats an inline style, and legibility beats tidiness.
+         The panel widens with the text so nothing wraps into a mess. */
+      .jb-root.jb-lg { width: 355px; font-size: 13px; }
+      .jb-root.jb-lg .jb-sub, .jb-root.jb-lg .jb-switch,
+      .jb-root.jb-lg .jb-timer-grid, .jb-root.jb-lg .jb-input,
+      .jb-root.jb-lg label.jb-label, .jb-root.jb-lg .jb-btn,
+      .jb-root.jb-lg .jb-ribbon-btn, .jb-root.jb-lg .jb-tab,
+      .jb-root.jb-lg .jb-sect-title, .jb-root.jb-lg .jb-footer,
+      .jb-root.jb-lg [style*="font-size:9px"], .jb-root.jb-lg [style*="font-size:10px"],
+      .jb-root.jb-lg [style*="font-size:11px"] { font-size: 12px !important; }
+      .jb-root.jb-lg .jb-timer-grid { grid-template-columns: 56px 1fr 56px 1fr; }
+
+      .jb-root.jb-xl { width: 410px; font-size: 15px; }
+      .jb-root.jb-xl .jb-sub, .jb-root.jb-xl .jb-switch,
+      .jb-root.jb-xl .jb-timer-grid, .jb-root.jb-xl .jb-input,
+      .jb-root.jb-xl label.jb-label, .jb-root.jb-xl .jb-btn,
+      .jb-root.jb-xl .jb-ribbon-btn, .jb-root.jb-xl .jb-tab,
+      .jb-root.jb-xl .jb-sect-title, .jb-root.jb-xl .jb-footer,
+      .jb-root.jb-xl [style*="font-size:9px"], .jb-root.jb-xl [style*="font-size:10px"],
+      .jb-root.jb-xl [style*="font-size:11px"] { font-size: 14px !important; }
+      .jb-root.jb-xl .jb-timer-grid { grid-template-columns: 64px 1fr 64px 1fr; }
+      .jb-root.jb-xl .jb-input-sm { width: 84px; }
+      .jb-root.jb-xl .jb-footer { min-height: 120px; max-height: 120px; }
       .jb-sep { border: none; border-top: 1px solid var(--jb-border); margin: 8px 0; }
       .jb-sub { font-size: 10px; color: var(--jb-text-ter); }
       .jb-row { display: flex; gap: 6px; align-items: center; margin-bottom: 4px; }
@@ -5416,45 +5638,14 @@
             <button class="jb-hbtn" id="jb-modal-close">✕</button>
           </div>
           <div class="jb-modal-body" id="jb-settings-body">
-            <div class="jb-sect-title">Login</div>
-            <div class="jb-mb">
-              <label class="jb-label">Username</label>
-              <input class="jb-input" id="jb-login-user" value="${LOGIN.user}">
+            <div class="jb-tabs" id="jb-tabs">
+              <button class="jb-tab" data-tab="actions">⚡ Actions</button>
+              <button class="jb-tab" data-tab="assets">🏪 Assets</button>
+              <button class="jb-tab" data-tab="alerts">🔔 Alerts</button>
+              <button class="jb-tab" data-tab="human">🕵️ Human</button>
+              <button class="jb-tab" data-tab="system">⚙️ System</button>
             </div>
-            <div class="jb-mb">
-              <label class="jb-label">Password</label>
-              <input class="jb-input" id="jb-login-pass" type="text" value="${LOGIN.pass}">
-            </div>
-            <label class="jb-switch jb-mb"><input type="checkbox" id="jb-auto-submit" ${LOGIN.autoSubmit?'checked':''}> Auto-submit</label>
-            <div class="jb-mb">
-              <label class="jb-label">CapSolver key (optional — auto-solves captcha; blank = manual)</label>
-              <input class="jb-input" id="jb-capsolver-key" type="text" value="${esc(getCapsolverKey())}" placeholder="CAP-… (paid service)">
-            </div>
-
-            <hr class="jb-sep">
-            <div class="jb-sect-title">Keep-alive (anti-throttle)</div>
-            <label class="jb-switch jb-mb" title="Silent inaudible tone — stops the browser throttling this tab in the background. Most effective option."><input type="checkbox" id="jb-ka-audio" ${ka.audio?'checked':''}> 🔊 Silent audio</label>
-            <label class="jb-switch jb-mb" title="Stops the screen sleeping while this tab is visible. Does not prevent the PC sleeping."><input type="checkbox" id="jb-ka-wake" ${ka.wakeLock?'checked':''}> 💡 Screen wake lock</label>
-            <label class="jb-switch jb-mb" title="Background worker ticker — keeps the loop and master heartbeat alive when timers are throttled."><input type="checkbox" id="jb-ka-worker" ${ka.worker?'checked':''}> ⚙️ Worker ticker</label>
-            <div class="jb-label" style="opacity:.75;line-height:1.5">Note: nothing here can keep running if Windows sleeps. Set power mode to Never sleep, and in Chrome add tmn2010.net to "Always keep these sites active" under Performance.</div>
-            <label class="jb-switch jb-mb" title="Verbose console logging for diagnostics. Off keeps the console quiet (real events still log)."><input type="checkbox" id="jb-debug" ${_debug?'checked':''}> 🐛 Verbose debug logging</label>
-
-            <hr class="jb-sep">
-            <div class="jb-sect-title">Performance (low-RAM devices)</div>
-            <div class="jb-sub jb-mb" style="line-height:1.5">For an old tablet: raise these to cut memory and CPU. Everything else costly — Hover, SG lists, Props, Silent audio, Worker ticker — already has its own switch on the panel or above.</div>
-            <div class="jb-row">
-              <label class="jb-label" style="white-space:nowrap">Panel refresh (s):</label>
-              <input class="jb-input jb-input-sm" type="number" id="jb-perf-disp" value="${cfg.timerDispSec}" min="2" max="60">
-              <span class="jb-sub">2–60 · default 5</span>
-            </div>
-            <div class="jb-row">
-              <label class="jb-label" style="white-space:nowrap">Background polls (s):</label>
-              <input class="jb-input jb-input-sm" type="number" id="jb-perf-poll" value="${cfg.bgPollSec}" min="30" max="900" step="30">
-              <span class="jb-sub">30–900 · default 60</span>
-            </div>
-            <div class="jb-sub jb-mb" style="color:var(--jb-text-ter);font-size:9px">Each background poll parses a whole page into memory (OC, DTM, travel; protection at 2× this). Biggest single lever on a slow device, and nothing is lost by raising it.</div>
-
-            <hr class="jb-sep">
+            <div class="jb-pane" data-pane="actions">
             <div class="jb-sect-title">Action selection</div>
             <label class="jb-switch jb-mb" title="OFF = pick at random from the crimes you've ticked, and buy a fixed booze amount. ON = pick the most valuable crime still succeeding at or above the threshold below, and buy your full rank carry limit of booze."><input type="checkbox" id="jb-smartpick" ${cfg.smartPick?'checked':''}> 🎯 <span id="jb-smartpick-label">${cfg.smartPick?'Smart (best value)':'Random (spread)'}</span></label>
             <div class="jb-row jb-mb">
@@ -5463,7 +5654,6 @@
               <span class="jb-sub" id="jb-smart-preview">—</span>
             </div>
             <div class="jb-sub jb-mb" style="color:var(--jb-text-ter);font-size:9px">Smart takes the <b>most valuable</b> crime still at or above that success rate — not simply the safest. At high rank the odds barely differ (sampled 97/95/94/94/90%), so picking on odds alone would always choose the cheapest crime. The game re-rolls the odds every visit, so this is re-decided from the live page each time: on a bad roll it steps down to the best crime that's safe enough, and back up next visit. The preview above is a snapshot of right now. Raise to play safer, lower to reach for bigger jobs. Booze: smart buys your rank carry limit and sells 1–3 at a time.</div>
-
             <hr class="jb-sep">
             <div class="jb-sect-title">Daily limits</div>
             <label class="jb-switch jb-mb" title="Hard cap on attempts per action per game-day. Separate from the no-XP limiter, which infers the game's own cap."><input type="checkbox" id="jb-daily-on" ${cfg.dailyLimitOn?'checked':''}> 📅 Per-action daily limits</label>
@@ -5479,7 +5669,6 @@
               <span class="jb-sub">0 = unlimited · resets 00:00 game time</span>
             </div>
             <div class="jb-sub jb-mb" id="jb-daily-status" style="color:var(--jb-text-ter);font-size:9px">Jail has its own limit in the Jail section.</div>
-
             <hr class="jb-sep">
             <div class="jb-sect-title">Crimes</div>
             <div id="jb-crime-opts" class="jb-mb"></div>
@@ -5487,7 +5676,6 @@
               <label class="jb-label">Interval (s):</label>
               <input class="jb-input jb-input-sm" type="number" id="jb-crime-int" value="${cfg.crimeInt}" min="1" max="999">
             </div>
-
             <hr class="jb-sep">
             <div class="jb-sect-title">GTA</div>
             <div id="jb-gta-opts" class="jb-mb"></div>
@@ -5495,7 +5683,6 @@
               <label class="jb-label">Interval (s):</label>
               <input class="jb-input jb-input-sm" type="number" id="jb-gta-int" value="${cfg.gtaInt}" min="1" max="999">
             </div>
-
             <hr class="jb-sep">
             <div class="jb-sect-title">Booze</div>
             <div class="jb-row">
@@ -5506,7 +5693,6 @@
               <label class="jb-label">Sell:</label>
               <input class="jb-input jb-input-sm" type="number" id="jb-booze-sell" value="${cfg.boozeSell}">
             </div>
-
             <hr class="jb-sep">
             <div class="jb-sect-title">Jail</div>
             <div class="jb-row">
@@ -5535,8 +5721,8 @@
             <div class="jb-sub jb-mb">Today: <span id="jb-jail-count-settings">${getJailCount()}/${cfg.jailDailyLimit}</span> · resets 00:00 game time
               <button class="jb-btn jb-btn-outline" id="jb-jail-reset" style="margin-left:6px;padding:1px 6px;font-size:9px">Reset now</button>
             </div>
-
-            <hr class="jb-sep">
+            </div>
+            <div class="jb-pane" data-pane="assets">
             <div class="jb-sect-title">Health</div>
             <div class="jb-row">
               <label class="jb-label">Min %:</label>
@@ -5549,33 +5735,6 @@
               <button class="jb-btn jb-btn-outline" id="jb-heal-now" style="padding:2px 8px;font-size:10px">Heal now</button>
               <span class="jb-sub" id="jb-heal-status">Buys repeatedly until Target %, or credits run out.</span>
             </div>
-
-            <hr class="jb-sep">
-            <div class="jb-sect-title">Scrap → FMJ</div>
-            <label class="jb-switch jb-mb" title="Converts scrap into bullets at store.aspx?p=s — 5 scrap per 1000 FMJ. One purchase per page load to stay under the game's ~2s rate limit."><input type="checkbox" id="jb-scrap-on" ${cfg.scrapOn?'checked':''}> ♻️ Convert scrap to FMJ</label>
-            <label class="jb-switch jb-mb" title="Armoured Vehicle protection costs 5 scrap and the link only appears while you don't own it. Bought once, before any bullets."><input type="checkbox" id="jb-scrap-prot" ${cfg.scrapProt?'checked':''}> 🛡️ Buy Armoured Vehicle protection first</label>
-            <div class="jb-row jb-mb">
-              <label class="jb-label" style="white-space:nowrap">Keep at least:</label>
-              <input class="jb-input jb-input-sm" type="number" id="jb-scrap-floor" value="${cfg.scrapFloor}" min="5" max="10000" step="5">
-              <span class="jb-sub">scrap in reserve</span>
-            </div>
-            <div class="jb-sub jb-mb" style="color:var(--jb-text-ter);font-size:9px">Below the reserve it stops and re-checks in 6 hours. Converted so far: <span id="jb-scrap-runs">${GM_getValue('cbScrapRuns',0)}</span>k FMJ.</div>
-
-            <hr class="jb-sep">
-            <div class="jb-sect-title">DTM partner kick</div>
-            <label class="jb-switch jb-mb" title="Drop a partner who never accepts, or kick one who takes the seat then stalls. Never kicks a partner showing Ready — they've bought their drugs and kicking destroys the purchase."><input type="checkbox" id="jb-dtmkick-on" ${cfg.dtmKickOn?'checked':''}> 🥾 Drop / kick a stalled partner</label>
-            <div class="jb-row">
-              <label class="jb-label" style="white-space:nowrap">Invite timeout:</label>
-              <input class="jb-input jb-input-sm" type="number" id="jb-dtmkick-wait" value="${cfg.dtmKickWaitSec}" min="30" max="1800" step="30">
-              <span class="jb-sub">s — never accepted</span>
-            </div>
-            <div class="jb-row jb-mb">
-              <label class="jb-label" style="white-space:nowrap">Seated grace:</label>
-              <input class="jb-input jb-input-sm" type="number" id="jb-dtmkick-grace" value="${cfg.dtmKickGraceSec}" min="30" max="1800" step="30">
-              <span class="jb-sub">s — accepted but stalled</span>
-            </div>
-            <div class="jb-sub jb-mb" style="color:var(--jb-text-ter);font-size:9px">A random 0–60s is added to the invite timeout so the drop isn't a predictable round number. The seat is re-checked live immediately before any kick — the kick removes whoever is seated at that instant, not who was seated when the page loaded.</div>
-
             <hr class="jb-sep">
             <div class="jb-sect-title">Garage</div>
             <div class="jb-row">
@@ -5608,8 +5767,18 @@
               </div>
               <button class="jb-btn jb-btn-outline" id="jb-cc-reset" style="margin-top:6px;font-size:9px;padding:2px 8px">Reset to defaults</button>
             </div>
-
             <hr class="jb-sep">
+            <div class="jb-sect-title">Scrap → FMJ</div>
+            <label class="jb-switch jb-mb" title="Converts scrap into bullets at store.aspx?p=s — 5 scrap per 1000 FMJ. One purchase per page load to stay under the game's ~2s rate limit."><input type="checkbox" id="jb-scrap-on" ${cfg.scrapOn?'checked':''}> ♻️ Convert scrap to FMJ</label>
+            <label class="jb-switch jb-mb" title="Armoured Vehicle protection costs 5 scrap and the link only appears while you don't own it. Bought once, before any bullets."><input type="checkbox" id="jb-scrap-prot" ${cfg.scrapProt?'checked':''}> 🛡️ Buy Armoured Vehicle protection first</label>
+            <div class="jb-row jb-mb">
+              <label class="jb-label" style="white-space:nowrap">Keep at least:</label>
+              <input class="jb-input jb-input-sm" type="number" id="jb-scrap-floor" value="${cfg.scrapFloor}" min="5" max="10000" step="5">
+              <span class="jb-sub">scrap in reserve</span>
+            </div>
+            <div class="jb-sub jb-mb" style="color:var(--jb-text-ter);font-size:9px">Below the reserve it stops and re-checks in 6 hours. Converted so far: <span id="jb-scrap-runs">${GM_getValue('cbScrapRuns',0)}</span>k FMJ.</div>
+            </div>
+            <div class="jb-pane" data-pane="alerts">
             <div class="jb-sect-title">Telegram</div>
             <label class="jb-switch jb-mb"><input type="checkbox" id="jb-tg-on" ${tg.enabled?'checked':''}> Enable</label>
             <div class="jb-mb">
@@ -5646,35 +5815,14 @@
                 ${TG_MSGS.map(m => `<label class="jb-switch" style="font-size:10px"><input type="checkbox" class="jb-tgmsg-cb" data-key="${m.key}" ${tgMsgOn[m.key]?'checked':''}> ${m.label}</label>`).join('')}
               </div>
             </div>
-
             <hr class="jb-sep">
             <div class="jb-sect-title">Logout Alerts</div>
             <div class="jb-grid jb-mb">
               <label class="jb-switch"><input type="checkbox" id="jb-lo-flash" ${logoutAlert.tabFlash?'checked':''}> Tab Flash</label>
               <label class="jb-switch"><input type="checkbox" id="jb-lo-notify" ${logoutAlert.notify?'checked':''}> Browser Notify</label>
             </div>
-
-            <hr class="jb-sep">
-            <div class="jb-sect-title">Advanced</div>
-            <label class="jb-switch jb-mb"><input type="checkbox" id="jb-resume" ${resume.on?'checked':''}> Auto-Resume</label>
-            <label class="jb-switch jb-mb"><input type="checkbox" id="jb-stats-on" ${stats.on?'checked':''}> Stats Collection</label>
-            <label class="jb-switch jb-mb" title="Derive XP from the status-bar rank %, which is server-rendered on every page load. Corrects the total when hndlr.ashx stops delivering. Verified accurate to 0.07 XP against a live payload."><input type="checkbox" id="jb-xpbar-on" ${GM_getValue('cbXpBarOn',true)!==false?'checked':''}> 📊 Status-bar XP fallback</label>
-            <label class="jb-switch jb-mb"><input type="checkbox" id="jb-noxp-on" ${cfg.noXpLimiterOn?'checked':''}> 📉 No-XP daily limiter</label>
-            <div class="jb-row jb-mb">
-              <label class="jb-label">No-XP streak limit:</label>
-              <input class="jb-input jb-input-sm" type="number" id="jb-noxp-streak" value="${cfg.noXpStreakLimit}" min="2" max="20">
             </div>
-            <div class="jb-sub jb-mb" style="color:var(--jb-text-ter);font-size:9px">If an action gains no XP this many times in a row, it's treated as the game's daily cap and disabled until the next game-day.</div>
-            <div class="jb-row jb-mb" title="Also cap an action that has gained no XP for this long despite still firing. In Away cadence an action may only fire a few times an hour, so a 5-attempt streak can take most of an evening to trip.">
-              <label class="jb-label">Or no XP for (min):</label>
-              <input class="jb-input jb-input-sm" type="number" id="jb-noxp-stale" value="${cfg.noXpStaleMin}" min="0" max="600" step="5">
-              <span class="jb-sub">0 = off</span>
-            </div>
-
-            <label class="jb-switch jb-mb" title="Detects the game's Important-message panel when it carries a warning or soft ban, pauses everything, and alerts repeatedly until you see it. Never auto-answers anything."><input type="checkbox" id="jb-antibot-on" ${cfg.antiBotOn?'checked':''}> 🚨 Anti-bot / soft-ban detection</label>
-            <div class="jb-sub jb-mb" id="jb-antibot-status" style="color:var(--jb-text-ter);font-size:9px">Pauses on detection and parses the stated expiry, so the pause lifts by itself. Staff questions are untouched — they still go through the script-check path.</div>
-
-            <hr class="jb-sep">
+            <div class="jb-pane" data-pane="human">
             <div class="jb-sect-title">Breaks (Human Simulation)</div>
 
             <label class="jb-switch jb-mb"><input type="checkbox" id="jb-coffee-on" ${breaks.coffeeOn?'checked':''}> ☕ Coffee Breaks</label>
@@ -5729,11 +5877,85 @@
             <label class="jb-switch jb-mb" title="Signs out properly when the sleep window opens, instead of leaving the session open to time out. Logs back in automatically at wake time."><input type="checkbox" id="jb-sleep-logout" ${breaks.sleepLogout?'checked':''}> Log out on sleep</label>
             <div class="jb-sub jb-mb" style="color:var(--jb-warning)">⚠️ Health is monitored during coffee/lunch breaks. With "Logout on sleep" ON, no health monitoring while logged out overnight.</div>
             <div class="jb-sub jb-mb" id="jb-break-status">Break status: ${getBreakStatus().msg||'None active'}</div>
+            </div>
+            <div class="jb-pane" data-pane="system">
+            <div class="jb-sect-title">Appearance</div>
+            <div class="jb-row">
+              <label class="jb-label" style="white-space:nowrap">Colour scheme:</label>
+              <select class="jb-input" id="jb-theme-sel" style="flex:1">
+                ${THEME_LIST.map(([k,l]) => `<option value="${k}" ${activeTheme===k?'selected':''}>${l}</option>`).join('')}
+              </select>
+            </div>
+            <div class="jb-row jb-mb">
+              <label class="jb-label" style="white-space:nowrap">Text size:</label>
+              <select class="jb-input" id="jb-uisize-sel" style="flex:1">
+                <option value="n" ${cfg.uiSize==='n'?'selected':''}>Normal</option>
+                <option value="l" ${cfg.uiSize==='l'?'selected':''}>Large</option>
+                <option value="x" ${cfg.uiSize==='x'?'selected':''}>Largest</option>
+              </select>
+            </div>
+            <div class="jb-sub jb-mb" style="color:var(--jb-text-ter);font-size:9px">The ◑ button in the title bar cycles the same schemes. <b>High contrast</b> is the one to reach for if anything is hard to read; <b>Amber</b> is warmer for long evenings. Larger text also widens the panel so nothing wraps.</div>
 
+            <hr class="jb-sep">
+            <div class="jb-sect-title">Login</div>
+            <div class="jb-mb">
+              <label class="jb-label">Username</label>
+              <input class="jb-input" id="jb-login-user" value="${LOGIN.user}">
+            </div>
+            <div class="jb-mb">
+              <label class="jb-label">Password</label>
+              <input class="jb-input" id="jb-login-pass" type="text" value="${LOGIN.pass}">
+            </div>
+            <label class="jb-switch jb-mb"><input type="checkbox" id="jb-auto-submit" ${LOGIN.autoSubmit?'checked':''}> Auto-submit</label>
+            <div class="jb-mb">
+              <label class="jb-label">CapSolver key (optional — auto-solves captcha; blank = manual)</label>
+              <input class="jb-input" id="jb-capsolver-key" type="text" value="${esc(getCapsolverKey())}" placeholder="CAP-… (paid service)">
+            </div>
+            <hr class="jb-sep">
+            <div class="jb-sect-title">Keep-alive (anti-throttle)</div>
+            <label class="jb-switch jb-mb" title="Silent inaudible tone — stops the browser throttling this tab in the background. Most effective option."><input type="checkbox" id="jb-ka-audio" ${ka.audio?'checked':''}> 🔊 Silent audio</label>
+            <label class="jb-switch jb-mb" title="Stops the screen sleeping while this tab is visible. Does not prevent the PC sleeping."><input type="checkbox" id="jb-ka-wake" ${ka.wakeLock?'checked':''}> 💡 Screen wake lock</label>
+            <label class="jb-switch jb-mb" title="Background worker ticker — keeps the loop and master heartbeat alive when timers are throttled."><input type="checkbox" id="jb-ka-worker" ${ka.worker?'checked':''}> ⚙️ Worker ticker</label>
+            <div class="jb-label" style="opacity:.75;line-height:1.5">Note: nothing here can keep running if Windows sleeps. Set power mode to Never sleep, and in Chrome add tmn2010.net to "Always keep these sites active" under Performance.</div>
+            <label class="jb-switch jb-mb" title="Verbose console logging for diagnostics. Off keeps the console quiet (real events still log)."><input type="checkbox" id="jb-debug" ${_debug?'checked':''}> 🐛 Verbose debug logging</label>
+            <hr class="jb-sep">
+            <div class="jb-sect-title">Performance (low-RAM devices)</div>
+            <div class="jb-sub jb-mb" style="line-height:1.5">For an old tablet: raise these to cut memory and CPU. Everything else costly — Hover, SG lists, Props, Silent audio, Worker ticker — already has its own switch on the panel or above.</div>
+            <div class="jb-row">
+              <label class="jb-label" style="white-space:nowrap">Panel refresh (s):</label>
+              <input class="jb-input jb-input-sm" type="number" id="jb-perf-disp" value="${cfg.timerDispSec}" min="2" max="60">
+              <span class="jb-sub">2–60 · default 5</span>
+            </div>
+            <div class="jb-row">
+              <label class="jb-label" style="white-space:nowrap">Background polls (s):</label>
+              <input class="jb-input jb-input-sm" type="number" id="jb-perf-poll" value="${cfg.bgPollSec}" min="30" max="900" step="30">
+              <span class="jb-sub">30–900 · default 60</span>
+            </div>
+            <div class="jb-sub jb-mb" style="color:var(--jb-text-ter);font-size:9px">Each background poll parses a whole page into memory (OC, DTM, travel; protection at 2× this). Biggest single lever on a slow device, and nothing is lost by raising it.</div>
+            <hr class="jb-sep">
+            <div class="jb-sect-title">Advanced</div>
+            <label class="jb-switch jb-mb"><input type="checkbox" id="jb-resume" ${resume.on?'checked':''}> Auto-Resume</label>
+            <label class="jb-switch jb-mb"><input type="checkbox" id="jb-stats-on" ${stats.on?'checked':''}> Stats Collection</label>
+            <label class="jb-switch jb-mb" title="Derive XP from the status-bar rank %, which is server-rendered on every page load. Corrects the total when hndlr.ashx stops delivering. Verified accurate to 0.07 XP against a live payload."><input type="checkbox" id="jb-xpbar-on" ${GM_getValue('cbXpBarOn',true)!==false?'checked':''}> 📊 Status-bar XP fallback</label>
+            <label class="jb-switch jb-mb"><input type="checkbox" id="jb-noxp-on" ${cfg.noXpLimiterOn?'checked':''}> 📉 No-XP daily limiter</label>
+            <div class="jb-row jb-mb">
+              <label class="jb-label">No-XP streak limit:</label>
+              <input class="jb-input jb-input-sm" type="number" id="jb-noxp-streak" value="${cfg.noXpStreakLimit}" min="2" max="20">
+            </div>
+            <div class="jb-sub jb-mb" style="color:var(--jb-text-ter);font-size:9px">If an action gains no XP this many times in a row, it's treated as the game's daily cap and disabled until the next game-day.</div>
+            <div class="jb-row jb-mb" title="Also cap an action that has gained no XP for this long despite still firing. In Away cadence an action may only fire a few times an hour, so a 5-attempt streak can take most of an evening to trip.">
+              <label class="jb-label">Or no XP for (min):</label>
+              <input class="jb-input jb-input-sm" type="number" id="jb-noxp-stale" value="${cfg.noXpStaleMin}" min="0" max="600" step="5">
+              <span class="jb-sub">0 = off</span>
+            </div>
+
+            <label class="jb-switch jb-mb" title="Detects the game's Important-message panel when it carries a warning or soft ban, pauses everything, and alerts repeatedly until you see it. Never auto-answers anything."><input type="checkbox" id="jb-antibot-on" ${cfg.antiBotOn?'checked':''}> 🚨 Anti-bot / soft-ban detection</label>
+            <div class="jb-sub jb-mb" id="jb-antibot-status" style="color:var(--jb-text-ter);font-size:9px">Pauses on detection and parses the stated expiry, so the pause lifts by itself. Staff questions are untouched — they still go through the script-check path.</div>
             <hr class="jb-sep">
             <div class="jb-row">
               <button class="jb-btn jb-btn-danger" id="jb-reset-all">Reset All</button>
               <button class="jb-btn jb-btn-outline" id="jb-clear-player">Clear Player</button>
+            </div>
             </div>
           </div>
         </div>
@@ -5872,6 +6094,22 @@
                 <option value="continuous" ${st.dtmRepeat==='continuous'?'selected':''}>Continuous</option>
               </select>
             </div>
+            <hr class="jb-sep">
+            <div class="jb-sect-title">Partner not playing ball</div>
+            <label class="jb-switch jb-mb" title="Drop a partner who never accepts, or kick one who takes the seat then stalls. Never kicks a partner showing Ready — they've bought their drugs and kicking destroys the purchase."><input type="checkbox" id="jb-dtmkick-on" ${cfg.dtmKickOn?'checked':''}> 🥾 Drop / kick a stalled partner</label>
+            <div class="jb-row">
+              <label class="jb-label" style="white-space:nowrap">Never accepted:</label>
+              <input class="jb-input jb-input-sm" type="number" id="jb-dtmkick-wait" value="${cfg.dtmKickWaitSec}" min="30" max="1800" step="30">
+              <span class="jb-sub">s</span>
+            </div>
+            <div class="jb-row jb-mb">
+              <label class="jb-label" style="white-space:nowrap">Accepted but stalled:</label>
+              <input class="jb-input jb-input-sm" type="number" id="jb-dtmkick-grace" value="${cfg.dtmKickGraceSec}" min="30" max="1800" step="30">
+              <span class="jb-sub">s</span>
+            </div>
+            <div class="jb-sub jb-mb" style="color:var(--jb-text-ter);font-size:9px">A random 0–60s is added to the first timer so the drop isn't a predictable round number. The seat is re-checked live immediately before any kick — the kick removes whoever is seated at that instant, not who was seated when the page loaded. Gives up after 3 re-invites.</div>
+
+            <hr class="jb-sep">
             <div class="jb-sub jb-mb">State: <span id="jb-dtm-state">${getCreateDtmState()} (step ${getCreateDtmStep()})</span></div>
             <button class="jb-btn jb-btn-danger" id="jb-dtm-reset" style="width:100%">Reset DTM Creation</button>
           </div>
@@ -5919,7 +6157,8 @@
 
     // Wire up crime/gta options
     const crimeEl = _shadow.querySelector('#jb-crime-opts');
-    crimeEl.innerHTML = CRIMES.map(c => `<label class="jb-switch"><input type="checkbox" class="jb-crime-cb" value="${c.id}" ${st.crimes.includes(c.id)?'checked':''}> ${c.name}</label>`).join('');
+    // Excluded crimes are never offered — see EXCLUDED_CRIME_IDS (pickpocket).
+    crimeEl.innerHTML = CRIMES.filter(c => crimeAllowed(c.id)).map(c => `<label class="jb-switch"><input type="checkbox" class="jb-crime-cb" value="${c.id}" ${st.crimes.includes(c.id)?'checked':''}> ${c.name}</label>`).join('');
 
     const gtaEl = _shadow.querySelector('#jb-gta-opts');
     gtaEl.innerHTML = GTAS.map(g => `<label class="jb-switch"><input type="checkbox" class="jb-gta-cb" value="${g.id}" ${st.gtas.includes(g.id)?'checked':''}> ${g.name}</label>`).join('');
@@ -6056,26 +6295,47 @@
       if (st.autoDtmList && !getHot()) fetchHot();
     });
 
-    // Theme toggle — cycles: dark → light → classic → dark
-    const THEME_ORDER = ['dark', 'light', 'classic'];
-    const THEME_ICONS = { dark: '◑', light: '☀', classic: '🟢' };
+    /* Theme. The title-bar button cycles every scheme; the Settings → System
+     * dropdown jumps straight to one, which matters now there are seven rather
+     * than three. Both go through applyTheme so the picker, the button icon and
+     * the ribbon never disagree. */
+    const THEME_ICONS = {
+      dark:'◑', light:'☀', classic:'🟢',
+      contrast:'⬛', midnight:'🌌', amber:'🔶', ocean:'🌊'
+    };
     const themeBtn = _shadow.querySelector('#jb-theme-btn');
-    themeBtn.textContent = THEME_ICONS[activeTheme] || '◑';
+    function applyTheme(name) {
+      setTheme(name);
+      themeBtn.textContent = THEME_ICONS[name] || '◑';
+      themeBtn.title = 'Theme: ' + (THEME_LIST.find(t => t[0] === name)?.[1] || name);
+      const sel = _shadow.querySelector('#jb-theme-sel');
+      if (sel && sel.value !== name) sel.value = name;
+      repaintRibbon();   // ribbon colours are inline, so they need re-stamping
+    }
+    applyTheme(activeTheme);
     themeBtn.addEventListener('click', () => {
-      const idx = THEME_ORDER.indexOf(activeTheme);
-      const next = THEME_ORDER[(idx + 1) % THEME_ORDER.length];
-      setTheme(next);
-      themeBtn.textContent = THEME_ICONS[next] || '◑';
-      // Re-apply ribbon button colours
-      for (const [id, key] of Object.entries(ribbonMap)) {
-        const btn = _shadow.querySelector(`#${id}`);
-        if (btn) {
-          const isOn = st[key];
-          btn.style.background = isOn ? 'var(--jb-ribbon-on)' : 'var(--jb-ribbon-off)';
-          btn.style.color = isOn ? 'var(--jb-ribbon-on-text)' : 'var(--jb-ribbon-off-text)';
-        }
-      }
+      const order = THEME_LIST.map(t => t[0]);
+      applyTheme(order[(order.indexOf(activeTheme) + 1) % order.length]);
     });
+    { const ts = _shadow.querySelector('#jb-theme-sel');
+      if (ts) ts.addEventListener('change', e => {
+        applyTheme(e.target.value);
+        setStatus('🎨 ' + (THEME_LIST.find(t => t[0] === e.target.value)?.[1] || e.target.value));
+      }); }
+
+    // Text size — applied as a class on .jb-root (see the jb-lg / jb-xl rules).
+    function applyUiSize(sz) {
+      root.classList.remove('jb-lg', 'jb-xl');
+      if (sz === 'l') root.classList.add('jb-lg');
+      else if (sz === 'x') root.classList.add('jb-xl');
+      cfg.uiSize = sz; GM_setValue('cbUiSize', sz);
+    }
+    applyUiSize(cfg.uiSize || 'n');
+    { const us = _shadow.querySelector('#jb-uisize-sel');
+      if (us) us.addEventListener('change', e => {
+        applyUiSize(e.target.value);
+        setStatus('🔠 Text size: ' + (e.target.value === 'n' ? 'normal' : e.target.value === 'l' ? 'large' : 'largest'));
+      }); }
 
     // Minimize
     const body = _shadow.querySelector('#jb-panel-body');
@@ -6096,6 +6356,25 @@
     _shadow.querySelector('#jb-settings-btn').addEventListener('click', openModal);
     _shadow.querySelector('#jb-modal-close').addEventListener('click', closeModal);
     backdrop.addEventListener('click', closeModal);
+
+    /* Settings tabs. Remembers the last tab you were on, because settings visits
+     * come in runs — you rarely open it once. Scrolls back to the top on switch
+     * so a long pane doesn't leave you halfway down the next one. */
+    function showTab(key) {
+      _shadow.querySelectorAll('.jb-tab').forEach(t =>
+        t.classList.toggle('active', t.getAttribute('data-tab') === key));
+      _shadow.querySelectorAll('.jb-pane').forEach(p =>
+        p.classList.toggle('active', p.getAttribute('data-pane') === key));
+      GM_setValue('cbSettingsTab', key);
+      /* Scroll the MODAL CONTENT, not the body — .jb-modal-content is the
+       * element carrying overflow-y, so the body's scrollTop is always 0 and
+       * setting it would do nothing. */
+      const sc = _shadow.querySelector('#jb-settings-modal .jb-modal-content');
+      if (sc) sc.scrollTop = 0;
+    }
+    _shadow.querySelectorAll('.jb-tab').forEach(t =>
+      t.addEventListener('click', () => showTab(t.getAttribute('data-tab'))));
+    showTab(GM_getValue('cbSettingsTab', 'actions'));
 
     // Settings inputs
     _shadow.querySelector('#jb-login-user').addEventListener('input', e => { LOGIN.user = e.target.value.trim(); GM_setValue('cbLoginUser', LOGIN.user); });
@@ -8569,6 +8848,17 @@
 
   function init() {
     if (document.readyState === 'loading') { document.addEventListener('DOMContentLoaded', init); return; }
+    /* Scrub any excluded crime out of the stored selection. Nothing can tick one
+     * now, but an install that predates the exclusion (or a hand-edited value)
+     * could still carry it, and clearing it here means it doesn't linger in
+     * storage looking like an active choice. */
+    if (Array.isArray(st.crimes)) {
+      const clean = st.crimes.filter(id => crimeAllowed(id));
+      if (clean.length !== st.crimes.length) {
+        console.warn(APP_TAG, '[CRIME] Removed excluded crime(s) from saved selection');
+        st.crimes = clean; saveSt();
+      }
+    }
     tabs.check();
     buildUI();
     try { updateXpUI(); } catch(_){} // paint saved XP/rank straight away so it doesn't blank on load
