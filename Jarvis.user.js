@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.239
+// @version      2000.240
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -32,7 +32,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.239
+/*  Jarvis Bot 2000.240
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -119,7 +119,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.239';
+  const APP_VERSION = '2000.240';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -1056,6 +1056,8 @@
     smartPick:    GM_getValue('cbSmartPick', false),
     // DTM partner kick: drop a partner who never accepts / sits offline.
     dtmKickOn:      GM_getValue('cbDtmKickOn', false),
+    // Create DTM: pick an online advertiser off the DTM list instead of the fixed partner.
+    dtmAutoPartner: GM_getValue('cbDtmAutoPartner', false),
     dtmKickWaitSec: GM_getValue('cbDtmKickWaitSec', 210),  // pending-invite timeout
     dtmKickGraceSec:GM_getValue('cbDtmKickGraceSec', 180), // seated-but-offline grace
     // Per-action daily attempt limits (0 = unlimited). Jail keeps its own.
@@ -4402,26 +4404,34 @@
     return getJailCount() >= cfg.jailDailyLimit;
   }
 
-  /* === PER-ACTION DAILY LIMITS ===
+  /* === PER-ACTION DAILY COUNTS + LIMITS ===
    * Generalises the jail counter to crime / GTA / booze. Jail keeps its own
    * dedicated counter and UI — it predates this, has its own limit field and its
    * own auto-off flags, and rewriting it to route through here would risk a
    * well-tested path for no behavioural gain.
    *
-   * Each action counts real attempts (incremented at the click, not at the
-   * decision) against cfg.dailyLimit<Action>. 0 means unlimited, which is the
-   * default, so nothing changes until you set a number. On hitting the limit the
-   * action switches itself off and is switched back on at the next game-day
-   * rollover — Amsterdam midnight via gameDayStr(), same as jail.
+   * COUNTING IS UNCONDITIONAL (2000.240). It used to be gated on cfg.dailyLimitOn
+   * AND a non-zero limit, which disabled the feature for the one job it is most
+   * needed for: working out what the game's real cap is. You cannot choose a
+   * sensible limit without first watching an uncapped day, and the cap MOVES WITH
+   * RANK, so the figure has to be re-learned as you climb. Counting costs one
+   * GM_setValue per action, so it always runs; cfg.dailyLimitOn now controls only
+   * whether hitting a limit switches the action off.
    *
-   * This is a HARD cap, unlike the no-XP limiter which infers the game's own cap
-   * from XP going flat. They stack: whichever notices first wins.
+   * Each finished game-day is archived to cbDayHist_<action> with the rank it was
+   * played at, so the panel can show "best day ever / best at this rank" — the two
+   * numbers you actually need. Rank is stamped at each increment, so a day spanning
+   * a rank-up records the rank you FINISHED it at.
+   *
+   * The limit itself is a HARD cap, unlike the no-XP limiter which infers the
+   * game's cap from XP going flat. They stack: whichever notices first wins.
    */
   const DAILY_ACTIONS = {
     crime: { label:'👜 Crime', limitKey:'dailyLimitCrime' },
     gta:   { label:'🏎️ GTA',   limitKey:'dailyLimitGta'   },
     booze: { label:'🍺 Booze', limitKey:'dailyLimitBooze' }
   };
+  const DAILY_HIST_CAP = 60;   // game-days kept per action
 
   function dailyLimitOf(action) {
     const d = DAILY_ACTIONS[action];
@@ -4430,14 +4440,48 @@
     return Number.isFinite(n) && n > 0 ? n : 0;
   }
 
+  function dailyHist(action) {
+    const h = GM_getValue('cbDayHist_' + action, null);
+    return Array.isArray(h) ? h : [];
+  }
+
+  // Archive a finished day. Silently ignores empty/zero days so a fresh install
+  // (stored day '') and days you didn't play don't pollute the sample.
+  function archiveDailyCount(action, day, n, rank) {
+    if (!day || !(n > 0)) return;
+    const h = dailyHist(action);
+    if (h.some(r => r.day === day)) return;          // already archived
+    h.push({ day, n, rank: rank || '' });
+    while (h.length > DAILY_HIST_CAP) h.shift();
+    GM_setValue('cbDayHist_' + action, h);
+    console.log(`${APP_TAG}[LIMIT] ${action} ${day}: ${n} attempts at ${rank || 'unknown rank'} — archived`);
+  }
+
+  // Best day recorded overall and best at a given rank. Today is deliberately NOT
+  // included: it isn't finished, so it isn't evidence of a cap yet.
+  function dailyPeak(action, rank) {
+    let all = 0, atRank = 0, days = 0, rankDays = 0;
+    for (const r of dailyHist(action)) {
+      days++;
+      if (r.n > all) all = r.n;
+      if (rank && r.rank === rank) { rankDays++; if (r.n > atRank) atRank = r.n; }
+    }
+    return { all, atRank, days, rankDays };
+  }
+
   // Counter is keyed by game-day, so a rollover resets it lazily on first read —
   // no timer needed, and it stays correct across a tab that was closed overnight.
   function getDailyCount(action) {
     if (!DAILY_ACTIONS[action]) return 0;
     const today = gameDayStr();
-    if (GM_getValue('cbDayCountDay_' + action, '') !== today) {
+    const storedDay = GM_getValue('cbDayCountDay_' + action, '');
+    if (storedDay !== today) {
+      // Archive the day that just ended BEFORE zeroing — this is the research data.
+      archiveDailyCount(action, storedDay, GM_getValue('cbDayCount_' + action, 0),
+                        GM_getValue('cbDayRank_' + action, ''));
       GM_setValue('cbDayCountDay_' + action, today);
       GM_setValue('cbDayCount_' + action, 0);
+      GM_setValue('cbDayRank_' + action, rankState.name || '');
       // Re-enable if the limit is what turned it off (not a manual switch-off).
       if (GM_getValue('cbDayAutoOff_' + action, false)) {
         GM_setValue('cbDayAutoOff_' + action, false);
@@ -4458,41 +4502,101 @@
   }
 
   function incDailyCount(action) {
-    if (!cfg.dailyLimitOn || !DAILY_ACTIONS[action]) return;
-    const lim = dailyLimitOf(action);
-    if (!lim) return;                       // unlimited — don't bother counting
+    if (!DAILY_ACTIONS[action]) return;
     const n = getDailyCount(action) + 1;    // getDailyCount also handles rollover
     GM_setValue('cbDayCount_' + action, n);
-    if (n >= lim) {
+    if (rankState.name) GM_setValue('cbDayRank_' + action, rankState.name);
+
+    const lim = dailyLimitOf(action);
+    if (cfg.dailyLimitOn && lim && n >= lim) {
       GM_setValue('cbDayWasOn_' + action, !!st[action]);
       GM_setValue('cbDayAutoOff_' + action, true);
       if (action in st) { st[action] = false; saveSt(); repaintRibbon(); }
       console.log(`${APP_TAG}[LIMIT] ${action} hit ${n}/${lim} — disabled until next game-day`);
       tgMsg('jail', `🛑 <b>${DAILY_ACTIONS[action].label} limit</b>\n${st.player||'?'} | ${n}/${lim} reached, off till tomorrow`);
-      try { updateDailyCountUI(); } catch(_){}
     }
+    try { updateDailyCountUI(); } catch(_){}
   }
 
-  // Rendered as a compact "👜 12/500 🏎️ 4/200" line; hidden entirely when the
-  // feature is off or nothing has a limit set, so it costs no panel space.
+  /* Panel strip: "👜 128 · 🏎️ 41 · 🍺 12", or "👜 128/500" where a limit applies.
+   * Shown whenever anything has been done today, limits on or off — the count is
+   * the point, the limit is optional decoration. */
   function updateDailyCountUI() {
     if (!_shadow) return;
     const el = _shadow.querySelector('#jb-daily-counts');
     const row = _shadow.querySelector('#jb-daily-row');
     if (!el || !row) return;
     const parts = [];
-    if (cfg.dailyLimitOn) {
-      for (const [action, d] of Object.entries(DAILY_ACTIONS)) {
-        const lim = dailyLimitOf(action);
-        if (!lim) continue;
-        const n = getDailyCount(action);
+    for (const [action, d] of Object.entries(DAILY_ACTIONS)) {
+      const n = getDailyCount(action);
+      const lim = dailyLimitOf(action);
+      const capped = cfg.dailyLimitOn && lim > 0;
+      if (!n && !capped) continue;               // nothing worth a slot yet
+      const icon = d.label.split(' ')[0];
+      if (capped) {
         const pct = n / lim;
         const clr = pct >= 1 ? 'var(--jb-danger)' : pct >= 0.9 ? 'var(--jb-warning)' : 'var(--jb-text-sec)';
-        parts.push(`<span style="color:${clr}">${d.label.split(' ')[0]} ${n}/${lim}</span>`);
+        parts.push(`<span style="color:${clr}">${icon} ${n}/${lim}</span>`);
+      } else {
+        parts.push(`<span style="color:var(--jb-text-sec)">${icon} ${n}</span>`);
       }
     }
     row.style.display = parts.length ? 'flex' : 'none';
     el.innerHTML = parts.join(' · ');
+    // The settings readout is only worth building while it's on screen.
+    try {
+      const m = _shadow.querySelector('#jb-settings-modal');
+      if (m && m.classList.contains('open')) renderDailyResearch();
+    } catch(_){}
+  }
+
+  /* Settings readout: today, the best day recorded, and the best day recorded at
+   * your CURRENT rank, plus a by-day table. This is the whole point of counting
+   * unconditionally — you set a limit from evidence rather than from a guess, and
+   * you re-read it after each rank-up. */
+  function renderDailyResearch() {
+    if (!_shadow) return;
+    const host = _shadow.querySelector('#jb-daily-research');
+    if (!host) return;
+    const rank = rankState.name || '';
+    const acts = Object.keys(DAILY_ACTIONS);
+
+    const head = `<div style="display:grid;grid-template-columns:52px 1fr 1fr 1fr;gap:2px 6px;font-size:9px">
+      <span style="color:var(--jb-text-ter)"></span>
+      <span style="color:var(--jb-text-sec);font-weight:600">Today</span>
+      <span style="color:var(--jb-text-sec);font-weight:600">Best</span>
+      <span style="color:var(--jb-text-sec);font-weight:600" title="${esc(rank||'rank unknown')}">This rank</span>`;
+    const rows = acts.map(a => {
+      const p = dailyPeak(a, rank);
+      const icon = DAILY_ACTIONS[a].label.split(' ')[0];
+      return `<span>${icon}</span>
+        <span style="font-weight:600">${getDailyCount(a)}</span>
+        <span>${p.all || '—'}${p.days ? ` <span style="color:var(--jb-text-ter)">(${p.days}d)</span>` : ''}</span>
+        <span>${p.atRank || '—'}${p.rankDays ? ` <span style="color:var(--jb-text-ter)">(${p.rankDays}d)</span>` : ''}</span>`;
+    }).join('');
+
+    // Merge the per-action histories into one row per day.
+    const byDay = {};
+    acts.forEach(a => dailyHist(a).forEach(r => {
+      if (!byDay[r.day]) byDay[r.day] = { day:r.day, rank:r.rank || '' };
+      byDay[r.day][a] = r.n;
+      if (!byDay[r.day].rank && r.rank) byDay[r.day].rank = r.rank;
+    }));
+    const days = Object.values(byDay).sort((x, y) => y.day.localeCompare(x.day)).slice(0, 14);
+    const table = days.length
+      ? `<div style="margin-top:6px;max-height:110px;overflow-y:auto;font-size:9px">
+           <div style="display:grid;grid-template-columns:60px 30px 30px 30px 1fr;gap:1px 4px">
+             <span style="color:var(--jb-text-sec);font-weight:600">Day</span>
+             ${acts.map(a => `<span style="color:var(--jb-text-sec);font-weight:600">${DAILY_ACTIONS[a].label.split(' ')[0]}</span>`).join('')}
+             <span style="color:var(--jb-text-sec);font-weight:600">Rank</span>
+             ${days.map(d => `<span style="color:var(--jb-text-ter)">${esc(d.day.slice(5))}</span>
+               ${acts.map(a => `<span>${d[a] != null ? d[a] : '—'}</span>`).join('')}
+               <span style="color:var(--jb-text-ter)">${esc(d.rank || '?')}</span>`).join('')}
+           </div>
+         </div>`
+      : `<div style="margin-top:6px;color:var(--jb-text-ter);font-size:9px">No finished days recorded yet — the first archives at game midnight.</div>`;
+
+    host.innerHTML = head + rows + '</div>' + table;
   }
 
   /* === XP UI + CHARTS === */
@@ -5533,8 +5637,8 @@
           <button class="jb-ribbon-btn ${st.jail?'':'off'}" id="jb-r-jail">Jail</button>
           <button class="jb-ribbon-btn ${st.health?'':'off'}" id="jb-r-health">Health</button>
           <button class="jb-ribbon-btn ${st.garage?'':'off'}" id="jb-r-garage">Garage</button>
-          <button class="jb-ribbon-btn ${st.autoOC?'':'off'}" id="jb-r-oc">OC</button>
-          <button class="jb-ribbon-btn ${st.autoDTM?'':'off'}" id="jb-r-dtm">DTM</button>
+          <button class="jb-ribbon-btn ${st.autoOC?'':'off'}" id="jb-r-oc" title="Auto-ACCEPT organised crime invites sent to you">OC</button>
+          <button class="jb-ribbon-btn ${st.autoDTM?'':'off'}" id="jb-r-dtm" title="Auto-ACCEPT DTM invites sent to you (not the same as Create DTM)">DTM</button>
         </div>
 
         <div class="jb-body">
@@ -5600,14 +5704,14 @@
               <label class="jb-switch"><input type="checkbox" id="jb-crusher"> Crusher</label>
               <div class="jb-switch"><input type="checkbox" id="jb-wl-on"> <span id="jb-wl-link" style="cursor:pointer;text-decoration:underline;color:var(--jb-accent)">Whitelist</span></div>
               <div class="jb-switch"><input type="checkbox" id="jb-create-oc"> <span id="jb-oc-link" style="cursor:pointer;text-decoration:underline;color:var(--jb-accent)">Create OC</span></div>
-              <div class="jb-switch"><input type="checkbox" id="jb-create-dtm"> <span id="jb-dtm-link" style="cursor:pointer;text-decoration:underline;color:var(--jb-accent)">Create DTM</span></div>
+              <div class="jb-switch" title="START a DTM yourself and invite a partner. Click the text to set the partner, schedule and repeat."><input type="checkbox" id="jb-create-dtm"> <span id="jb-dtm-link" style="cursor:pointer;text-decoration:underline;color:var(--jb-accent)">Create DTM</span></div>
               <div class="jb-switch" title="Master switch for Online Watch — off means neither group can fire. Enable/disable Group 1 and Group 2 individually inside the Watch window."><input type="checkbox" id="jb-ow-on"> <span id="jb-ow-link" style="cursor:pointer;text-decoration:underline;color:var(--jb-accent)">🟢 Watch</span></div>
               <label class="jb-switch" title="Property drop watch"><input type="checkbox" id="jb-prop-on"> 🏠 Props</label>
               <label class="jb-switch" title="Player hover tooltip (reload to apply)"><input type="checkbox" id="jb-hover-on"> 🔍 Hover</label>
               <label class="jb-switch" title="Colour player links from your Starvinggeeks lists — watched (orange), safe (green), allied (blue). Read-only: three GETs, nothing is ever sent."><input type="checkbox" id="jb-sg-on"> 🎨 SG lists</label>
               <label class="jb-switch"><input type="checkbox" id="jb-notify-ready"> 🔔 Alerts</label>
               <label class="jb-switch"><input type="checkbox" id="jb-auto-travel" ${st.autoTravel?'checked':''}> ✈️ Auto Travel</label>
-              <label class="jb-switch"><input type="checkbox" id="jb-auto-dtmlist" ${st.autoDtmList?'checked':''}> 📋 DTM List</label>
+              <label class="jb-switch" title="ADVERTISE yourself on the DTM list (ocads.aspx) when a DTM is ready, so others can invite you"><input type="checkbox" id="jb-auto-dtmlist" ${st.autoDtmList?'checked':''}> 📋 DTM List</label>
             </div>
           </div>
         </div>
@@ -5618,8 +5722,8 @@
         <span><span id="jb-jail-hold" style="color:var(--jb-warning)"></span><span id="jb-jail-count" style="font-weight:600">0/2000</span></span>
       </div>
 
-      <div id="jb-daily-row" style="display:none;justify-content:space-between;align-items:center;padding:3px 10px;font-size:10px;border-top:1px solid var(--jb-border);color:var(--jb-text-ter)">
-        <span>📅 Daily limits:</span>
+      <div id="jb-daily-row" style="display:none;justify-content:space-between;align-items:center;padding:3px 10px;font-size:10px;border-top:1px solid var(--jb-border);color:var(--jb-text-ter)" title="Attempts today, counted whether or not limits are switched on. A limit is shown as n/limit.">
+        <span>📅 Today:</span>
         <span id="jb-daily-counts" style="font-weight:600"></span>
       </div>
 
@@ -5655,8 +5759,8 @@
             </div>
             <div class="jb-sub jb-mb" style="color:var(--jb-text-ter);font-size:9px">Smart takes the <b>most valuable</b> crime still at or above that success rate — not simply the safest. At high rank the odds barely differ (sampled 97/95/94/94/90%), so picking on odds alone would always choose the cheapest crime. The game re-rolls the odds every visit, so this is re-decided from the live page each time: on a bad roll it steps down to the best crime that's safe enough, and back up next visit. The preview above is a snapshot of right now. Raise to play safer, lower to reach for bigger jobs. Booze: smart buys your rank carry limit and sells 1–3 at a time.</div>
             <hr class="jb-sep">
-            <div class="jb-sect-title">Daily limits</div>
-            <label class="jb-switch jb-mb" title="Hard cap on attempts per action per game-day. Separate from the no-XP limiter, which infers the game's own cap."><input type="checkbox" id="jb-daily-on" ${cfg.dailyLimitOn?'checked':''}> 📅 Per-action daily limits</label>
+            <div class="jb-sect-title">Daily counts &amp; limits</div>
+            <label class="jb-switch jb-mb" title="Counting always runs. This switch only decides whether hitting a limit turns the action off for the rest of the game-day."><input type="checkbox" id="jb-daily-on" ${cfg.dailyLimitOn?'checked':''}> 📅 Enforce the limits below</label>
             <div class="jb-row">
               <label class="jb-label" style="width:46px">👜 Crime</label>
               <input class="jb-input jb-input-sm" type="number" id="jb-daily-crime" value="${cfg.dailyLimitCrime}" min="0" max="10000" step="10">
@@ -5669,6 +5773,13 @@
               <span class="jb-sub">0 = unlimited · resets 00:00 game time</span>
             </div>
             <div class="jb-sub jb-mb" id="jb-daily-status" style="color:var(--jb-text-ter);font-size:9px">Jail has its own limit in the Jail section.</div>
+            <div class="jb-sub" style="font-weight:600;color:var(--jb-text-sec)">Observed daily totals</div>
+            <div class="jb-sub jb-mb" style="color:var(--jb-text-ter);font-size:9px">Attempts are counted every day whether limits are enforced or not, so you can see what the game actually allows before choosing a number. <b>The cap moves with rank</b> — "This rank" only counts days played at <b id="jb-daily-rank">—</b>, so re-read it after each rank-up. Leave the limits at 0 for a few full days first; a day that ended early tells you nothing.</div>
+            <div id="jb-daily-research" style="background:var(--jb-surface-alt);border-radius:3px;padding:6px"></div>
+            <div class="jb-row jb-mb" style="margin-top:6px">
+              <button class="jb-btn jb-btn-outline" id="jb-daily-suggest" style="padding:2px 8px;font-size:9px">Use observed peaks</button>
+              <button class="jb-btn jb-btn-outline" id="jb-daily-hist-reset" style="padding:2px 8px;font-size:9px">Clear history</button>
+            </div>
             <hr class="jb-sep">
             <div class="jb-sect-title">Crimes</div>
             <div id="jb-crime-opts" class="jb-mb"></div>
@@ -6076,11 +6187,13 @@
         <div class="jb-modal-content" style="width:300px">
           <div class="jb-modal-head"><span>🚚 DTM Team (Leader)</span><button class="jb-hbtn" id="jb-dtm-close">✕</button></div>
           <div class="jb-modal-body">
-            <div class="jb-sub jb-mb">Set your DTM partner. You are the leader.</div>
+            <div class="jb-sub jb-mb">You start the DTM and invite the partner. (Not to be confused with the ribbon's <b>DTM</b>, which accepts invites other people send you, or <b>DTM List</b> on the panel, which advertises you on the list for others to find.)</div>
+            <label class="jb-switch jb-mb" title="Instead of always inviting the same person, take someone off the DTM list (ocads.aspx) who is currently online. Falls back to the partner below if nobody suitable is there."><input type="checkbox" id="jb-dtm-autopartner" ${cfg.dtmAutoPartner?'checked':''}> 🎲 Pick an online partner from the DTM list</label>
             <div class="jb-mb">
-              <label class="jb-label">Partner</label>
+              <label class="jb-label">Partner <span class="jb-sub" id="jb-dtm-partner-role">${cfg.dtmAutoPartner?'(fallback if the list is empty — may be left blank)':'(always invited)'}</span></label>
               <input class="jb-input" id="jb-dtm-partner" value="${st.dtmPartner}" placeholder="Username">
             </div>
+            <div class="jb-sub jb-mb" style="color:var(--jb-text-ter);font-size:9px">Who's online is read from the players page, not from the list itself, so it stays right whatever the list shows. Your blacklist always applies; the whitelist applies when it's switched on. Anyone who ignores the invite is skipped for the rest of this DTM, so each retry reaches for somebody new.</div>
             <hr class="jb-sep">
             <label class="jb-label">Schedule</label>
             <input class="jb-input jb-mb" type="datetime-local" id="jb-dtm-sched" value="${st.dtmSched||''}" style="color-scheme:dark">
@@ -6351,7 +6464,12 @@
     // Settings modal
     const modal = _shadow.querySelector('#jb-settings-modal');
     const backdrop = _shadow.querySelector('#jb-backdrop');
-    function openModal() { paused = true; modal.classList.add('open'); backdrop.style.display = 'block'; }
+    function openModal() {
+      paused = true; modal.classList.add('open'); backdrop.style.display = 'block';
+      const rk = _shadow.querySelector('#jb-daily-rank');
+      if (rk) rk.textContent = rankState.name || 'your current rank';
+      try { renderDailyResearch(); } catch(_){}
+    }
     function closeModal() { modal.classList.remove('open'); backdrop.style.display = 'none'; paused = false; saveSt(); }
     _shadow.querySelector('#jb-settings-btn').addEventListener('click', openModal);
     _shadow.querySelector('#jb-modal-close').addEventListener('click', closeModal);
@@ -6514,6 +6632,36 @@
         updateDailyCountUI();
       });
     });
+    /* "Use observed peaks": fills each limit from the best day recorded at the
+     * current rank, falling back to the best overall. Deliberately +0 headroom —
+     * the peak IS the cap you hit, so matching it stops exactly where the game
+     * would have. Does nothing for an action with no history rather than writing
+     * a made-up number. */
+    { const sg = _shadow.querySelector('#jb-daily-suggest');
+      if (sg) sg.addEventListener('click', () => {
+        const rank = rankState.name || '';
+        const map = { crime:['#jb-daily-crime','dailyLimitCrime','cbDailyLimitCrime'],
+                      gta:['#jb-daily-gta','dailyLimitGta','cbDailyLimitGta'],
+                      booze:['#jb-daily-booze','dailyLimitBooze','cbDailyLimitBooze'] };
+        let n = 0;
+        for (const [action, [sel, key, gmKey]] of Object.entries(map)) {
+          const p = dailyPeak(action, rank);
+          const v = p.atRank || p.all;
+          if (!v) continue;
+          cfg[key] = v; GM_setValue(gmKey, v);
+          const el = _shadow.querySelector(sel); if (el) el.value = v;
+          n++;
+        }
+        updateDailyCountUI();
+        setStatus(n ? `📅 ${n} limit${n===1?'':'s'} set from observed peaks` : '📅 No finished days recorded yet');
+      }); }
+    { const hr = _shadow.querySelector('#jb-daily-hist-reset');
+      if (hr) hr.addEventListener('click', () => {
+        if (!confirm('Clear the recorded daily history? Today\'s running count is kept.')) return;
+        Object.keys(DAILY_ACTIONS).forEach(a => GM_setValue('cbDayHist_' + a, []));
+        renderDailyResearch();
+        setStatus('📅 Daily history cleared');
+      }); }
 
     // --- Background heal ---
     { const bh = _shadow.querySelector('#jb-bgheal');
@@ -6936,6 +7084,14 @@
     });
     _shadow.querySelector('#jb-dtm-close').addEventListener('click', () => closeModal2('#jb-dtm-modal'));
     _shadow.querySelector('#jb-dtm-partner').addEventListener('blur', e => { st.dtmPartner = e.target.value.trim(); saveSt(); });
+    { const ap = _shadow.querySelector('#jb-dtm-autopartner');
+      if (ap) ap.addEventListener('change', e => {
+        cfg.dtmAutoPartner = e.target.checked;
+        GM_setValue('cbDtmAutoPartner', cfg.dtmAutoPartner);
+        const r = _shadow.querySelector('#jb-dtm-partner-role');
+        if (r) r.textContent = cfg.dtmAutoPartner ? '(fallback if the list is empty — may be left blank)' : '(always invited)';
+        setStatus(cfg.dtmAutoPartner ? '🎲 DTM partner from the list' : '🎲 DTM partner fixed');
+      }); }
     _shadow.querySelector('#jb-dtm-sched').addEventListener('change', e => { st.dtmSched = e.target.value; saveSt(); });
     _shadow.querySelector('#jb-dtm-repeat').addEventListener('change', e => {
       st.dtmRepeat = e.target.value;
@@ -8100,8 +8256,129 @@
     localStorage.removeItem(LS_CREATE_DTM_POLL);
     localStorage.removeItem('cbCreateDtmStartedAt');
     localStorage.removeItem('cbDtmReinvites');
+    localStorage.removeItem(LS_DTM_CHOSEN);
+    dtmClearTried();
     // Kick/drop clocks belong to one invite cycle — never carry them into the next.
     try { dtmClearKickState(); } catch(_){}
+  }
+
+  /* === DTM PARTNER FROM THE ADS LIST ===
+   * Create DTM has always invited the ONE partner named in its modal. That is
+   * fine with a regular teammate and useless otherwise: if they aren't around,
+   * the DTM sits there until the re-invite cap gives up.
+   *
+   * With cfg.dtmAutoPartner on, the partner is chosen from ocads.aspx — the same
+   * page "DTM List" adds you to — preferring someone who is actually online.
+   *
+   * KEY DESIGN POINT: presence is NOT read from the ads page. We only take NAMES
+   * from it, then intersect them with players.aspx via the online watch's own
+   * fetchOwPage/parseOwPlayers, which are proven and already parse the page the
+   * game uses to show who is on. So this works regardless of what markup ocads
+   * uses for a presence indicator — the one part of that page I have never seen.
+   * If no online list is available we still proceed, just without the filter.
+   */
+  const LS_DTM_CHOSEN = 'cbDtmChosenPartner';
+  const LS_DTM_TRIED  = 'cbDtmTriedNames';
+
+  function dtmTried() {
+    try { const a = JSON.parse(localStorage.getItem(LS_DTM_TRIED) || '[]'); return Array.isArray(a) ? a : []; }
+    catch(_) { return []; }
+  }
+  function dtmMarkTried(name) {
+    const k = normName(name);
+    if (!k) return;
+    const a = dtmTried();
+    if (!a.includes(k)) { a.push(k); try { localStorage.setItem(LS_DTM_TRIED, JSON.stringify(a)); } catch(_){} }
+  }
+  function dtmClearTried() { localStorage.removeItem(LS_DTM_TRIED); }
+
+  // Candidate names off the ads page. Kept deliberately loose: any profile link
+  // that isn't us, de-duplicated, with the row text carried along so the caller
+  // can prefer a matching city.
+  function parseDtmAds(doc) {
+    const out = [], seen = new Set();
+    const me = normName(st.player);
+    // Narrow to a DTM grid when one is identifiable, otherwise sweep the page.
+    const scope = doc.querySelector('#ctl00_main_gvDTM, #ctl00_main_gvDTMAds, #ctl00_main_gvAdsDTM, #ctl00_main_gvAds') || doc;
+    for (const a of scope.querySelectorAll('a[href*="profile.aspx"]')) {
+      const nm = (a.textContent || '').trim().replace(/\s+/g, ' ');
+      if (!nm || nm.length > 40) continue;
+      if (/^(profile|view|user|players|online|home|logout|add me)$/i.test(nm)) continue;
+      const k = normName(nm);
+      if (!k || k === me || seen.has(k)) continue;
+      const row = a.closest('tr');
+      const rowTxt = row ? (row.textContent || '').replace(/\s+/g, ' ').trim() : '';
+      // If the page also carries OC adverts, those name a role. A DTM has none,
+      // so a role word means we're looking at the wrong list.
+      if (/transporter|weapon\s*master|explosive\s*expert|security\s*expert/i.test(rowTxt)) continue;
+      seen.add(k);
+      out.push({ name: nm, key: k, row: rowTxt });
+    }
+    return out;
+  }
+
+  async function pickDtmPartnerFromAds() {
+    let doc;
+    try {
+      const r = await fetch(OCADS_PATH + '?_=' + Date.now(), { credentials:'same-origin', cache:'no-store' });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      doc = new DOMParser().parseFromString(await r.text(), 'text/html');
+    } catch (e) {
+      console.warn(APP_TAG, '[DTM] Ads page fetch failed:', e && e.message ? e.message : e);
+      return null;
+    }
+    if (isLoginDoc(doc)) { console.warn(APP_TAG, '[DTM] Ads page returned the login form'); return null; }
+
+    let cands = parseDtmAds(doc);
+    if (!cands.length) { console.log(APP_TAG, '[DTM] Nobody advertising on the DTM list'); return null; }
+    const total = cands.length;
+
+    // Filters: blacklist always, whitelist when enforced, and anyone already tried
+    // this cycle (so a re-invite reaches for a DIFFERENT person, which is the whole
+    // point of picking from a pool).
+    const bl = (st.blNames || []).map(normName).filter(Boolean);
+    const wl = (st.wlNames || []).map(normName).filter(Boolean);
+    const tried = dtmTried();
+    cands = cands.filter(c => !bl.includes(c.key) && !tried.includes(c.key));
+    if (st.whitelist && wl.length) cands = cands.filter(c => wl.includes(c.key));
+    if (!cands.length) {
+      console.log(APP_TAG, `[DTM] All ${total} advertiser(s) filtered out (blacklist/whitelist/already tried)`);
+      return null;
+    }
+
+    // Online check — see the section note above for why this comes from players.aspx.
+    let pool = cands;
+    try {
+      const f = await fetchOwPage();
+      const online = parseOwPlayers(f.doc);
+      if (online && online.size) {
+        const on = cands.filter(c => online.has(c.key));
+        if (!on.length) {
+          console.log(APP_TAG, `[DTM] None of the ${cands.length} advertiser(s) are online — waiting`);
+          return null;
+        }
+        pool = on;
+      }
+    } catch (e) {
+      console.warn(APP_TAG, '[DTM] Online list unavailable, picking without it:', e && e.message ? e.message : e);
+    }
+
+    // Same city if the row says so — a DTM partner in another city is no use.
+    const city = getCurCity();
+    if (city) {
+      const same = pool.filter(c => c.row.toLowerCase().includes(city.toLowerCase()));
+      if (same.length) pool = same;
+    }
+
+    const pick = pool[Math.floor(Math.random() * pool.length)];
+    console.log(`${APP_TAG}[DTM] Partner from ads: ${pick.name} (${pool.length} of ${total} advertisers eligible)`);
+    return pick.name;
+  }
+
+  // The partner for the CURRENT invite cycle: whatever was chosen and stored, else
+  // the fixed one from the modal.
+  function dtmCurrentPartner() {
+    return (localStorage.getItem(LS_DTM_CHOSEN) || '').trim() || String(st.dtmPartner || '').trim();
   }
 
   function isDtmSchedReady() {
@@ -8117,7 +8394,8 @@
       tgOnce('dtm_skip_city', 3600, `⚠️ <b>DTM Skip</b>\n${st.player||'?'} | Not in hot city`);
       return;
     }
-    if (!st.dtmPartner.trim()) {
+    // A fixed partner is only required when we aren't picking one off the list.
+    if (!st.dtmPartner.trim() && !cfg.dtmAutoPartner) {
       tgOnce('dtm_no_partner', 3600, `⚠️ <b>DTM</b> — partner not set`);
       return;
     }
@@ -8125,7 +8403,14 @@
     localStorage.removeItem('cbTgOnce_dtm_skip_city');
     localStorage.removeItem('cbTgOnce_dtm_no_partner');
 
-    tgMsg('dtmCreate', `🚚 <b>DTM Setup</b>\n${st.player||'?'} | Partner: ${st.dtmPartner}`);
+    // A new cycle picks fresh — never inherit the previous cycle's choice.
+    localStorage.removeItem(LS_DTM_CHOSEN);
+    dtmClearTried();
+
+    const who = cfg.dtmAutoPartner
+      ? (st.dtmPartner.trim() ? `from DTM list (fallback ${st.dtmPartner.trim()})` : 'from DTM list')
+      : st.dtmPartner.trim();
+    tgMsg('dtmCreate', `🚚 <b>DTM Setup</b>\n${st.player||'?'} | Partner: ${esc(who)}`);
     localStorage.setItem(LS_CREATE_DTM_STATE, 'setup');
     localStorage.setItem(LS_CREATE_DTM_STEP, '0');
     localStorage.setItem(LS_CREATE_DTM_NEXT, String(Date.now()));
@@ -8327,7 +8612,17 @@
       const why = pending
         ? `never accepted (${Math.round(waited/60000)}m)`
         : `stalled ${Math.round(waited/60000)}m`;
-      return await dtmKickParticipant(why, seatedName);
+      const kicked = await dtmKickParticipant(why, seatedName);
+      if (kicked) {
+        /* Whoever we just removed must not be picked again this cycle, and the
+         * stored choice has to go or step 1 would re-invite the same person. */
+        dtmMarkTried(seatedName);
+        localStorage.removeItem(LS_DTM_CHOSEN);
+        localStorage.setItem(LS_CREATE_DTM_STEP, '1');
+        localStorage.setItem(LS_CREATE_DTM_STATE, 'setup');
+        localStorage.setItem(LS_CREATE_DTM_NEXT, String(Date.now() + 5000));
+      }
+      return kicked;
     }
 
     // Nobody seated: the invite is still pending. Nothing to kick — after the
@@ -8339,15 +8634,22 @@
 
     const who = localStorage.getItem(LS_DTM_INV_NAME) || st.dtmPartner || 'partner';
 
-    /* Re-invite cap. The reference script can afford to retry freely because it
-     * pulls a fresh partner off the classifieds board each time; we invite the ONE
-     * partner configured in the DTM modal, so retrying means asking the same
-     * person again. If they aren't there, they aren't there — three goes and we
-     * stop rather than spinning until the 10-minute abort happens to catch it. */
+    /* Re-invite cap, and it depends on WHERE the partner came from.
+     *
+     * With a fixed partner, a retry means asking the same absent person again —
+     * if they aren't there, they aren't there, so three goes and we stop rather
+     * than spinning until the 10-minute abort happens to catch it.
+     *
+     * Picking from the ads list is the case the reference script has and we
+     * didn't: each retry reaches for a DIFFERENT person (the one who just failed
+     * is added to the tried list below), so retrying is genuinely productive and
+     * gets a longer leash. */
+    const fromList = cfg.dtmAutoPartner;
+    const maxTries = fromList ? 6 : 3;
     const tries = parseInt(localStorage.getItem('cbDtmReinvites') || '0', 10) + 1;
-    if (tries > 3) {
-      console.warn(`${APP_TAG}[DTM] ${who} didn't accept after 3 invites — giving up`);
-      tgMsg('dtmCreate', `🛑 <b>DTM abandoned</b>\n${st.player||'?'} | ${esc(who)} never accepted (3 invites) — set a different partner`);
+    if (tries > maxTries) {
+      console.warn(`${APP_TAG}[DTM] Gave up after ${maxTries} invites (last: ${who})`);
+      tgMsg('dtmCreate', `🛑 <b>DTM abandoned</b>\n${st.player||'?'} | ${maxTries} invites, nobody accepted${fromList?' — list may be stale' : ` (${esc(who)}) — set a different partner`}`);
       localStorage.removeItem('cbDtmReinvites');
       resetCreateDTM();
       st.acting = false; st.action = ''; GM_setValue('cbActStart', 0);
@@ -8355,8 +8657,13 @@
     }
     localStorage.setItem('cbDtmReinvites', String(tries));
 
-    console.log(`${APP_TAG}[DTM] ${who} didn't accept in ${Math.round(to/60000)}m — re-inviting (${tries}/3)`);
-    tgMsg('dtmCreate', `⌛ <b>DTM invite expired</b>\n${st.player||'?'} | ${esc(who)} never accepted — re-inviting (${tries}/3)`);
+    console.log(`${APP_TAG}[DTM] ${who} didn't accept in ${Math.round(to/60000)}m — re-inviting (${tries}/${maxTries})`);
+    tgMsg('dtmCreate', `⌛ <b>DTM invite expired</b>\n${st.player||'?'} | ${esc(who)} never accepted — ${fromList?'trying someone else':'re-inviting'} (${tries}/${maxTries})`);
+    // Don't ask this one again this cycle, and drop the stored choice so step 1
+    // picks afresh. With a fixed partner there is nothing else to pick, so the
+    // fallback simply re-invites them — same behaviour as before.
+    dtmMarkTried(who);
+    localStorage.removeItem(LS_DTM_CHOSEN);
     dtmClearKickState();
     localStorage.setItem(LS_CREATE_DTM_STEP, '1');            // back to the invite step
     localStorage.setItem(LS_CREATE_DTM_STATE, 'setup');
@@ -8390,7 +8697,7 @@
     if (next > Date.now()) { st.acting = true; st.action = 'dtm-create'; return true; }
 
     const step = getCreateDtmStep();
-    const partner = st.dtmPartner.trim();
+    const partner = dtmCurrentPartner();   // chosen-from-list if there is one, else the fixed one
 
     // Keep other automation blocked while we work the DTM creation
     st.acting = true; st.action = 'dtm-create'; GM_setValue('cbActStart', Date.now());
@@ -8487,7 +8794,39 @@
 
       // STEP 1: Invite partner
       if (step === 1) {
-        if (!partner) { resetCreateDTM(); return false; }
+        /* Resolve who to invite. With auto-partner on, the choice is made ONCE per
+         * invite cycle and stored, so a retry on this step re-invites the same
+         * person rather than churning through the list; only a timeout (which
+         * clears the stored choice) moves us on to somebody else. */
+        let who = partner;
+        if (cfg.dtmAutoPartner && !localStorage.getItem(LS_DTM_CHOSEN)) {
+          const picked = await pickDtmPartnerFromAds();
+          if (picked) {
+            localStorage.setItem(LS_DTM_CHOSEN, picked);
+            who = picked;
+          } else if (st.dtmPartner.trim()) {
+            who = st.dtmPartner.trim();            // fall back to the configured partner
+            console.log(APP_TAG, '[DTM] No one suitable on the list — using fixed partner', who);
+          } else {
+            // Nobody available and nothing configured: wait rather than fail the
+            // cycle. Advertisers and their presence both turn over quickly.
+            const waited = parseInt(localStorage.getItem('cbDtmAdsWaitSince') || '0', 10) || Date.now();
+            localStorage.setItem('cbDtmAdsWaitSince', String(waited));
+            if (Date.now() - waited > 15 * 60 * 1000) {
+              console.warn(APP_TAG, '[DTM] No partner found on the list after 15m — giving up this cycle');
+              tgMsg('dtmCreate', `🛑 <b>DTM abandoned</b>\n${st.player||'?'} | nobody online on the DTM list for 15m`);
+              localStorage.removeItem('cbDtmAdsWaitSince');
+              resetCreateDTM();
+              st.acting = false; st.action = ''; GM_setValue('cbActStart', 0);
+              return false;
+            }
+            setStatus('🚚 Waiting for someone on the DTM list…');
+            localStorage.setItem(LS_CREATE_DTM_NEXT, String(Date.now() + 60000));
+            return true;
+          }
+        }
+        localStorage.removeItem('cbDtmAdsWaitSince');
+        if (!who) { resetCreateDTM(); return false; }
         // Correct field ID is ctl00_main_tbParticipant (with fallbacks)
         const nameIn = document.getElementById('ctl00_main_tbParticipant') ||
                        document.getElementById('ctl00_main_txtinvitename') ||
@@ -8505,13 +8844,13 @@
         nameIn.focus();
         nameIn.value = '';
         await wait(rndDelay(DLY.normal));
-        nameIn.value = partner;
+        nameIn.value = who;
         // Fire events so ASP.NET registers the typed value before postback
         try { nameIn.dispatchEvent(new Event('input', {bubbles:true})); nameIn.dispatchEvent(new Event('change', {bubbles:true})); nameIn.dispatchEvent(new Event('keyup', {bubbles:true})); } catch(_){}
         await wait(rndDelay(DLY.normal));
-        console.log('[JB][CreateDTM] Entered partner:', partner, 'in', nameIn.id, '— clicking', invBtn.id||invBtn.value);
-        tgMsg('dtmCreate', `🚚 <b>DTM 2/3</b>\n${st.player||'?'} | Invited ${partner}`);
-        dtmMarkInvited(partner);   // starts the drop/kick clock
+        console.log('[JB][CreateDTM] Entered partner:', who, 'in', nameIn.id, '— clicking', invBtn.id||invBtn.value);
+        tgMsg('dtmCreate', `🚚 <b>DTM 2/3</b>\n${st.player||'?'} | Invited ${esc(who)}${cfg.dtmAutoPartner ? ' (from list)' : ''}`);
+        dtmMarkInvited(who);   // starts the drop/kick clock
         localStorage.setItem(LS_CREATE_DTM_STEP, '2');
         localStorage.setItem(LS_CREATE_DTM_NEXT, String(Date.now() + 60000));
         invBtn.click();
