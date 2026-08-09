@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.233
+// @version      2000.237
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -32,7 +32,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.233
+/*  Jarvis Bot 2000.237
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -119,7 +119,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.233';
+  const APP_VERSION = '2000.237';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -891,6 +891,9 @@
     // treat it as the game's daily cap and disable it until the next game-day.
     noXpStreakLimit: GM_getValue('cbNoXpStreakLimit', 5),
     noXpLimiterOn:   GM_getValue('cbNoXpLimiterOn', false),
+    // Smart crime picking: take the most VALUABLE crime still succeeding at or
+    // above this percentage. See pickCrime for why raw "highest %" is wrong.
+    smartMinPct:  GM_getValue('cbSmartMinPct', 85),
     // Cadence mode: true = Away (max camouflage, slow, right-skewed long tail);
     // false = At-PC (fast, fires shortly after cooldown for high throughput).
     awayMode:        GM_getValue('cbAwayMode', true),
@@ -901,7 +904,29 @@
      * at once — and unlike trimming stored history, raising these destroys
      * nothing and is fully reversible. */
     timerDispSec: GM_getValue('cbTimerDispSec', 5),    // panel refresh
-    bgPollSec:    GM_getValue('cbBgPollSec', 60)       // OC/DTM/travel background fetches
+    bgPollSec:    GM_getValue('cbBgPollSec', 60),      // OC/DTM/travel background fetches
+    // Anti-bot / soft-ban message detection — pauses everything and alerts.
+    antiBotOn:    GM_getValue('cbAntiBotOn', true),
+    // Scrap → FMJ conversion at store.aspx?p=s (5 scrap = 1000 FMJ).
+    scrapOn:      GM_getValue('cbScrapOn', false),
+    scrapProt:    GM_getValue('cbScrapProt', true),    // grab Armoured Vehicle protection first
+    scrapFloor:   GM_getValue('cbScrapFloor', 5),      // stop converting below this much scrap
+    // Background heal: top health up via same-origin POSTs instead of navigating.
+    bgHealOn:     GM_getValue('cbBgHealOn', true),
+    // Smart action picking: crime by success %, booze by rank carry limit.
+    smartPick:    GM_getValue('cbSmartPick', false),
+    // DTM partner kick: drop a partner who never accepts / sits offline.
+    dtmKickOn:      GM_getValue('cbDtmKickOn', false),
+    dtmKickWaitSec: GM_getValue('cbDtmKickWaitSec', 210),  // pending-invite timeout
+    dtmKickGraceSec:GM_getValue('cbDtmKickGraceSec', 180), // seated-but-offline grace
+    // Per-action daily attempt limits (0 = unlimited). Jail keeps its own.
+    dailyLimitOn:  GM_getValue('cbDailyLimitOn', false),
+    dailyLimitCrime: GM_getValue('cbDailyLimitCrime', 0),
+    dailyLimitGta:   GM_getValue('cbDailyLimitGta', 0),
+    dailyLimitBooze: GM_getValue('cbDailyLimitBooze', 0),
+    // No-XP limiter extra trigger: also cap an action if it has gained no XP for
+    // this many minutes despite firing. 0 disables (streak count still applies).
+    noXpStaleMin:  GM_getValue('cbNoXpStaleMin', 0)
   };
 
   /* === DELAY SYSTEM === */
@@ -1772,6 +1797,8 @@
   /* === UI HELPERS === */
 
   let _shadow = null;
+  // Assigned by buildUI; no-op until then so callers never need to guard.
+  let repaintRibbon = () => {};
 
   function setStatus(msg) {
     if (_shadow) {
@@ -1836,6 +1863,96 @@
     }
     if (has) _lastMsgCt = ct; else _lastMsgCt = 0;
     return false;
+  }
+
+  /* === ANTI-BOT / SOFT-BAN MESSAGE DETECTION ===
+   * The game posts warnings and soft bans into an "Important message" panel. Until
+   * now Jarvis had no idea what one looked like: checkSqlCheck() treats ANY such
+   * panel as a staff question, alerts, and pauses — which is right for a question
+   * but useless for a ban, where the useful information is the expiry time.
+   *
+   * CLAUDE.md listed this as blocked on "needs the exact warning phrases". It
+   * isn't: the reference script keys off the panel's STRUCTURE, not its wording,
+   * and only then parses an expiry out of the body. The wording matters solely to
+   * tell a ban apart from a staff question, and for that a broad pattern is safe —
+   * getting it wrong costs a pause and an alert, never an auto-answer.
+   *
+   * Runs BEFORE checkSqlCheck and returns true to claim the page, so a soft ban is
+   * never mistaken for a script check (which would have Jarvis nagging you to
+   * "answer in-game" a message that has no question in it).
+   */
+  const LS_SOFTBAN_UNTIL = 'cbSoftBanUntil';
+
+  // Phrases that mark a message as enforcement rather than a staff question.
+  const ANTIBOT_RE = /(expires\s+at\s*:|soft\s*ban|temporar(?:y|ily)\s+(?:ban|block|suspend)|you\s+have\s+been\s+(?:banned|blocked|suspended|warned)|(?:bot|script|macro|automat\w+)\s*(?:ting|ed)?\s*(?:use|usage|detect\w*|activity)|use\s+of\s+(?:a\s+)?(?:bot|script|macro))/i;
+
+  function softBanRemainingMs() {
+    const until = parseInt(GM_getValue(LS_SOFTBAN_UNTIL, 0) || 0, 10);
+    if (!until) return 0;
+    const rem = until - Date.now();
+    if (rem <= 0) { GM_setValue(LS_SOFTBAN_UNTIL, 0); return 0; }
+    return rem;
+  }
+
+  // Parse "expires at: DD-MM-YYYY HH:MM:SS" into an epoch ms, treating the
+  // wall-clock as Amsterdam (the game's timezone) with correct DST handling.
+  function parseSoftBanExpiry(body) {
+    const m = String(body || '').match(/expires\s+at\s*:?\s*(\d{1,2})-(\d{1,2})-(\d{4})\s+(\d{1,2}):(\d{2}):(\d{2})/i);
+    if (!m) return 0;
+    const [, dd, mo, yyyy, hh, mi, ss] = m.map(Number);
+    try { return amsterdamWallclockToTs(yyyy, mo, dd, hh, mi, ss); } catch (_) { return 0; }
+  }
+
+  function detectAntiBotMsg() {
+    if (!cfg.antiBotOn) return false;
+    const panel = document.querySelector('#ctl00_main_pnlMessage');
+    if (!panel) return false;
+    const title = panel.querySelector('.NewGridTitle');
+    if (!title || !/important message/i.test(title.textContent || '')) return false;
+
+    const body = (panel.innerText || panel.textContent || '').trim();
+    if (!ANTIBOT_RE.test(body)) return false;   // a staff question — leave it to checkSqlCheck
+
+    paused = true;
+
+    // Expiry: park it so the pause survives reloads and lifts by itself. Without
+    // one we still pause, we just can't say for how long.
+    let until = parseInt(GM_getValue(LS_SOFTBAN_UNTIL, 0) || 0, 10);
+    if (!until) {
+      until = parseSoftBanExpiry(body);
+      if (until > Date.now()) {
+        GM_setValue(LS_SOFTBAN_UNTIL, until);
+        const amsStr = new Date(until).toLocaleTimeString('en-GB', { timeZone:'Europe/Amsterdam' });
+        console.warn(`${APP_TAG}[ANTIBOT] Soft ban until ${amsStr} Amsterdam`);
+      }
+    }
+
+    const rem = softBanRemainingMs();
+    const mins = rem > 0 ? Math.ceil(rem / 60000) : 0;
+    setStatus(rem > 0 ? `🚨 ANTI-BOT — paused, ${mins}m left` : '🚨 ANTI-BOT MESSAGE — paused');
+
+    // One critical alert per distinct message. Reload-proof like the staff check,
+    // because this is the one you most need to actually see.
+    const sig = body.replace(/\s+/g, ' ').trim().substring(0, 160);
+    if (seenOnce('antibot', contentHash(sig), 20)) {
+      const untilLine = rem > 0
+        ? `\n⏰ Until ${new Date(until).toLocaleString('en-GB', { timeZone:'Europe/Amsterdam' })} (Amsterdam) — ${mins}m`
+        : '';
+      queueCriticalAlert('antibot:' + contentHash(sig),
+        `🚨 <b>ANTI-BOT MESSAGE</b>\n${st.player||'?'} | ${fmtDate()}${untilLine}\n<pre>${esc(body.substring(0, 400))}</pre>\n⛔ Automation paused`,
+        5, 2000, 8, 300000);
+      console.warn(`${APP_TAG}[ANTIBOT] ${sig}`);
+    }
+    return true;
+  }
+
+  // Called each tick while paused so the pause lifts on its own once the stated
+  // expiry passes — no reload needed, and it survives navigation either way.
+  function softBanHold() {
+    const rem = softBanRemainingMs();
+    if (rem <= 0) return false;
+    setStatus(`🚨 Soft ban — ${Math.ceil(rem/60000)}m remaining`);
+    return true;
   }
 
   let _sqlSent = false;
@@ -3797,16 +3914,147 @@
       .forEach(([a, iv]) => GM_setValue('cbDly_' + a, nextCooldownMs(iv)));
   }
 
+  /* === SMART ACTION PICKING ===
+   * Two ways to choose which crime to commit, switched by cfg.smartPick:
+   *
+   *  Random (default, unchanged): pick uniformly from the crimes you ticked. Wide
+   *  spread, and every crime you selected genuinely gets used.
+   *
+   *  Smart: the most VALUABLE crime still succeeding at or above cfg.smartMinPct.
+   *
+   * NOTE — this deliberately does NOT copy the reference script, which simply
+   * takes the highest success percentage. That is the wrong optimisation once
+   * your rank is high. Sampled live at Global Dominator the five crimes read
+   * 97 / 95 / 94 / 94 / 90 %, so "highest %" selects crime 1, Credit card fraud —
+   * the cheapest crime on the page. The reference's rule makes sense at low rank,
+   * where the spread is wide and a failure means jail; at a 3%-vs-10% failure
+   * difference the reward gap dominates completely.
+   *
+   * IMPORTANT: the game RE-ROLLS these percentages on every visit to the page.
+   * The figures above are one sample, not a fixed table — do not assume the
+   * ordering holds. What IS fixed is value: crime id ascends with reward (id 5,
+   * Rob a bank, is always worth more than id 1). So the rule is "highest id that
+   * clears the threshold", evaluated fresh from the labels on the page we are
+   * about to click, never from anything cached.
+   *
+   * The re-rolling actually makes this adapt rather than break: on a visit where
+   * Rob a bank rolls below the threshold, it steps down to the best crime that
+   * IS safe enough this time, and steps back up on the next visit that allows it.
+   *
+   * Falls back to plain highest-% if nothing clears the threshold, and to random
+   * if no percentages can be read at all (labels missing or page not loaded).
+   */
+  const CRIME_PCT_LABEL = {
+    1:'ctl00_main_lblCr1', 2:'ctl00_main_lblCr2', 3:'ctl00_main_lblCr3',
+    4:'ctl00_main_lblCr4', 5:'ctl00_main_lblCr5'
+  };
+
+  function crimeSuccessPct(id) {
+    const el = document.getElementById(CRIME_PCT_LABEL[id]);
+    if (!el) return null;
+    const n = parseInt((el.textContent || '').replace('%', '').trim(), 10);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  // cands: [{ id, btn }] — returns the button to click.
+  function pickCrime(cands) {
+    if (!cfg.smartPick || cands.length < 2) {
+      return cands[Math.floor(Math.random() * cands.length)].btn;
+    }
+    const rated = [];
+    for (const c of cands) {
+      const pct = crimeSuccessPct(c.id);
+      if (pct !== null) rated.push({ ...c, pct });
+    }
+    if (!rated.length) {                       // no percentages readable at all
+      return cands[Math.floor(Math.random() * cands.length)].btn;
+    }
+
+    const floor = Math.max(0, Math.min(100, Number(cfg.smartMinPct) || 0));
+    const safe = rated.filter(c => c.pct >= floor);
+    if (safe.length) {
+      // Most valuable of the safe ones = highest id.
+      const chosen = safe.reduce((a, b) => (b.id > a.id ? b : a));
+      dlog(APP_TAG, `[CRIME] Smart pick: crime ${chosen.id} at ${chosen.pct}% (best value ≥${floor}%)`);
+      return chosen.btn;
+    }
+
+    /* Nothing clears the threshold — your rank is too low for these crimes, or
+     * the daily cap has crushed the odds. Fall back to the safest, breaking ties
+     * randomly so we don't fixate on the lowest-numbered one. */
+    let bestPct = -1, best = [];
+    for (const c of rated) {
+      if (c.pct > bestPct) { bestPct = c.pct; best = [c]; }
+      else if (c.pct === bestPct) best.push(c);
+    }
+    const chosen = best[Math.floor(Math.random() * best.length)];
+    dlog(APP_TAG, `[CRIME] Smart pick: crime ${chosen.id} at ${bestPct}% (nothing ≥${floor}%, taking safest)`);
+    return chosen.btn;
+  }
+
+  /* Live preview next to the threshold, so you can see which crime the current
+   * setting selects instead of inferring it. Only meaningful on a crimes page,
+   * where the percentage labels exist — and only as a SNAPSHOT: the game re-rolls
+   * the percentages every visit, so this shows what would be picked right now,
+   * not a standing decision. */
+  function updateSmartPreview() {
+    if (!_shadow) return;
+    const el = _shadow.querySelector('#jb-smart-preview');
+    if (!el) return;
+    if (!cfg.smartPick) { el.textContent = 'random mode'; return; }
+    const ids = (st.crimes && st.crimes.length) ? st.crimes : [1,2,3,4,5];
+    const rated = ids.map(id => ({ id, pct: crimeSuccessPct(id) })).filter(c => c.pct !== null);
+    if (!rated.length) { el.textContent = 'open a crimes page'; return; }
+    const floor = Math.max(0, Math.min(100, Number(cfg.smartMinPct) || 0));
+    const safe = rated.filter(c => c.pct >= floor);
+    const pick = safe.length
+      ? safe.reduce((a,b) => (b.id > a.id ? b : a))
+      : rated.reduce((a,b) => (b.pct > a.pct ? b : a));
+    const nm = (CRIMES.find(c => c.id === pick.id) || {}).name || ('crime ' + pick.id);
+    el.textContent = `now: ${nm} (${pick.pct}%)${safe.length ? '' : ' — none qualify'}`;
+  }
+
+  /* Booze carry limit by rank. The game caps how much booze you can hold, and the
+   * cap rises with rank; buying your full allowance is strictly better than a
+   * fixed 5. Used only when smart picking is on — otherwise cfg.boozeBuy stands.
+   */
+  const RANK_BOOZE_LIMITS = {
+    'Scum':11, 'Wannabe':14, 'Goon':19, 'Thug':26,
+    'Criminal':35, 'Wanted Criminal':46, 'Gangster':59,
+    'Hitman':74, 'Hired Gunner':91, 'Assassin':110,
+    'Boss':131, 'Don':154, 'Enemy of the State':179,
+    'Global Threat':206, 'Global Dominator':235,
+    'Global Disaster':266, 'Legend':299
+  };
+
+  function boozeBuyQty() {
+    if (!cfg.smartPick) return cfg.boozeBuy;
+    // "Broke" cycle: a failed buy means no cash, so buy 1 to restart the loop.
+    if (localStorage.getItem('cbBoozeBroke') === 'true') return 1;
+    const rank = (document.querySelector('#ctl00_userInfo_lblrank')?.textContent || '').trim();
+    const lim = RANK_BOOZE_LIMITS[rank];
+    if (lim !== undefined) { dlog(APP_TAG, `[BOOZE] Rank "${rank}" → carry limit ${lim}`); return lim; }
+    return cfg.boozeBuy;
+  }
+
+  function boozeSellQty(available) {
+    const want = cfg.smartPick ? (1 + Math.floor(Math.random() * 3)) : cfg.boozeSell;
+    return Math.max(1, Math.min(want, available));
+  }
+
   function doCrime() {
     if (st.inJail || !st.crime || st.acting || paused) return;
+    if (dailyLimitReached('crime')) return;
     const now = Date.now();
     if (!cooldownElapsed('crime', st.lastCrime, cfg.crimeInt)) return;
     if (st.refresh || curPage() !== 'crimes') { st.refresh = false; saveSt(); safeNav('/authenticated/crimes.aspx?'+Date.now()); return; }
     st.acting = true; st.action = 'crime'; GM_setValue('cbActStart', now);
+    // Carries the crime id alongside the button so smart picking can look up its
+    // success percentage; random picking ignores the id.
     let avail = [];
     if (st.crimes.length > 0) {
-      avail = st.crimes.map(id => { const c = CRIMES.find(x=>x.id===id); if(c) { const b = document.getElementById(c.el); if(b && !b.disabled) return b; } return null; }).filter(Boolean);
-    } else { for(let i=1;i<=5;i++) { const b = document.getElementById(`ctl00_main_btnCrime${i}`); if(b && !b.disabled) avail.push(b); } }
+      avail = st.crimes.map(id => { const c = CRIMES.find(x=>x.id===id); if(c) { const b = document.getElementById(c.el); if(b && !b.disabled) return { id, btn:b }; } return null; }).filter(Boolean);
+    } else { for(let i=1;i<=5;i++) { const b = document.getElementById(`ctl00_main_btnCrime${i}`); if(b && !b.disabled) avail.push({ id:i, btn:b }); } }
     if (!avail.length) {
       const rk = 'cbCrimeRetry';
       const rc = parseInt(localStorage.getItem(rk)||'0',10);
@@ -3816,7 +4064,8 @@
     localStorage.removeItem('cbCrimeRetry');
     // Click immediately — humans click fast, the delay is in the cooldown
     snapshotXP('crime');
-    avail[Math.floor(Math.random()*avail.length)].click();
+    pickCrime(avail).click();
+    incDailyCount('crime');
     st.lastCrime = now; markActed('crime', cfg.crimeInt); st.refresh = true; donePending('crime'); saveSt();
     // Short reset — just enough for the page to process the click
     setTimeout(() => { st.acting = false; st.action = ''; GM_setValue('cbActStart',0); }, 400 + Math.floor(Math.random()*300));
@@ -3824,6 +4073,7 @@
 
   function doGta() {
     if (st.inJail || !st.gta || st.acting || paused) return;
+    if (dailyLimitReached('gta')) return;
     const now = Date.now();
     if (!cooldownElapsed('gta', st.lastGta, cfg.gtaInt)) return;
     if (st.refresh || curPage() !== 'gta') { st.refresh = false; saveSt(); safeNav('/authenticated/crimes.aspx?p=g&'+Date.now()); return; }
@@ -3844,25 +4094,42 @@
       const btn = document.getElementById('ctl00_main_btnStealACar');
       if (!btn) { st.acting = false; st.action = ''; st.refresh = true; GM_setValue('cbActStart',0); saveSt(); return; }
       snapshotXP('gta');
-      btn.click(); st.lastGta = now; markActed('gta', cfg.gtaInt); st.refresh = true; donePending('gta'); saveSt();
+      btn.click(); incDailyCount('gta');
+      st.lastGta = now; markActed('gta', cfg.gtaInt); st.refresh = true; donePending('gta'); saveSt();
       setTimeout(() => { st.acting = false; st.action = ''; GM_setValue('cbActStart',0); }, 400 + Math.floor(Math.random()*300));
     }, 200 + Math.floor(Math.random()*400));
   }
 
   function doBooze() {
     if (st.inJail || !st.booze || st.acting || paused) return;
+    if (dailyLimitReached('booze')) return;
     const now = Date.now();
     if (!cooldownElapsed('booze', st.lastBooze, cfg.boozeInt)) return;
     if (st.refresh || curPage() !== 'booze') { st.refresh = false; saveSt(); safeNav('/authenticated/crimes.aspx?p=b&'+Date.now()); return; }
     st.acting = true; st.action = 'booze'; GM_setValue('cbActStart', now);
+
+    /* Broke detection (smart mode): a buy that fails for lack of cash leaves this
+     * message on the page. Without noticing it, the next cycle buys the full rank
+     * allowance again and fails again. Flagging it drops the next buy to 1 unit,
+     * which sells for cash and restarts the cycle. */
+    if (cfg.smartPick) {
+      const lm = document.querySelector('#ctl00_lblMsg');
+      if (lm && /don'?t have enough money/i.test(lm.textContent || '')) {
+        localStorage.setItem('cbBoozeBroke', 'true');
+        dlog(APP_TAG, '[BOOZE] Not enough money — will buy 1 next cycle');
+      }
+    }
+
     const invRows = [...document.querySelectorAll('table tr')].filter(row => { const c = row.querySelector('td:nth-child(3)'); if(!c) return false; const inv = c.textContent.trim(); return inv && inv !== '0' && !isNaN(inv); });
     if (invRows.length > 0) {
       const row = invRows[0]; const si = row.querySelector('input[id*="tbAmtSell"]'); const sb = row.querySelector('input[id*="btnSell"]');
       if (si && sb && !sb.disabled) {
         const cur = parseInt(row.querySelector('td:nth-child(3)').textContent.trim());
-        si.value = Math.min(cfg.boozeSell, cur);
+        si.value = boozeSellQty(cur);
         snapshotXP('booze');
-        sb.click(); st.lastBooze = now; markActed('booze', cfg.boozeInt); st.refresh = true; donePending('booze'); saveSt();
+        sb.click(); incDailyCount('booze');
+        localStorage.removeItem('cbBoozeBroke');   // sold = cash back
+        st.lastBooze = now; markActed('booze', cfg.boozeInt); st.refresh = true; donePending('booze'); saveSt();
         setTimeout(() => { st.acting = false; st.action = ''; GM_setValue('cbActStart',0); }, 400 + Math.floor(Math.random()*300));
         return;
       }
@@ -3871,7 +4138,12 @@
     for (let i=2; i<=6; i++) { const inp = document.getElementById(`ctl00_main_gvBooze_ctl0${i}_tbAmtBuy`); const btn = document.getElementById(`ctl00_main_gvBooze_ctl0${i}_btnBuy`); if (inp && btn && !btn.disabled) buyOpts.push({inp,btn}); }
     if (buyOpts.length > 0) {
       const c = buyOpts[Math.floor(Math.random()*buyOpts.length)];
-      c.inp.value = cfg.boozeBuy; snapshotXP('booze'); c.btn.click(); st.lastBooze = now; markActed('booze', cfg.boozeInt); st.refresh = true; donePending('booze'); saveSt();
+      const qty = boozeBuyQty();
+      c.inp.value = qty;
+      try { c.inp.dispatchEvent(new Event('input',{bubbles:true})); c.inp.dispatchEvent(new Event('change',{bubbles:true})); } catch(_){}
+      snapshotXP('booze'); c.btn.click(); incDailyCount('booze');
+      localStorage.removeItem('cbBoozeBroke');
+      st.lastBooze = now; markActed('booze', cfg.boozeInt); st.refresh = true; donePending('booze'); saveSt();
       setTimeout(() => { st.acting = false; st.action = ''; GM_setValue('cbActStart',0); }, 400 + Math.floor(Math.random()*300));
     } else { st.acting = false; st.action = ''; GM_setValue('cbActStart',0); }
   }
@@ -3907,7 +4179,7 @@
       if (GM_getValue('cbJailAutoOff', false)) {
         GM_setValue('cbJailAutoOff', false);
         st.jail = GM_getValue('cbJailWasOn', true);
-        saveSt();
+        saveSt(); repaintRibbon();
         console.log('[JB][JAIL] New game-day — counter reset, jail re-enabled');
         tgMsg('jail', `⛓️ <b>Jail Reset</b>\n${st.player||'?'} | New day, counter cleared`);
       }
@@ -3927,7 +4199,7 @@
     if (n >= cfg.jailDailyLimit) {
       GM_setValue('cbJailWasOn', st.jail);
       GM_setValue('cbJailAutoOff', true);
-      st.jail = false; saveSt();
+      st.jail = false; saveSt(); repaintRibbon();
       console.log(`[JB][JAIL] Daily limit ${cfg.jailDailyLimit} reached — jail disabled`);
       tgMsg('jail', `🛑 <b>Jail Limit</b>\n${st.player||'?'} | ${n}/${cfg.jailDailyLimit} reached, jail OFF`);
       updateJailCountUI();
@@ -3954,6 +4226,99 @@
 
   function jailLimitReached() {
     return getJailCount() >= cfg.jailDailyLimit;
+  }
+
+  /* === PER-ACTION DAILY LIMITS ===
+   * Generalises the jail counter to crime / GTA / booze. Jail keeps its own
+   * dedicated counter and UI — it predates this, has its own limit field and its
+   * own auto-off flags, and rewriting it to route through here would risk a
+   * well-tested path for no behavioural gain.
+   *
+   * Each action counts real attempts (incremented at the click, not at the
+   * decision) against cfg.dailyLimit<Action>. 0 means unlimited, which is the
+   * default, so nothing changes until you set a number. On hitting the limit the
+   * action switches itself off and is switched back on at the next game-day
+   * rollover — Amsterdam midnight via gameDayStr(), same as jail.
+   *
+   * This is a HARD cap, unlike the no-XP limiter which infers the game's own cap
+   * from XP going flat. They stack: whichever notices first wins.
+   */
+  const DAILY_ACTIONS = {
+    crime: { label:'👜 Crime', limitKey:'dailyLimitCrime' },
+    gta:   { label:'🏎️ GTA',   limitKey:'dailyLimitGta'   },
+    booze: { label:'🍺 Booze', limitKey:'dailyLimitBooze' }
+  };
+
+  function dailyLimitOf(action) {
+    const d = DAILY_ACTIONS[action];
+    if (!d) return 0;
+    const n = Number(cfg[d.limitKey]);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  }
+
+  // Counter is keyed by game-day, so a rollover resets it lazily on first read —
+  // no timer needed, and it stays correct across a tab that was closed overnight.
+  function getDailyCount(action) {
+    if (!DAILY_ACTIONS[action]) return 0;
+    const today = gameDayStr();
+    if (GM_getValue('cbDayCountDay_' + action, '') !== today) {
+      GM_setValue('cbDayCountDay_' + action, today);
+      GM_setValue('cbDayCount_' + action, 0);
+      // Re-enable if the limit is what turned it off (not a manual switch-off).
+      if (GM_getValue('cbDayAutoOff_' + action, false)) {
+        GM_setValue('cbDayAutoOff_' + action, false);
+        if (action in st) { st[action] = GM_getValue('cbDayWasOn_' + action, true); saveSt(); repaintRibbon(); }
+        console.log(`${APP_TAG}[LIMIT] ${action} daily limit reset — re-enabled`);
+        tgMsg('jail', `♻️ <b>${DAILY_ACTIONS[action].label} reset</b>\n${st.player||'?'} | new game-day, back on`);
+      }
+      return 0;
+    }
+    return GM_getValue('cbDayCount_' + action, 0);
+  }
+
+  function dailyLimitReached(action) {
+    if (!cfg.dailyLimitOn) return false;
+    const lim = dailyLimitOf(action);
+    if (!lim) return false;
+    return getDailyCount(action) >= lim;
+  }
+
+  function incDailyCount(action) {
+    if (!cfg.dailyLimitOn || !DAILY_ACTIONS[action]) return;
+    const lim = dailyLimitOf(action);
+    if (!lim) return;                       // unlimited — don't bother counting
+    const n = getDailyCount(action) + 1;    // getDailyCount also handles rollover
+    GM_setValue('cbDayCount_' + action, n);
+    if (n >= lim) {
+      GM_setValue('cbDayWasOn_' + action, !!st[action]);
+      GM_setValue('cbDayAutoOff_' + action, true);
+      if (action in st) { st[action] = false; saveSt(); repaintRibbon(); }
+      console.log(`${APP_TAG}[LIMIT] ${action} hit ${n}/${lim} — disabled until next game-day`);
+      tgMsg('jail', `🛑 <b>${DAILY_ACTIONS[action].label} limit</b>\n${st.player||'?'} | ${n}/${lim} reached, off till tomorrow`);
+      try { updateDailyCountUI(); } catch(_){}
+    }
+  }
+
+  // Rendered as a compact "👜 12/500 🏎️ 4/200" line; hidden entirely when the
+  // feature is off or nothing has a limit set, so it costs no panel space.
+  function updateDailyCountUI() {
+    if (!_shadow) return;
+    const el = _shadow.querySelector('#jb-daily-counts');
+    const row = _shadow.querySelector('#jb-daily-row');
+    if (!el || !row) return;
+    const parts = [];
+    if (cfg.dailyLimitOn) {
+      for (const [action, d] of Object.entries(DAILY_ACTIONS)) {
+        const lim = dailyLimitOf(action);
+        if (!lim) continue;
+        const n = getDailyCount(action);
+        const pct = n / lim;
+        const clr = pct >= 1 ? 'var(--jb-danger)' : pct >= 0.9 ? 'var(--jb-warning)' : 'var(--jb-text-sec)';
+        parts.push(`<span style="color:${clr}">${d.label.split(' ')[0]} ${n}/${lim}</span>`);
+      }
+    }
+    row.style.display = parts.length ? 'flex' : 'none';
+    el.innerHTML = parts.join(' · ');
   }
 
   /* === XP UI + CHARTS === */
@@ -4150,10 +4515,128 @@
     } else { st.lastJail = now; markActed('jail', cfg.jailInt); saveSt(); }
   }
 
+  /* === BACKGROUND HEAL ===
+   * The old auto-health navigated to credits.aspx, clicked Buy, reloaded, and
+   * repeated — several full page loads to recover 10% at a time, all of it
+   * yanking Jarvis away from whatever it was doing. Worse, it abandoned the
+   * page mid-action, so a heal during a crime cycle cost the crime too.
+   *
+   * This does the same purchases as same-origin POSTs: GET credits.aspx, lift
+   * __VIEWSTATE / __EVENTVALIDATION / __VIEWSTATEGENERATOR out of the response,
+   * POST them back with btnBuyHealth, repeat until health reads 100%. No
+   * navigation at all, so it can run from any page, including mid-cooldown.
+   *
+   * Guards: single-flight, hard try cap, stops the moment the response says you
+   * can't afford it. Read health back from each response rather than trusting an
+   * assumed +10 per buy, so a changed heal amount can't loop it forever.
+   */
+  const HEAL_PATH  = '/authenticated/credits.aspx';
+  const HEAL_TRIES = 30;
+  const HEAL_GAP_MS = 450;
+
+  let _healActive = false;
+
+  function _healKeys(html) {
+    const d = new DOMParser().parseFromString(html || '', 'text/html');
+    const vs  = d.getElementById('__VIEWSTATE')?.value;
+    const ev  = d.getElementById('__EVENTVALIDATION')?.value;
+    const gen = d.getElementById('__VIEWSTATEGENERATOR')?.value;
+    if (!vs || !ev) return null;
+    return { vs, ev, gen, doc: d };
+  }
+
+  function _healHpOf(doc) {
+    const t = doc.getElementById('ctl00_userInfo_lblhealth')?.textContent || '';
+    const n = parseInt(t.replace('%', '').trim(), 10);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  function _healCreditsOf(doc) {
+    const t = doc.getElementById('ctl00_userInfo_lblcredits')?.textContent || '';
+    const n = parseInt(t.replace(/[,$]/g, '').trim(), 10);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  async function bgHeal(target) {
+    if (_healActive) return false;
+    _healActive = true;
+    const want = Math.max(1, Math.min(100, Number(target) || 100));
+    let healed = 0, startHp = null;
+    try {
+      for (let i = 0; i < HEAL_TRIES; i++) {
+        const r = await fetch(HEAL_PATH, { method:'GET', credentials:'same-origin', cache:'no-store' });
+        if (!r.ok) { console.warn(APP_TAG, '[HEAL] GET failed', r.status); break; }
+        const k = _healKeys(await r.text());
+        if (!k) { console.warn(APP_TAG, '[HEAL] ViewState unreadable — aborting'); break; }
+
+        const hp = _healHpOf(k.doc);
+        if (startHp === null) startHp = hp;
+        if (hp !== null && hp >= want) break;
+
+        const cr = _healCreditsOf(k.doc);
+        if (cr !== null && cr < 10) { console.log(APP_TAG, '[HEAL] Out of credits — stopping'); break; }
+
+        const p = new URLSearchParams();
+        p.append('__VIEWSTATE', k.vs);
+        p.append('__EVENTVALIDATION', k.ev);
+        if (k.gen) p.append('__VIEWSTATEGENERATOR', k.gen);
+        p.append('ctl00$main$btnBuyHealth', 'Buy');
+
+        const pr = await fetch(HEAL_PATH, {
+          method:'POST', credentials:'same-origin',
+          headers:{ 'Content-Type':'application/x-www-form-urlencoded' },
+          body: p.toString()
+        });
+        if (!pr.ok) { console.warn(APP_TAG, '[HEAL] POST failed', pr.status); break; }
+        const ph = await pr.text();
+        if (/don'?t have enough (credits|money)/i.test(ph)) {
+          console.log(APP_TAG, '[HEAL] Not enough credits — stopping');
+          break;
+        }
+        healed++;
+        await wait(HEAL_GAP_MS);
+      }
+    } catch (e) {
+      console.warn(APP_TAG, '[HEAL] error:', e && e.message ? e.message : e);
+    } finally {
+      _healActive = false;
+      st.lastHealth = Date.now(); st.buyHealth = false; saveSt();
+      if (healed > 0) {
+        console.log(`${APP_TAG}[HEAL] ${healed} purchase(s) from ${startHp}%`);
+        tgMsg('health', `💊 <b>Healed</b>\n${st.player||'?'} | ${startHp}% → target ${want}% (${healed} buy${healed===1?'':'s'})`);
+      }
+    }
+    return healed > 0;
+  }
+
   function checkHealth() {
-    if (!st.health || st.acting || paused) return;
-    const hp = getHp(); const cr = getCredits();
-    if (hp >= 100) { st.buyHealth = false; saveSt(); return; }
+    if (!st.health || paused) return;
+    const hp = getHp();
+    if (hp >= Math.min(100, cfg.targetHealth || 100)) { st.buyHealth = false; saveSt(); return; }
+
+    /* Background path: no navigation, so it does NOT need st.acting to be clear
+     * and cannot strand an action mid-flight. Fire and let it run. */
+    if (cfg.bgHealOn) {
+      if (_healActive) return;
+      /* Rate limit. getHp() reads the CURRENT page's status bar, which is server
+       * rendered and therefore frozen until the next page load — after a
+       * background heal it still shows the old value, so without this the loop
+       * would re-fire a heal every tick on stale data. bgHeal re-reads health
+       * from its own fetch and exits immediately when already full, so each
+       * repeat costs only a wasted GET, but at one every couple of seconds that
+       * still adds up. Reuse healthInt as the gap. */
+      const gap = Math.max(10, Number(cfg.healthInt) || 30) * 1000;
+      if (st.lastHealth && (Date.now() - st.lastHealth) < gap) return;
+      const cr = getCredits();
+      if (cr > 0 && cr < 10) { st.health = false; saveSt(); return; }
+      st.lastHealth = Date.now(); saveSt();   // claim the slot before the await
+      bgHeal(cfg.targetHealth || 100);
+      return;
+    }
+
+    // Legacy navigation path, kept for anyone who wants the old visible behaviour.
+    if (st.acting) return;
+    const cr = getCredits();
     if (cr < 10) { st.health = false; saveSt(); return; }
     if (!/\/authenticated\/credits\.aspx$/i.test(location.pathname)) {
       st.buyHealth = true; saveSt(); setTimeout(() => location.href = '/authenticated/credits.aspx', 1500); return;
@@ -4361,6 +4844,128 @@
     }
 
     st.acting = false; st.action = ''; st.lastGarage = now; GM_setValue('cbActStart',0); saveSt();
+  }
+
+  /* === SCRAP → FMJ ===
+   * store.aspx?p=s converts scrap into bullets: 5 scrap = 1000 FMJ, bought via a
+   * __doPostBack link (ctl00$main$lbBuy1kFMJScrap) rather than a normal button,
+   * so it needs a synthesised postback rather than a click.
+   *
+   * The page rate-limits at roughly 2 seconds, so this deliberately fires ONE
+   * purchase per page load and then reloads, instead of looping in place. Slower,
+   * but it never trips the limiter — and the limiter's message is indistinguishable
+   * from a real failure, so avoiding it entirely is worth the extra seconds.
+   *
+   * Runs only when scrap is at or above the floor; below that it backs off for
+   * hours rather than re-checking a page that cannot do anything useful.
+   */
+  const SCRAP_PATH = '/authenticated/store.aspx?p=s';
+  const SCRAP_COST = 5;                       // scrap per 1000 FMJ
+  const SCRAP_IDLE_MS = 6 * 3600 * 1000;      // nothing to convert → re-check in 6h
+
+  function scrapNextDue() { return parseInt(GM_getValue('cbScrapNextAt', 0) || 0, 10); }
+  function setScrapNext(ms) { GM_setValue('cbScrapNextAt', Date.now() + ms); }
+
+  // Synthesised ASP.NET postback — the buy control is an <a> calling __doPostBack,
+  // so there is no element whose .click() does the right thing on its own.
+  function scrapPostBack(eventTarget) {
+    const f = document.getElementById('aspnetForm') || document.querySelector('form');
+    if (!f) { console.warn(APP_TAG, '[SCRAP] no form found'); return false; }
+    const ensure = id => {
+      let el = document.getElementById(id);
+      if (!el) {
+        el = document.createElement('input');
+        el.type = 'hidden'; el.id = id; el.name = id;
+        f.appendChild(el);
+      }
+      return el;
+    };
+    ensure('__EVENTTARGET').value = eventTarget;
+    ensure('__EVENTARGUMENT').value = '';
+    f.submit();
+    return true;
+  }
+
+  function getScrapBalance() {
+    const m = (document.body.innerText || document.body.textContent || '')
+      .match(/have\s+([\d,]+(?:\.\d+)?)\s+scrap/i);
+    return m ? parseFloat(m[1].replace(/,/g, '')) : null;
+  }
+
+  function scrapDue() {
+    if (!cfg.scrapOn || st.inJail || st.acting || paused) return false;
+    const due = scrapNextDue();
+    return !due || Date.now() >= due;
+  }
+
+  // Returns true if it took over the page (navigated, or fired a postback).
+  async function doScrap() {
+    if (!scrapDue()) return false;
+
+    const onScrap = window.location.pathname.toLowerCase().includes('/store.aspx')
+                 && /(^|[?&])p=s(&|$)/i.test(window.location.search);
+    if (!onScrap) {
+      setStatus('♻️ Scrap → FMJ...');
+      safeNav(SCRAP_PATH + '&_=' + Date.now());
+      return true;
+    }
+
+    st.acting = true; st.action = 'scrap'; GM_setValue('cbActStart', Date.now());
+    const done = (waitMs, msg) => {
+      setScrapNext(waitMs);
+      st.acting = false; st.action = ''; GM_setValue('cbActStart', 0); saveSt();
+      if (msg) setStatus(msg);
+    };
+
+    // Rate-limited: back off and let the next cycle retry rather than hammering.
+    const msg = (document.querySelector('#ctl00_lblMsg, .TMNErrorFont')?.textContent || '');
+    if (/wait a few seconds|too fast|try again/i.test(msg)) {
+      console.log(APP_TAG, '[SCRAP] Rate limited — backing off 15s');
+      done(15000, '♻️ Scrap rate-limited');
+      return false;
+    }
+
+    const scrap = getScrapBalance();
+    if (scrap === null) {
+      console.warn(APP_TAG, '[SCRAP] Could not read balance — backing off 30m');
+      done(30 * 60 * 1000, '♻️ Scrap balance unreadable');
+      return false;
+    }
+
+    const floor = Math.max(SCRAP_COST, Number(cfg.scrapFloor) || SCRAP_COST);
+    if (scrap < floor || scrap < SCRAP_COST) {
+      console.log(APP_TAG, `[SCRAP] ${scrap} scrap left (floor ${floor}) — nothing to convert`);
+      done(SCRAP_IDLE_MS, `♻️ Scrap ${scrap} — idle`);
+      return false;
+    }
+
+    /* Armoured Vehicle protection costs 5 scrap and the link only exists while
+     * you don't own it, so grab it once before spending scrap on bullets. */
+    const protLink = document.getElementById('ctl00_main_lbBuyArmVehProtection');
+    if (protLink && cfg.scrapProt && scrap >= 5) {
+      console.log(APP_TAG, '[SCRAP] Buying Armoured Vehicle protection (5 scrap)');
+      tgMsg('crusher', `🛡️ <b>Armoured Vehicle</b>\n${st.player||'?'} | protection bought (5 scrap)`);
+      setScrapNext(8000);
+      await humanWait([2200, 2600]);   // stay clear of the ~2s page limiter
+      scrapPostBack('ctl00$main$lbBuyArmVehProtection');
+      return true;
+    }
+
+    const buyLink = document.getElementById('ctl00_main_lbBuy1kFMJScrap');
+    if (!buyLink) {
+      console.warn(APP_TAG, '[SCRAP] Buy link not found — backing off 30m');
+      done(30 * 60 * 1000, '♻️ Scrap buy link missing');
+      return false;
+    }
+
+    const runs = GM_getValue('cbScrapRuns', 0) + 1;
+    GM_setValue('cbScrapRuns', runs);
+    console.log(APP_TAG, `[SCRAP] Converting ${SCRAP_COST} scrap → 1000 FMJ (${scrap} left)`);
+    setStatus(`♻️ Scrap ${scrap} → 1000 FMJ`);
+    setScrapNext(8000);
+    await humanWait([2200, 2600]);
+    scrapPostBack('ctl00$main$lbBuy1kFMJScrap');
+    return true;
   }
 
   /* === HOT CITY === */
@@ -4791,6 +5396,16 @@
         <span><span id="jb-jail-hold" style="color:var(--jb-warning)"></span><span id="jb-jail-count" style="font-weight:600">0/2000</span></span>
       </div>
 
+      <div id="jb-daily-row" style="display:none;justify-content:space-between;align-items:center;padding:3px 10px;font-size:10px;border-top:1px solid var(--jb-border);color:var(--jb-text-ter)">
+        <span>📅 Daily limits:</span>
+        <span id="jb-daily-counts" style="font-weight:600"></span>
+      </div>
+
+      <div id="jb-dtmkick-row" style="display:none;justify-content:space-between;align-items:center;padding:3px 10px;font-size:10px;border-top:1px solid var(--jb-border);color:var(--jb-text-ter)">
+        <span>🥾 DTM partner:</span>
+        <span id="jb-dtmkick" style="font-weight:600"></span>
+      </div>
+
       <div class="jb-footer" id="jb-status">Ready</div>
 
       <div class="jb-modal-bg" id="jb-backdrop"></div>
@@ -4838,6 +5453,32 @@
               <span class="jb-sub">30–900 · default 60</span>
             </div>
             <div class="jb-sub jb-mb" style="color:var(--jb-text-ter);font-size:9px">Each background poll parses a whole page into memory (OC, DTM, travel; protection at 2× this). Biggest single lever on a slow device, and nothing is lost by raising it.</div>
+
+            <hr class="jb-sep">
+            <div class="jb-sect-title">Action selection</div>
+            <label class="jb-switch jb-mb" title="OFF = pick at random from the crimes you've ticked, and buy a fixed booze amount. ON = pick the most valuable crime still succeeding at or above the threshold below, and buy your full rank carry limit of booze."><input type="checkbox" id="jb-smartpick" ${cfg.smartPick?'checked':''}> 🎯 <span id="jb-smartpick-label">${cfg.smartPick?'Smart (best value)':'Random (spread)'}</span></label>
+            <div class="jb-row jb-mb">
+              <label class="jb-label" style="white-space:nowrap">Min success %:</label>
+              <input class="jb-input jb-input-sm" type="number" id="jb-smart-minpct" value="${cfg.smartMinPct}" min="0" max="100" step="5">
+              <span class="jb-sub" id="jb-smart-preview">—</span>
+            </div>
+            <div class="jb-sub jb-mb" style="color:var(--jb-text-ter);font-size:9px">Smart takes the <b>most valuable</b> crime still at or above that success rate — not simply the safest. At high rank the odds barely differ (sampled 97/95/94/94/90%), so picking on odds alone would always choose the cheapest crime. The game re-rolls the odds every visit, so this is re-decided from the live page each time: on a bad roll it steps down to the best crime that's safe enough, and back up next visit. The preview above is a snapshot of right now. Raise to play safer, lower to reach for bigger jobs. Booze: smart buys your rank carry limit and sells 1–3 at a time.</div>
+
+            <hr class="jb-sep">
+            <div class="jb-sect-title">Daily limits</div>
+            <label class="jb-switch jb-mb" title="Hard cap on attempts per action per game-day. Separate from the no-XP limiter, which infers the game's own cap."><input type="checkbox" id="jb-daily-on" ${cfg.dailyLimitOn?'checked':''}> 📅 Per-action daily limits</label>
+            <div class="jb-row">
+              <label class="jb-label" style="width:46px">👜 Crime</label>
+              <input class="jb-input jb-input-sm" type="number" id="jb-daily-crime" value="${cfg.dailyLimitCrime}" min="0" max="10000" step="10">
+              <label class="jb-label" style="width:38px">🏎️ GTA</label>
+              <input class="jb-input jb-input-sm" type="number" id="jb-daily-gta" value="${cfg.dailyLimitGta}" min="0" max="10000" step="10">
+            </div>
+            <div class="jb-row jb-mb">
+              <label class="jb-label" style="width:46px">🍺 Booze</label>
+              <input class="jb-input jb-input-sm" type="number" id="jb-daily-booze" value="${cfg.dailyLimitBooze}" min="0" max="10000" step="10">
+              <span class="jb-sub">0 = unlimited · resets 00:00 game time</span>
+            </div>
+            <div class="jb-sub jb-mb" id="jb-daily-status" style="color:var(--jb-text-ter);font-size:9px">Jail has its own limit in the Jail section.</div>
 
             <hr class="jb-sep">
             <div class="jb-sect-title">Crimes</div>
@@ -4903,6 +5544,37 @@
               <label class="jb-label">Target %:</label>
               <input class="jb-input jb-input-sm" type="number" id="jb-target-hp" value="${cfg.targetHealth}" min="10" max="100">
             </div>
+            <label class="jb-switch jb-mb" title="Heal via background POSTs to the credits page instead of navigating there. Works from any page, doesn't interrupt an action, and tops up in one go."><input type="checkbox" id="jb-bgheal" ${cfg.bgHealOn?'checked':''}> 💊 Background heal (no navigation)</label>
+            <div class="jb-row jb-mb">
+              <button class="jb-btn jb-btn-outline" id="jb-heal-now" style="padding:2px 8px;font-size:10px">Heal now</button>
+              <span class="jb-sub" id="jb-heal-status">Buys repeatedly until Target %, or credits run out.</span>
+            </div>
+
+            <hr class="jb-sep">
+            <div class="jb-sect-title">Scrap → FMJ</div>
+            <label class="jb-switch jb-mb" title="Converts scrap into bullets at store.aspx?p=s — 5 scrap per 1000 FMJ. One purchase per page load to stay under the game's ~2s rate limit."><input type="checkbox" id="jb-scrap-on" ${cfg.scrapOn?'checked':''}> ♻️ Convert scrap to FMJ</label>
+            <label class="jb-switch jb-mb" title="Armoured Vehicle protection costs 5 scrap and the link only appears while you don't own it. Bought once, before any bullets."><input type="checkbox" id="jb-scrap-prot" ${cfg.scrapProt?'checked':''}> 🛡️ Buy Armoured Vehicle protection first</label>
+            <div class="jb-row jb-mb">
+              <label class="jb-label" style="white-space:nowrap">Keep at least:</label>
+              <input class="jb-input jb-input-sm" type="number" id="jb-scrap-floor" value="${cfg.scrapFloor}" min="5" max="10000" step="5">
+              <span class="jb-sub">scrap in reserve</span>
+            </div>
+            <div class="jb-sub jb-mb" style="color:var(--jb-text-ter);font-size:9px">Below the reserve it stops and re-checks in 6 hours. Converted so far: <span id="jb-scrap-runs">${GM_getValue('cbScrapRuns',0)}</span>k FMJ.</div>
+
+            <hr class="jb-sep">
+            <div class="jb-sect-title">DTM partner kick</div>
+            <label class="jb-switch jb-mb" title="Drop a partner who never accepts, or kick one who takes the seat then stalls. Never kicks a partner showing Ready — they've bought their drugs and kicking destroys the purchase."><input type="checkbox" id="jb-dtmkick-on" ${cfg.dtmKickOn?'checked':''}> 🥾 Drop / kick a stalled partner</label>
+            <div class="jb-row">
+              <label class="jb-label" style="white-space:nowrap">Invite timeout:</label>
+              <input class="jb-input jb-input-sm" type="number" id="jb-dtmkick-wait" value="${cfg.dtmKickWaitSec}" min="30" max="1800" step="30">
+              <span class="jb-sub">s — never accepted</span>
+            </div>
+            <div class="jb-row jb-mb">
+              <label class="jb-label" style="white-space:nowrap">Seated grace:</label>
+              <input class="jb-input jb-input-sm" type="number" id="jb-dtmkick-grace" value="${cfg.dtmKickGraceSec}" min="30" max="1800" step="30">
+              <span class="jb-sub">s — accepted but stalled</span>
+            </div>
+            <div class="jb-sub jb-mb" style="color:var(--jb-text-ter);font-size:9px">A random 0–60s is added to the invite timeout so the drop isn't a predictable round number. The seat is re-checked live immediately before any kick — the kick removes whoever is seated at that instant, not who was seated when the page loaded.</div>
 
             <hr class="jb-sep">
             <div class="jb-sect-title">Garage</div>
@@ -4993,6 +5665,14 @@
               <input class="jb-input jb-input-sm" type="number" id="jb-noxp-streak" value="${cfg.noXpStreakLimit}" min="2" max="20">
             </div>
             <div class="jb-sub jb-mb" style="color:var(--jb-text-ter);font-size:9px">If an action gains no XP this many times in a row, it's treated as the game's daily cap and disabled until the next game-day.</div>
+            <div class="jb-row jb-mb" title="Also cap an action that has gained no XP for this long despite still firing. In Away cadence an action may only fire a few times an hour, so a 5-attempt streak can take most of an evening to trip.">
+              <label class="jb-label">Or no XP for (min):</label>
+              <input class="jb-input jb-input-sm" type="number" id="jb-noxp-stale" value="${cfg.noXpStaleMin}" min="0" max="600" step="5">
+              <span class="jb-sub">0 = off</span>
+            </div>
+
+            <label class="jb-switch jb-mb" title="Detects the game's Important-message panel when it carries a warning or soft ban, pauses everything, and alerts repeatedly until you see it. Never auto-answers anything."><input type="checkbox" id="jb-antibot-on" ${cfg.antiBotOn?'checked':''}> 🚨 Anti-bot / soft-ban detection</label>
+            <div class="jb-sub jb-mb" id="jb-antibot-status" style="color:var(--jb-text-ter);font-size:9px">Pauses on detection and parses the stated expiry, so the pause lifts by itself. Staff questions are untouched — they still go through the script-check path.</div>
 
             <hr class="jb-sep">
             <div class="jb-sect-title">Breaks (Human Simulation)</div>
@@ -5246,6 +5926,19 @@
 
     // Ribbon toggles — use CSS vars for theme-aware colours
     const ribbonMap = { 'jb-r-crime':'crime','jb-r-gta':'gta','jb-r-booze':'booze','jb-r-jail':'jail','jb-r-health':'health','jb-r-garage':'garage','jb-r-oc':'autoOC','jb-r-dtm':'autoDTM' };
+    /* Published so code outside buildUI can repaint the ribbon when it flips an
+     * action programmatically. The daily limits, the no-XP limiter and the jail
+     * cap all switch actions off by themselves; before this the buttons kept
+     * showing the old colour until the next page load, so the panel disagreed
+     * with what Jarvis was actually doing. */
+    repaintRibbon = () => {
+      for (const [id, key] of Object.entries(ribbonMap)) {
+        const btn = _shadow && _shadow.querySelector(`#${id}`);
+        if (!btn) continue;
+        btn.style.background = st[key] ? 'var(--jb-ribbon-on)' : 'var(--jb-ribbon-off)';
+        btn.style.color = st[key] ? 'var(--jb-ribbon-on-text)' : 'var(--jb-ribbon-off-text)';
+      }
+    };
     for (const [id, key] of Object.entries(ribbonMap)) {
       const btn = _shadow.querySelector(`#${id}`);
       // Set initial colours from theme
@@ -5489,6 +6182,120 @@
         cfg.jailDelayMax = Math.max(cfg.jailDelayMin, Math.min(600, parseInt(e.target.value,10)||0));
         e.target.value = cfg.jailDelayMax; GM_setValue('cbJailDelayMax', cfg.jailDelayMax);
       }); }
+
+    // --- Smart / random action picking ---
+    { const sp = _shadow.querySelector('#jb-smartpick');
+      if (sp) sp.addEventListener('change', e => {
+        cfg.smartPick = e.target.checked; GM_setValue('cbSmartPick', cfg.smartPick);
+        const l = _shadow.querySelector('#jb-smartpick-label');
+        if (l) l.textContent = cfg.smartPick ? 'Smart (best value)' : 'Random (spread)';
+        localStorage.removeItem('cbBoozeBroke');   // quantities change — start clean
+        updateSmartPreview();
+        setStatus(cfg.smartPick ? '🎯 Smart action picking' : '🎯 Random action picking');
+      }); }
+    { const mp = _shadow.querySelector('#jb-smart-minpct');
+      if (mp) mp.addEventListener('input', e => {
+        cfg.smartMinPct = Math.max(0, Math.min(100, parseInt(e.target.value,10)||0));
+        GM_setValue('cbSmartMinPct', cfg.smartMinPct);
+        updateSmartPreview();
+      }); }
+
+    // --- Per-action daily limits ---
+    { const d = _shadow.querySelector('#jb-daily-on');
+      if (d) d.addEventListener('change', e => {
+        cfg.dailyLimitOn = e.target.checked; GM_setValue('cbDailyLimitOn', cfg.dailyLimitOn);
+        /* Switching the feature off must also undo anything it switched off, or
+         * an action disabled by a limit stays dark with nothing left on screen to
+         * explain why. */
+        if (!cfg.dailyLimitOn) {
+          Object.keys(DAILY_ACTIONS).forEach(action => {
+            if (!GM_getValue('cbDayAutoOff_'+action, false)) return;
+            GM_setValue('cbDayAutoOff_'+action, false);
+            if (action in st) st[action] = GM_getValue('cbDayWasOn_'+action, true);
+          });
+          saveSt(); syncAll(); repaintRibbon();
+        }
+        updateDailyCountUI();
+        setStatus(cfg.dailyLimitOn ? '📅 Daily limits on' : '📅 Daily limits off');
+      }); }
+    [['#jb-daily-crime','crime','dailyLimitCrime','cbDailyLimitCrime'],
+     ['#jb-daily-gta',  'gta',  'dailyLimitGta',  'cbDailyLimitGta'],
+     ['#jb-daily-booze','booze','dailyLimitBooze','cbDailyLimitBooze']].forEach(([sel, action, key, gmKey]) => {
+      const el = _shadow.querySelector(sel);
+      if (!el) return;
+      el.addEventListener('change', e => {
+        cfg[key] = Math.max(0, Math.min(10000, parseInt(e.target.value,10)||0));
+        e.target.value = cfg[key]; GM_setValue(gmKey, cfg[key]);
+        // Raising the limit past today's count should bring the action back on
+        // straight away, not leave it off until midnight.
+        if (GM_getValue('cbDayAutoOff_'+action, false) && (!cfg[key] || getDailyCount(action) < cfg[key])) {
+          GM_setValue('cbDayAutoOff_'+action, false);
+          if (action in st) { st[action] = GM_getValue('cbDayWasOn_'+action, true); saveSt(); syncAll(); repaintRibbon(); }
+        }
+        updateDailyCountUI();
+      });
+    });
+
+    // --- Background heal ---
+    { const bh = _shadow.querySelector('#jb-bgheal');
+      if (bh) bh.addEventListener('change', e => {
+        cfg.bgHealOn = e.target.checked; GM_setValue('cbBgHealOn', cfg.bgHealOn);
+        setStatus(cfg.bgHealOn ? '💊 Background heal on' : '💊 Heal by navigation');
+      }); }
+    { const hn = _shadow.querySelector('#jb-heal-now');
+      if (hn) hn.addEventListener('click', async () => {
+        const s = _shadow.querySelector('#jb-heal-status');
+        if (s) s.textContent = 'Healing…';
+        const did = await bgHeal(cfg.targetHealth || 100);
+        if (s) s.textContent = did ? 'Done — check the status bar.' : 'Nothing bought (already full, or no credits).';
+      }); }
+
+    // --- Scrap → FMJ ---
+    { const so = _shadow.querySelector('#jb-scrap-on');
+      if (so) so.addEventListener('change', e => {
+        cfg.scrapOn = e.target.checked; GM_setValue('cbScrapOn', cfg.scrapOn);
+        GM_setValue('cbScrapNextAt', 0);   // act on the next tick rather than waiting out a stale backoff
+        setStatus(cfg.scrapOn ? '♻️ Scrap → FMJ on' : '♻️ Scrap → FMJ off');
+      }); }
+    { const sp = _shadow.querySelector('#jb-scrap-prot');
+      if (sp) sp.addEventListener('change', e => { cfg.scrapProt = e.target.checked; GM_setValue('cbScrapProt', cfg.scrapProt); }); }
+    { const sf = _shadow.querySelector('#jb-scrap-floor');
+      if (sf) sf.addEventListener('change', e => {
+        cfg.scrapFloor = Math.max(5, Math.min(10000, parseInt(e.target.value,10)||5));
+        e.target.value = cfg.scrapFloor; GM_setValue('cbScrapFloor', cfg.scrapFloor);
+        GM_setValue('cbScrapNextAt', 0);
+      }); }
+
+    // --- DTM partner kick ---
+    { const dk = _shadow.querySelector('#jb-dtmkick-on');
+      if (dk) dk.addEventListener('change', e => {
+        cfg.dtmKickOn = e.target.checked; GM_setValue('cbDtmKickOn', cfg.dtmKickOn);
+        if (!cfg.dtmKickOn) { try { dtmClearKickState(); } catch(_){} }
+        updateDtmKickUI();
+        setStatus(cfg.dtmKickOn ? '🥾 DTM kick on' : '🥾 DTM kick off');
+      }); }
+    { const dw = _shadow.querySelector('#jb-dtmkick-wait');
+      if (dw) dw.addEventListener('change', e => {
+        cfg.dtmKickWaitSec = Math.max(30, Math.min(1800, parseInt(e.target.value,10)||210));
+        e.target.value = cfg.dtmKickWaitSec; GM_setValue('cbDtmKickWaitSec', cfg.dtmKickWaitSec);
+      }); }
+    { const dg = _shadow.querySelector('#jb-dtmkick-grace');
+      if (dg) dg.addEventListener('change', e => {
+        cfg.dtmKickGraceSec = Math.max(30, Math.min(1800, parseInt(e.target.value,10)||180));
+        e.target.value = cfg.dtmKickGraceSec; GM_setValue('cbDtmKickGraceSec', cfg.dtmKickGraceSec);
+      }); }
+
+    // --- Anti-bot detection ---
+    { const ab = _shadow.querySelector('#jb-antibot-on');
+      if (ab) ab.addEventListener('change', e => {
+        cfg.antiBotOn = e.target.checked; GM_setValue('cbAntiBotOn', cfg.antiBotOn);
+        setStatus(cfg.antiBotOn ? '🚨 Anti-bot detection on' : '🚨 Anti-bot detection off');
+      }); }
+    { const ns = _shadow.querySelector('#jb-noxp-stale');
+      if (ns) ns.addEventListener('change', e => {
+        cfg.noXpStaleMin = Math.max(0, Math.min(600, parseInt(e.target.value,10)||0));
+        e.target.value = cfg.noXpStaleMin; GM_setValue('cbNoXpStaleMin', cfg.noXpStaleMin);
+      }); }
     _shadow.querySelector('#jb-jail-reset').addEventListener('click', () => {
       GM_setValue('cbJailCount', 0);
       GM_setValue('cbJailCountDay', gameDayStr());
@@ -5640,6 +6447,8 @@
       if (el) el.textContent = 'Break: ' + (getBreakStatus().msg || 'None active');
       // Refresh jail counter too (catches game-day rollover during idle)
       updateJailCountUI();
+      try { updateDailyCountUI(); } catch(_){}
+      try { updateDtmKickUI(); } catch(_){}
     }, 5000);
 
     // Whitelist modal
@@ -5864,6 +6673,9 @@
 
     // Initialize jail counter display
     updateJailCountUI();
+    try { updateDailyCountUI(); } catch(_){}
+    try { updateDtmKickUI(); } catch(_){}
+    try { updateSmartPreview(); } catch(_){}
 
     // Drag — grab from anywhere on the panel except interactive controls
     let locked = GM_getValue('cbLocked', true);
@@ -6183,7 +6995,7 @@
     return { rank, next: nextRank, pct, toNext: parseFloat((nextBase - xp).toFixed(2)) };
   }
 
-  /* === STATUS-BAR XP FALLBACK (2000.233) ===
+  /* === STATUS-BAR XP FALLBACK (2000.224) ===
    * hndlr.ashx?m=pst is unreliable in practice: with Jarvis running, three
    * consecutive hourly reports showed the total frozen at exactly 3944.20 — not
    * one usable value in 3+ hours. Meanwhile the game's own status bar reported
@@ -6247,7 +7059,7 @@
     onExperienceRead(d.xp);
   }
 
-  /* === ON-DEMAND STAT REFRESH (re-added 2000.233) ===
+  /* === ON-DEMAND STAT REFRESH (re-added 2000.226) ===
    * Fires the game's own status poll instead of waiting for its 15s interval,
    * which under bot navigation frequently never elapses at all. Clicking
    * #ctl00_imgRefresh runs onclick="pstats(N)" → $.getJSON('hndlr.ashx?m=pst…'),
@@ -6383,7 +7195,7 @@
   XP_ACTIONS.forEach(a => { xpNoGainStreak[a] = GM_getValue('cbXpStreak_'+a, 0); });
 
   function saveXpState() {
-    /* No trimming here. 2000.233 briefly added configurable caps that trimmed on
+    /* No trimming here. 2000.232 briefly added configurable caps that trimmed on
      * every save, but lowering one silently and permanently discarded stored
      * chart history — a destructive setting sitting next to harmless ones.
      * Removed in 233; onExperienceRead's own 400/40 limits are the only caps.
@@ -6467,24 +7279,46 @@
     if (gained) {
       xpNoGainStreak[action] = 0;
       GM_setValue('cbXpStreak_'+action, 0);
+      GM_setValue('cbXpLastGain_'+action, Date.now());
       return;
     }
     xpNoGainStreak[action] = (xpNoGainStreak[action] || 0) + 1;
     GM_setValue('cbXpStreak_'+action, xpNoGainStreak[action]);
     console.log(`${APP_TAG}[XP] ${action} no-XP streak: ${xpNoGainStreak[action]}/${cfg.noXpStreakLimit}`);
     if (xpNoGainStreak[action] >= cfg.noXpStreakLimit) {
-      disableActionForDay(action);
+      disableActionForDay(action, `no XP ×${cfg.noXpStreakLimit}`);
       xpNoGainStreak[action] = 0;
       GM_setValue('cbXpStreak_'+action, 0);
+      return;
+    }
+
+    /* Second trigger: XP flat for a stretch of wall-clock time despite the action
+     * still firing. The streak count alone misses the slow case — in Away cadence
+     * an action can fire only a handful of times an hour, so five attempts can
+     * span most of an evening before the streak trips. Off by default (0) because
+     * it needs a baseline gain first; without one there is nothing to measure from
+     * and it would fire on a fresh install. */
+    const staleMin = Math.max(0, Number(cfg.noXpStaleMin) || 0);
+    if (staleMin > 0) {
+      const lastGain = GM_getValue('cbXpLastGain_'+action, 0);
+      if (lastGain > 0) {
+        const mins = Math.floor((Date.now() - lastGain) / 60000);
+        if (mins >= staleMin) {
+          disableActionForDay(action, `no XP for ${mins}m`);
+          xpNoGainStreak[action] = 0;
+          GM_setValue('cbXpStreak_'+action, 0);
+        }
+      }
     }
   }
 
-  function disableActionForDay(action) {
+  function disableActionForDay(action, reason) {
     GM_setValue('cbXpCapDay_'+action, gameDayStr());
     GM_setValue('cbXpCapWasOn_'+action, !!st[action]);
-    if (action in st) { st[action] = false; saveSt(); }
-    console.log(`${APP_TAG}[XP] ${action} hit no-XP cap — disabled until next game-day`);
-    tgMsg('jail', `🛑 <b>${(ACTION_ICON[action]||'')+action.toUpperCase()} capped</b>\n${st.player||'?'} | no XP ×${cfg.noXpStreakLimit}, off till tomorrow`);
+    if (action in st) { st[action] = false; saveSt(); repaintRibbon(); }
+    const why = reason || `no XP ×${cfg.noXpStreakLimit}`;
+    console.log(`${APP_TAG}[XP] ${action} hit no-XP cap (${why}) — disabled until next game-day`);
+    tgMsg('jail', `🛑 <b>${(ACTION_ICON[action]||'')+action.toUpperCase()} capped</b>\n${st.player||'?'} | ${why}, off till tomorrow`);
   }
 
   function checkXpCapResets() {
@@ -6494,8 +7328,9 @@
       const capDay = GM_getValue('cbXpCapDay_'+action, '');
       if (capDay && capDay !== today) {
         GM_setValue('cbXpCapDay_'+action, '');
+        GM_setValue('cbXpLastGain_'+action, 0);   // re-baseline the stale-XP clock
         const wasOn = GM_getValue('cbXpCapWasOn_'+action, true);
-        if (action in st && wasOn) { st[action] = true; saveSt(); }
+        if (action in st && wasOn) { st[action] = true; saveSt(); repaintRibbon(); }
         console.log(`${APP_TAG}[XP] ${action} no-XP cap reset — re-enabled (new game-day)`);
       }
     });
@@ -6985,6 +7820,9 @@
     localStorage.removeItem(LS_CREATE_DTM_NEXT);
     localStorage.removeItem(LS_CREATE_DTM_POLL);
     localStorage.removeItem('cbCreateDtmStartedAt');
+    localStorage.removeItem('cbDtmReinvites');
+    // Kick/drop clocks belong to one invite cycle — never carry them into the next.
+    try { dtmClearKickState(); } catch(_){}
   }
 
   function isDtmSchedReady() {
@@ -7016,6 +7854,235 @@
     const onDtm = /\/authenticated\/organizedcrime\.aspx/i.test(location.pathname) && /p=dtm/i.test(location.search);
     if (onDtm) setTimeout(() => handleCreateDTM(), 600);
     else window.location.href = DTM_PAGE + '&_=' + Date.now();
+  }
+
+  /* === DTM PARTNER KICK ===
+   * Our DTM creation invites a partner and then simply waits, so a partner who
+   * never accepts — or who accepts and then goes offline — parks the whole DTM
+   * indefinitely and burns the 2h cooldown window for nothing.
+   *
+   * Two distinct situations, and they are NOT interchangeable:
+   *
+   *   Pending invite (nobody seated) — the invite was sent and never taken up.
+   *     There is nothing to kick; we clear our own state and re-invite.
+   *   Seated partner (Kick button present) — they took the seat but aren't
+   *     progressing. This one can be kicked.
+   *
+   * Two hard safety rules, both learned from the reference implementation:
+   *
+   *   1. NEVER kick a partner showing Ready. They have bought their drugs; kicking
+   *      destroys that purchase and restarts the DTM. Ready always wins.
+   *   2. Re-check the seat LIVE immediately before kicking. The kick postback
+   *      carries no participant id — it removes whoever is seated at that instant.
+   *      A page that has been open a few minutes can easily be stale, and kicking
+   *      on stale data can eject a perfectly good replacement partner.
+   *
+   * A grace period applies to a seated-but-offline partner so a momentary presence
+   * lag right after accepting can't trigger an instant kick.
+   */
+  const LS_DTM_INV_AT   = 'cbDtmInviteSentAt';
+  const LS_DTM_INV_NAME = 'cbDtmInvitedName';
+  const LS_DTM_INV_TO   = 'cbDtmInviteTimeoutMs';
+  const LS_DTM_SEAT_AT  = 'cbDtmSeatWaitSince';   // {name, at}
+
+  function dtmClearKickState() {
+    [LS_DTM_INV_AT, LS_DTM_INV_NAME, LS_DTM_INV_TO, LS_DTM_SEAT_AT]
+      .forEach(k => localStorage.removeItem(k));
+  }
+
+  // Called right after an invite is sent. Timeout is randomised per invite so the
+  // drop isn't a predictable round number.
+  function dtmMarkInvited(name) {
+    localStorage.setItem(LS_DTM_INV_AT, String(Date.now()));
+    localStorage.setItem(LS_DTM_INV_NAME, String(name || ''));
+    const base = Math.max(30, Number(cfg.dtmKickWaitSec) || 210) * 1000;
+    localStorage.setItem(LS_DTM_INV_TO, String(base + Math.floor(Math.random() * 60000)));
+    localStorage.removeItem(LS_DTM_SEAT_AT);
+  }
+
+  function dtmSeatEls() {
+    return {
+      nameEl:  document.querySelector('#ctl00_main_hldParticipantName'),
+      statusEl:document.querySelector('#ctl00_main_lblParticipantStatus') ||
+               document.querySelector('#ctl00_main_lbldParticipantStatus'),
+      kickBtn: document.querySelector('#ctl00_main_btnKickParticipant')
+    };
+  }
+
+  // Countdown for the panel: how long until we drop or kick, and which it'll be.
+  function dtmKickCountdown() {
+    if (!cfg.dtmKickOn) return null;
+    const now = Date.now();
+    let seat = null;
+    try { seat = JSON.parse(localStorage.getItem(LS_DTM_SEAT_AT) || 'null'); } catch(_){}
+    if (seat && seat.at) {
+      // Mirror dtmMaybeKick's choice of clock so the countdown matches reality.
+      const stt = (dtmSeatEls().statusEl?.textContent || '').trim();
+      const secs = /invited/i.test(stt)
+        ? Math.max(30, Number(cfg.dtmKickWaitSec)  || 210)
+        : Math.max(30, Number(cfg.dtmKickGraceSec) || 180);
+      return { ms: (seat.at + secs * 1000) - now, kind:'kick', name: seat.name || '' };
+    }
+    const sentAt = parseInt(localStorage.getItem(LS_DTM_INV_AT) || '0', 10);
+    if (sentAt) {
+      const to = parseInt(localStorage.getItem(LS_DTM_INV_TO) || '210000', 10);
+      return { ms: (sentAt + to) - now, kind:'drop', name: localStorage.getItem(LS_DTM_INV_NAME) || '' };
+    }
+    return null;
+  }
+
+  function updateDtmKickUI() {
+    if (!_shadow) return;
+    const row = _shadow.querySelector('#jb-dtmkick-row');
+    const el  = _shadow.querySelector('#jb-dtmkick');
+    if (!row || !el) return;
+    const c = dtmKickCountdown();
+    if (!c) { row.style.display = 'none'; return; }
+    row.style.display = 'flex';
+    if (c.ms <= 0) {
+      el.innerHTML = `<span style="color:var(--jb-danger)">${c.kind === 'kick' ? 'kick now' : 'dropping'}</span>`;
+      return;
+    }
+    const m = Math.floor(c.ms / 60000), s = Math.floor((c.ms % 60000) / 1000);
+    const clr = c.ms < 60000 ? 'var(--jb-warning)' : 'var(--jb-text-sec)';
+    el.innerHTML = `<span style="color:${clr}">${c.kind === 'kick' ? 'kick' : 'drop'} ${m}:${String(s).padStart(2,'0')}</span>`;
+  }
+
+  // Synthesised __doPostBack — the Kick control is a LinkButton, so clicking it
+  // directly doesn't reliably submit under a userscript.
+  function dtmKickPostBack() {
+    const f = document.getElementById('aspnetForm') || document.querySelector('form');
+    if (!f) { console.warn(APP_TAG, '[DTM] kick: no form'); return false; }
+    const ensure = id => {
+      let el = document.getElementById(id);
+      if (!el) { el = document.createElement('input'); el.type='hidden'; el.id=id; el.name=id; f.appendChild(el); }
+      return el;
+    };
+    ensure('__EVENTTARGET').value = 'ctl00$main$btnKickParticipant';
+    ensure('__EVENTARGUMENT').value = '';
+    f.submit();
+    return true;
+  }
+
+  const _dtmNorm = s => String(s || '').toLowerCase().replace(/\s+/g, '');
+
+  // Live re-check, then kick. Returns true only if the kick was actually fired.
+  async function dtmKickParticipant(reason, expectName) {
+    const { nameEl } = dtmSeatEls();
+    const target = expectName || (nameEl?.textContent || '').trim() || '(unknown)';
+    let proceed = false, note = '';
+    try {
+      const r = await fetch(location.href, { credentials:'same-origin', cache:'no-store' });
+      if (r.ok) {
+        const dom = new DOMParser().parseFromString(await r.text(), 'text/html');
+        const liveName   = (dom.querySelector('#ctl00_main_hldParticipantName')?.textContent || '').trim();
+        const liveHref   = dom.querySelector('#ctl00_main_hldParticipantName')?.getAttribute('href') || '';
+        const liveStatus = (dom.querySelector('#ctl00_main_lblParticipantStatus')?.textContent || '').trim();
+        const liveKick   = !!dom.querySelector('#ctl00_main_btnKickParticipant');
+        const seatOpen   = !liveName || /[?&]id=0\b/.test(liveHref) || /open/i.test(liveStatus) || !liveKick;
+        if (seatOpen)                                            note = 'seat already empty';
+        else if (/ready/i.test(liveStatus))                      note = `now READY (${liveName})`;
+        else if (expectName && _dtmNorm(liveName) !== _dtmNorm(expectName)) note = `seat changed → "${liveName}"`;
+        else proceed = true;
+      } else { proceed = true; note = 'unverified (HTTP ' + r.status + ')'; }
+    } catch (_) { proceed = true; note = 'unverified (fetch failed)'; }
+
+    if (!proceed) {
+      console.log(`${APP_TAG}[DTM] Kick ABORTED — ${note} (target "${target}", ${reason})`);
+      dtmClearKickState();
+      return false;
+    }
+    console.log(`${APP_TAG}[DTM] Kicking "${target}" — ${reason}${note ? ' ['+note+']' : ''}`);
+    tgMsg('dtmCreate', `🥾 <b>DTM Kick</b>\n${st.player||'?'} | ${esc(target)} — ${esc(reason)}`);
+    dtmClearKickState();
+    return dtmKickPostBack();
+  }
+
+  /* Decide whether to drop or kick. Returns true if it acted (page will reload). */
+  async function dtmMaybeKick() {
+    if (!cfg.dtmKickOn) return false;
+    const { nameEl, statusEl, kickBtn } = dtmSeatEls();
+    const status = (statusEl?.textContent || '').trim();
+
+    // Rule 1 — Ready always wins. Stop every clock and let the DTM finish.
+    if (/ready/i.test(status)) {
+      if (localStorage.getItem(LS_DTM_INV_AT) || localStorage.getItem(LS_DTM_SEAT_AT)) {
+        dlog(APP_TAG, '[DTM] Partner Ready — kick timers cleared');
+        dtmClearKickState();
+      }
+      return false;
+    }
+
+    const seatedName = (nameEl?.textContent || '').trim();
+    const seated = !!kickBtn && !!seatedName;
+
+    if (seated) {
+      /* Which clock applies is decided by STATUS, not by whether a kick button
+       * exists. Verified live: a partner who has been invited but has NOT accepted
+       * already occupies the seat and already has a kick button, showing status
+       * "Invited". So splitting on the button would put every case in the "seated"
+       * bucket and the invite timeout would never apply to anything.
+       *   "Invited"  → hasn't accepted yet   → cfg.dtmKickWaitSec
+       *   otherwise  → accepted but stalled  → cfg.dtmKickGraceSec
+       * ("Ready" never reaches here — it returns above.) */
+      const pending = /invited/i.test(status);
+      const limitSec = pending
+        ? Math.max(30, Number(cfg.dtmKickWaitSec)  || 210)
+        : Math.max(30, Number(cfg.dtmKickGraceSec) || 180);
+      const limit = limitSec * 1000;
+
+      // Per-name clock; a different partner in the seat restarts it rather than
+      // inheriting the previous one's elapsed time.
+      const key = _dtmNorm(seatedName);
+      let seat = null;
+      try { seat = JSON.parse(localStorage.getItem(LS_DTM_SEAT_AT) || 'null'); } catch(_){}
+      if (!seat || seat.name !== key) {
+        localStorage.setItem(LS_DTM_SEAT_AT, JSON.stringify({ name:key, at:Date.now() }));
+        return false;
+      }
+      const waited = Date.now() - seat.at;
+      if (waited < limit) {
+        dlog(APP_TAG, `[DTM] ${seatedName} "${status||'?'}" — ${pending?'invite':'stall'} ${Math.round(waited/1000)}s/${limitSec}s`);
+        return false;
+      }
+      const why = pending
+        ? `never accepted (${Math.round(waited/60000)}m)`
+        : `stalled ${Math.round(waited/60000)}m`;
+      return await dtmKickParticipant(why, seatedName);
+    }
+
+    // Nobody seated: the invite is still pending. Nothing to kick — after the
+    // timeout we just clear our own state so step 1 re-invites.
+    const sentAt = parseInt(localStorage.getItem(LS_DTM_INV_AT) || '0', 10);
+    if (!sentAt) return false;
+    const to = parseInt(localStorage.getItem(LS_DTM_INV_TO) || '210000', 10);
+    if (Date.now() - sentAt <= to) return false;
+
+    const who = localStorage.getItem(LS_DTM_INV_NAME) || st.dtmPartner || 'partner';
+
+    /* Re-invite cap. The reference script can afford to retry freely because it
+     * pulls a fresh partner off the classifieds board each time; we invite the ONE
+     * partner configured in the DTM modal, so retrying means asking the same
+     * person again. If they aren't there, they aren't there — three goes and we
+     * stop rather than spinning until the 10-minute abort happens to catch it. */
+    const tries = parseInt(localStorage.getItem('cbDtmReinvites') || '0', 10) + 1;
+    if (tries > 3) {
+      console.warn(`${APP_TAG}[DTM] ${who} didn't accept after 3 invites — giving up`);
+      tgMsg('dtmCreate', `🛑 <b>DTM abandoned</b>\n${st.player||'?'} | ${esc(who)} never accepted (3 invites) — set a different partner`);
+      localStorage.removeItem('cbDtmReinvites');
+      resetCreateDTM();
+      st.acting = false; st.action = ''; GM_setValue('cbActStart', 0);
+      return false;   // hand control back to normal automation
+    }
+    localStorage.setItem('cbDtmReinvites', String(tries));
+
+    console.log(`${APP_TAG}[DTM] ${who} didn't accept in ${Math.round(to/60000)}m — re-inviting (${tries}/3)`);
+    tgMsg('dtmCreate', `⌛ <b>DTM invite expired</b>\n${st.player||'?'} | ${esc(who)} never accepted — re-inviting (${tries}/3)`);
+    dtmClearKickState();
+    localStorage.setItem(LS_CREATE_DTM_STEP, '1');            // back to the invite step
+    localStorage.setItem(LS_CREATE_DTM_STATE, 'setup');
+    localStorage.setItem(LS_CREATE_DTM_NEXT, String(Date.now() + 3000));
+    return true;
   }
 
   async function handleCreateDTM() {
@@ -7052,6 +8119,12 @@
     try {
       // POLLING: Check if "Complete DTM" or "Buy drugs" is ready
       if (dtmSt === 'polling') {
+        /* Before anything else, deal with a partner who isn't progressing. This
+         * runs first because both branches below assume a cooperating partner —
+         * if we're waiting on someone who left, waiting harder won't help. It is
+         * a no-op when the partner is Ready or still inside their grace window. */
+        try { updateDtmKickUI(); if (await dtmMaybeKick()) return true; } catch(e) { console.warn(APP_TAG, '[DTM] kick check err', e); }
+
         // Check for complete button
         const compBtn = document.getElementById('ctl00_main_btnCompleteDTM') ||
           [...document.querySelectorAll('input[type="submit"]')].find(b => /complete/i.test(b.value||''));
@@ -7159,6 +8232,7 @@
         await wait(rndDelay(DLY.normal));
         console.log('[JB][CreateDTM] Entered partner:', partner, 'in', nameIn.id, '— clicking', invBtn.id||invBtn.value);
         tgMsg('dtmCreate', `🚚 <b>DTM 2/3</b>\n${st.player||'?'} | Invited ${partner}`);
+        dtmMarkInvited(partner);   // starts the drop/kick clock
         localStorage.setItem(LS_CREATE_DTM_STEP, '2');
         localStorage.setItem(LS_CREATE_DTM_NEXT, String(Date.now() + 60000));
         invBtn.click();
@@ -7220,6 +8294,24 @@
       schedLoop(3000); return;
     }
 
+    /* Soft-ban hold is checked BEFORE the generic pause return, because it is the
+     * one pause that lifts itself: the expiry is known, so we sit out the ban and
+     * resume without needing you to unpause manually. Checked here rather than
+     * further down for exactly that reason — below the `paused` return it could
+     * never run once it had paused us. */
+    {
+      // Read the stored expiry BEFORE softBanHold(), which clears it once passed —
+      // otherwise the "was there a ban?" test below always sees zero.
+      const hadBan = parseInt(GM_getValue(LS_SOFTBAN_UNTIL, 0) || 0, 10) > 0;
+      if (softBanHold()) { paused = true; schedLoop(30000); return; }
+      if (hadBan) {
+        // Window just closed — release the pause we imposed and carry on.
+        paused = false;
+        console.log(APP_TAG, '[ANTIBOT] Soft ban expired — resuming');
+        tgMsg('startup', `✅ <b>Soft ban expired</b>\n${st.player||'?'} | automation resumed`);
+      }
+    }
+
     if (paused) { schedLoop(1800+Math.floor(Math.random()*1400)); return; }
 
     // HEALTH MONITORING — runs at all times, bypasses every break.
@@ -7259,6 +8351,17 @@
     }
 
     checkCaptcha(); checkNewMsgs(); checkLogout();
+
+    /* Anti-bot / soft ban BEFORE the staff check: both read the same "Important
+     * message" panel, and whichever runs first claims it. An enforcement message
+     * misread as a staff question would have Jarvis telling you to answer a
+     * message containing no question, while the real information — the expiry —
+     * went unparsed. detectAntiBotMsg only claims the page when the body actually
+     * reads as enforcement, so genuine staff questions still fall through. */
+    if (detectAntiBotMsg()) { schedLoop(30000); return; }
+    // A soft ban already recorded keeps us parked until its stated expiry, even
+    // on pages that don't show the message.
+    if (softBanHold()) { paused = true; schedLoop(30000); return; }
 
     if (checkSqlCheck()) {
       paused = true; setStatus('⚠️ STAFF CHECK — paused');
@@ -7384,16 +8487,23 @@
     try { maybeSendXpReport(); } catch(_){}
     try { maybeForceStatRefresh(); } catch(_){}
 
-    if (st.health && !st.acting) {
-      checkHealth();
-      if (st.buyHealth) { schedLoop(1800+Math.floor(Math.random()*1400)); return; }
+    /* Health. The background path needs no navigation, so it is safe to run even
+     * mid-action — which is the whole point: health no longer has to wait for a
+     * gap, and no longer strands an action to go and buy. The legacy path still
+     * requires a clear slot because it navigates. */
+    if (st.health) {
+      if (cfg.bgHealOn) { checkHealth(); }
+      else if (!st.acting) {
+        checkHealth();
+        if (st.buyHealth) { schedLoop(1800+Math.floor(Math.random()*1400)); return; }
+      }
     }
 
     if (!st.acting) {
       const now = Date.now();
       const pg = curPage();
 
-      if (!st.crime && !st.gta && !st.booze && !st.jail && !st.garage && !st.health && !st.autoOC && !st.autoDTM) {
+      if (!st.crime && !st.gta && !st.booze && !st.jail && !st.garage && !st.health && !st.autoOC && !st.autoDTM && !cfg.scrapOn) {
         if (now % 30000 < 2000) setStatus('Idle');
         schedLoop(5000); return;
       }
@@ -7417,11 +8527,18 @@
         const garageOd = st.garage && (now - st.lastGarage >= cfg.garageInt*1000);
         if (garageOd && pg === 'garage') doGarage();
 
-        const crimeRdy = st.crime && (now - st.lastCrime >= cfg.crimeInt*1000);
-        const gtaRdy   = st.gta   && (now - st.lastGta >= cfg.gtaInt*1000);
-        const boozeRdy = st.booze && (now - st.lastBooze >= cfg.boozeInt*1000);
+        const crimeRdy = st.crime && (now - st.lastCrime >= cfg.crimeInt*1000) && !dailyLimitReached('crime');
+        const gtaRdy   = st.gta   && (now - st.lastGta >= cfg.gtaInt*1000)     && !dailyLimitReached('gta');
+        const boozeRdy = st.booze && (now - st.lastBooze >= cfg.boozeInt*1000) && !dailyLimitReached('booze');
         const jailRdy  = st.jail  && (now - st.lastJail >= cfg.jailInt*1000);
         const garageRdy= st.garage && (now - st.lastGarage >= cfg.garageInt*1000);
+
+        /* Scrap sits at the BOTTOM of the priority list deliberately. It has no
+         * cooldown of its own and would otherwise starve the timed actions, which
+         * do — a missed crime window is gone, whereas scrap keeps indefinitely. */
+        if (!crimeRdy && !gtaRdy && !boozeRdy && !jailRdy && !garageRdy && scrapDue()) {
+          if (await doScrap()) { schedLoop(3000); return; }
+        }
 
         if (crimeRdy && gtaRdy) {
           const ct = st.lastCrime+cfg.crimeInt*1000, gt = st.lastGta+cfg.gtaInt*1000;
