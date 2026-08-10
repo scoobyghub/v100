@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.240
+// @version      2000.241
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -32,7 +32,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.240
+/*  Jarvis Bot 2000.241
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -119,7 +119,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.240';
+  const APP_VERSION = '2000.241';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -3021,6 +3021,52 @@
   const INVITE_STALE     = 15*60*1000;
   const SCRIPT_TEST_STALE= 5*60*1000;
 
+  /* === INVITE SUBJECT MATCHING (2000.241) ===
+   * These two patterns were asymmetric, and OC was the loser. DTM accepted
+   * "invitation" OR "invite"; OC demanded the literal word "invitation" AND the
+   * American spelling, so a mail reading "OC invite" — or "Organised crime
+   * invitation" — matched nothing and was silently skipped. That asymmetry fits
+   * "DTM auto-accept works, OC doesn't" exactly.
+   *
+   * Both now accept either spelling, either noun, and the body phrasing the game
+   * uses ("X has invited you to an organised crime"), in either word order.
+   *
+   * A loose pattern is the safe direction here: the worst a false match can do is
+   * make Jarvis open one mail, find no accept link, and log it. A missed invite
+   * costs a whole OC.
+   */
+  const INV_WORD = '(?:invit(?:ation|e|ed|es|ing))';
+  const OC_SUBJ  = '(?:organi[sz]ed\\s*crime|\\boc\\b)';
+  const DTM_SUBJ = '(?:\\bdtm\\b|drugs?\\s*transport\\w*|drug\\s*trade)';
+  const OC_INVITE_RE  = new RegExp(`(?:${OC_SUBJ}[\\s\\S]{0,60}?${INV_WORD})|(?:${INV_WORD}[\\s\\S]{0,60}?${OC_SUBJ})`, 'i');
+  const DTM_INVITE_RE = new RegExp(`(?:${DTM_SUBJ}[\\s\\S]{0,60}?${INV_WORD})|(?:${INV_WORD}[\\s\\S]{0,60}?${DTM_SUBJ})`, 'i');
+
+  /* Retry budget per invite mail.
+   *
+   * markHandledInvite() used to be called BEFORE the accept was attempted, so a
+   * single failure — link parse failed, network blip, page returned the login
+   * form — burned that invite for 14 days with nothing to retry it. But dropping
+   * the marker entirely would let a chatty mail that merely mentions "OC invite"
+   * be re-fetched on every poll forever. So: allow a few goes, then give up and
+   * mark it handled.
+   */
+  const INVITE_MAX_TRIES = 3;
+  function _triesKey(kind) { return kind === 'dtm' ? 'cbTryDtm' : 'cbTryOc'; }
+  function inviteTries(kind, mailId) {
+    try { return (JSON.parse(localStorage.getItem(_triesKey(kind)) || '{}') || {})[String(mailId)] || 0; }
+    catch(_) { return 0; }
+  }
+  function bumpInviteTries(kind, mailId) {
+    let m = {};
+    try { m = JSON.parse(localStorage.getItem(_triesKey(kind)) || '{}') || {}; } catch(_) {}
+    const n = (m[String(mailId)] || 0) + 1;
+    m[String(mailId)] = n;
+    const keys = Object.keys(m);
+    if (keys.length > 50) delete m[keys[0]];
+    try { localStorage.setItem(_triesKey(kind), JSON.stringify(m)); } catch(_){}
+    return n;
+  }
+
   function gmGet(url) {
     return new Promise((res, rej) => {
       GM_xmlhttpRequest({
@@ -3055,28 +3101,72 @@
     return Date.UTC(+m[3], +m[2]-1, +m[1], +m[4], +m[5], +(m[6]||0));
   }
 
+  /* Find the accept link inside an invite mail.
+   *
+   * Was a single strict test: the URL had to carry act=accept&ocid=N or
+   * accept=1&id=N. Any other shape returned null, the invite was reported as
+   * "no accept link found", and (before 241) that burned it for 14 days.
+   *
+   * Now tiered, strictest first, so a known-good shape still wins outright:
+   *   1. the exact parameter shapes above
+   *   2. a link whose visible text is "accept"
+   *   3. an organizedcrime.aspx link carrying any accept-ish parameter
+   * Anything found is logged with its tier, so a future mismatch is visible in
+   * the console rather than silent.
+   */
   async function getAcceptUrl(mailHref, type='oc') {
     const url = toAuthUrl(mailHref);
     const r = await gmGet(url);
-    if (!/\/authenticated\/mailbox\.aspx/i.test(r.finalUrl)) return null;
+    if (!/\/authenticated\/mailbox\.aspx/i.test(r.finalUrl)) {
+      console.warn(APP_TAG, '[INVITE] mail fetch did not land on the mailbox:', r.finalUrl);
+      return null;
+    }
     const doc = new DOMParser().parseFromString(r.html, 'text/html');
-    const link = [...doc.querySelectorAll('a[href*="organizedcrime.aspx"]')].find(a => {
-      const txt = (a.textContent||'').trim().toLowerCase();
-      if (txt && !txt.includes('accept') && !txt.includes('organizedcrime')) return false;
-      const h = (a.getAttribute('href')||'').replace(/&amp;/g,'&');
-      try {
-        const u = new URL(h, location.origin);
-        const act = (u.searchParams.get('act')||'').toLowerCase();
-        const ocid = u.searchParams.get('ocid')||'';
-        if (act === 'accept' && /^\d+$/.test(ocid)) return true;
-        const p = (u.searchParams.get('p')||'').toLowerCase();
-        const acc = u.searchParams.get('accept');
-        const id = u.searchParams.get('id')||'';
-        if (acc === '1' && /^\d+$/.test(id)) return true;
-        return false;
-      } catch(_) { return false; }
+    const links = [...doc.querySelectorAll('a[href*="organizedcrime.aspx"]')];
+    if (!links.length) {
+      console.warn(APP_TAG, `[INVITE] ${type.toUpperCase()}: mail has no organizedcrime.aspx link at all`);
+      return null;
+    }
+
+    const paramsOf = a => {
+      try { return new URL((a.getAttribute('href')||'').replace(/&amp;/g,'&'), location.origin).searchParams; }
+      catch(_) { return null; }
+    };
+
+    // 1 — the documented shapes.
+    let hit = links.find(a => {
+      const u = paramsOf(a); if (!u) return false;
+      if ((u.get('act')||'').toLowerCase() === 'accept' && /^\d+$/.test(u.get('ocid')||'')) return true;
+      if (u.get('accept') === '1' && /^\d+$/.test(u.get('id')||'')) return true;
+      return false;
     });
-    return link ? toAuthUrl(link.getAttribute('href')) : null;
+    let tier = 'params';
+
+    // 2 — the link that literally says Accept. The strongest human signal, and
+    // independent of whatever query string the game happens to use.
+    if (!hit) {
+      hit = links.find(a => /^\s*accept\b/i.test((a.textContent||'').trim()));
+      tier = 'link text';
+    }
+
+    // 3 — anything accept-shaped at all.
+    if (!hit) {
+      hit = links.find(a => {
+        const u = paramsOf(a); if (!u) return false;
+        for (const [k, v] of u) if (/accept|join/i.test(k) || /accept|join/i.test(v)) return true;
+        return false;
+      });
+      tier = 'loose param';
+    }
+
+    if (!hit) {
+      console.warn(APP_TAG, `[INVITE] ${type.toUpperCase()}: none of the ${links.length} link(s) look like an accept —`,
+                   links.map(a => `"${(a.textContent||'').trim().slice(0,20)}" ${a.getAttribute('href')}`));
+      return null;
+    }
+    const out = toAuthUrl(hit.getAttribute('href'));
+    dlog(APP_TAG, `[INVITE] ${type.toUpperCase()} accept link matched by ${tier}: ${out}`);
+    return out;
   }
 
   async function extractInviter(mailHref) {
@@ -3169,37 +3259,64 @@
           if (cl) { subject = (cl.textContent||cells[i].textContent||'').trim()||subject; break; }
         }
 
-        // DTM invite check
-        const isDtm = /(dtm\s*invitation|dtm\s*invite|drug\s*trade)/i.test(rowTxt);
-        if (isDtm && st.autoDTM) {
-          if (wasHandledInvite('dtm', mailId)) continue;   // already acted on — never re-read
-          const lastAcc = parseInt(localStorage.getItem(LS_LAST_DTM_ACC)||'0',10);
-          if (lastAcc > 0 && (Date.now()-lastAcc) < 7200000) { localStorage.setItem(LS_LAST_DTM_MAIL, mailId); continue; }
-          if (localStorage.getItem('cbPendDtmHandle') === 'true' || localStorage.getItem(LS_PEND_DTM)) { localStorage.setItem(LS_LAST_DTM_MAIL, mailId); continue; }
-          if (localStorage.getItem(LS_LAST_DTM_MAIL) === mailId) continue;
-          const ts = parseTmnDate(rowTxt);
-          if (isOlderThan(ts, INVITE_STALE)) { localStorage.setItem(LS_LAST_DTM_MAIL, mailId); continue; }
-          if (ts === 0 && localStorage.getItem(LS_LAST_DTM_MAIL) && parseInt(mailId) <= parseInt(localStorage.getItem(LS_LAST_DTM_MAIL))) continue;
-          markHandledInvite('dtm', mailId);
-          await handleDtmInvite(mailId, href);
-          continue;
-        } else if (isDtm) { localStorage.setItem(LS_LAST_DTM_MAIL, mailId); continue; }
+        /* Invite handling. Both kinds run the identical gate sequence, so it lives
+         * in one place — the OC and DTM versions had drifted apart, which is how
+         * OC ended up with a stricter subject rule than DTM (see the patterns
+         * above). Every skip is logged with its reason: this path used to fail
+         * completely silently, which made "auto-accept isn't working" impossible
+         * to diagnose without guessing. */
+        const inviteKind = OC_INVITE_RE.test(rowTxt) ? 'oc'
+                         : DTM_INVITE_RE.test(rowTxt) ? 'dtm' : null;
+        if (inviteKind) {
+          const K = inviteKind.toUpperCase();
+          const on      = inviteKind === 'dtm' ? st.autoDTM : st.autoOC;
+          const ACC_KEY = inviteKind === 'dtm' ? LS_LAST_DTM_ACC : LS_LAST_OC_ACC;
+          const MAIL_KEY= inviteKind === 'dtm' ? LS_LAST_DTM_MAIL : LS_LAST_OC_MAIL;
+          const PEND_KEY= inviteKind === 'dtm' ? LS_PEND_DTM : LS_PEND_OC;
+          const HANDLING= inviteKind === 'dtm' ? 'cbPendDtmHandle' : 'cbPendOcHandle';
+          const skip = why => console.log(`${APP_TAG}[INVITE] ${K} mail ${mailId} skipped — ${why}`);
 
-        // OC invite check
-        const isOc = /(organized\s*crime\s*invitation|oc\s*invitation)/i.test(rowTxt);
-        if (isOc && st.autoOC) {
-          if (wasHandledInvite('oc', mailId)) continue;   // already acted on — never re-read
-          const lastAcc = parseInt(localStorage.getItem(LS_LAST_OC_ACC)||'0',10);
-          if (lastAcc > 0 && (Date.now()-lastAcc) < 7200000) { localStorage.setItem(LS_LAST_OC_MAIL, mailId); continue; }
-          if (localStorage.getItem('cbPendOcHandle') === 'true' || localStorage.getItem(LS_PEND_OC)) { localStorage.setItem(LS_LAST_OC_MAIL, mailId); continue; }
-          if (localStorage.getItem(LS_LAST_OC_MAIL) === mailId) continue;
+          if (!on) { localStorage.setItem(MAIL_KEY, mailId); skip(`auto-${inviteKind} is OFF`); continue; }
+          if (wasHandledInvite(inviteKind, mailId)) { dlog(APP_TAG, `[INVITE] ${K} ${mailId} already handled`); continue; }
+
+          const lastAcc = parseInt(localStorage.getItem(ACC_KEY)||'0',10);
+          if (lastAcc > 0 && (Date.now()-lastAcc) < 7200000) {
+            localStorage.setItem(MAIL_KEY, mailId);
+            skip(`${K} cooldown active (${Math.round((Date.now()-lastAcc)/60000)}m of 120m since the last one)`);
+            continue;
+          }
+          if (localStorage.getItem(HANDLING) === 'true' || localStorage.getItem(PEND_KEY)) {
+            localStorage.setItem(MAIL_KEY, mailId);
+            skip('another invite of this kind is mid-accept');
+            continue;
+          }
+          if (localStorage.getItem(MAIL_KEY) === mailId) { dlog(APP_TAG, `[INVITE] ${K} ${mailId} is the last-seen id`); continue; }
+
           const ts = parseTmnDate(rowTxt);
-          if (isOlderThan(ts, INVITE_STALE)) { localStorage.setItem(LS_LAST_OC_MAIL, mailId); continue; }
-          if (ts === 0 && localStorage.getItem(LS_LAST_OC_MAIL) && parseInt(mailId) <= parseInt(localStorage.getItem(LS_LAST_OC_MAIL))) continue;
-          markHandledInvite('oc', mailId);
-          await handleOcInvite(mailId, href);
+          if (isOlderThan(ts, INVITE_STALE)) {
+            localStorage.setItem(MAIL_KEY, mailId);
+            skip(`older than ${INVITE_STALE/60000}m`);
+            continue;
+          }
+          if (ts === 0 && localStorage.getItem(MAIL_KEY) && parseInt(mailId) <= parseInt(localStorage.getItem(MAIL_KEY))) {
+            skip('no timestamp and id not newer than the last seen');
+            continue;
+          }
+
+          /* Only give up permanently after a few real attempts — see
+           * INVITE_MAX_TRIES. Marking it handled up-front is what turned a single
+           * transient failure into a 14-day blackout for that invite. */
+          const tries = bumpInviteTries(inviteKind, mailId);
+          console.log(`${APP_TAG}[INVITE] ${K} mail ${mailId} from ${sender} — accepting (try ${tries}/${INVITE_MAX_TRIES})`);
+          const ok = inviteKind === 'dtm'
+            ? await handleDtmInvite(mailId, href)
+            : await handleOcInvite(mailId, href);
+          if (ok || tries >= INVITE_MAX_TRIES) {
+            markHandledInvite(inviteKind, mailId);
+            if (!ok) console.warn(`${APP_TAG}[INVITE] ${K} ${mailId} failed ${tries}× — giving up on it`);
+          }
           continue;
-        } else if (isOc) { localStorage.setItem(LS_LAST_OC_MAIL, mailId); continue; }
+        }
 
         // Script test inbox alert (by title OR staff profile ID)
         if (tg.enabled && tg.scriptTest && (isScriptTestSubject(subject, rowTxt) || isFromStaff)) {
@@ -3273,6 +3390,10 @@
     finally { _mailBusy = false; }
   }
 
+  /* Both return TRUE for a settled outcome — accepted, or deliberately refused by
+   * a list — and FALSE for a failure worth retrying (no accept link, exception).
+   * The caller only burns the invite permanently on true, or after
+   * INVITE_MAX_TRIES falses. */
   async function handleDtmInvite(mailId, href) {
     try {
       localStorage.setItem(LS_LAST_DTM_MAIL, mailId);
@@ -3283,19 +3404,27 @@
       const url = await getAcceptUrl(href, 'dtm');
       const inv = await extractInviter(href);
       if (st.blNames && st.blNames.length && inv && st.blNames.some(n => n && n.toLowerCase().trim() === inv.toLowerCase().trim())) {
+        console.log(`${APP_TAG}[INVITE] DTM blocked — ${inv} is blacklisted`);
         tgMsg('blocked', `🚫 <b>DTM Blocked</b>\n${st.player||'?'} | ${inv} blacklisted`);
-        return;
+        return true;                      // a decision, not a failure
       }
       if (st.whitelist && st.wlNames.length > 0) {
         const ok = inv && st.wlNames.some(n => n && n.toLowerCase().trim() === inv.toLowerCase().trim());
         if (!ok) {
+          console.log(`${APP_TAG}[INVITE] DTM blocked — inviter "${inv||'(unreadable)'}" not on the whitelist`);
           tgMsg('blocked', `🚫 <b>DTM Blocked</b>\n${st.player||'?'} | ${inv||'Unknown'} not whitelisted`);
-          return;
+          return true;
         }
       }
-      if (!url) { tgMsg('dtmInvite', `⚠️ <b>DTM</b> — no accept link found`); return; }
+      if (!url) {
+        console.warn(`${APP_TAG}[INVITE] DTM ${mailId}: no accept link in the mail body`);
+        tgMsg('dtmInvite', `⚠️ <b>DTM</b> — no accept link found`);
+        return false;                     // retryable
+      }
       localStorage.setItem(LS_PEND_DTM, url);
-    } catch(e) { console.warn(APP_TAG, 'DTM invite err:', e); }
+      console.log(`${APP_TAG}[INVITE] DTM accept queued: ${url}`);
+      return true;
+    } catch(e) { console.warn(APP_TAG, '[INVITE] DTM err:', e); return false; }
   }
 
   async function handleOcInvite(mailId, href) {
@@ -3304,14 +3433,20 @@
       const url = await getAcceptUrl(href, 'oc');
       const inv = await extractInviter(href);
       if (st.blNames && st.blNames.length && inv && st.blNames.some(n => n && n.toLowerCase().trim() === inv.toLowerCase().trim())) {
+        console.log(`${APP_TAG}[INVITE] OC blocked — ${inv} is blacklisted`);
         tgMsg('blocked', `🚫 <b>OC Blocked</b>\n${st.player||'?'} | ${inv} blacklisted`);
-        return;
+        return true;
       }
       if (st.whitelist && st.wlNames.length > 0) {
         const ok = inv && st.wlNames.some(n => n && n.toLowerCase().trim() === inv.toLowerCase().trim());
         if (!ok) {
+          /* Note the failure mode worth knowing: extractInviter returning null
+           * also lands here, so an unparseable sender blocks the invite exactly
+           * as a stranger would. That is the safe direction for a whitelist, but
+           * it is why this logs the raw value. */
+          console.log(`${APP_TAG}[INVITE] OC blocked — inviter "${inv||'(unreadable)'}" not on the whitelist`);
           tgMsg('blocked', `🚫 <b>OC Blocked</b>\n${st.player||'?'} | ${inv||'Unknown'} not whitelisted`);
-          return;
+          return true;
         }
       }
       if (!wasAlerted('OC', mailId)) {
@@ -3320,9 +3455,15 @@
         if (url) try { const u = new URL(url); const p = u.searchParams.get('pos'); if(p) role = ` (${p})`; } catch(_){}
         tgMsg('ocInvite', `📬 <b>OC Invite</b>${role}\n${st.player||'?'} | ${fmtDate()}\n${st.inJail ? '⛓ In jail' : '🕵️ Accepting...'}`);
       }
-      if (!url) { tgMsg('ocInvite', `⚠️ <b>OC</b> — no accept link found`); return; }
+      if (!url) {
+        console.warn(`${APP_TAG}[INVITE] OC ${mailId}: no accept link in the mail body`);
+        tgMsg('ocInvite', `⚠️ <b>OC</b> — no accept link found`);
+        return false;                     // retryable
+      }
       localStorage.setItem(LS_PEND_OC, url);
-    } catch(e) { console.warn(APP_TAG, 'OC invite err:', e); }
+      console.log(`${APP_TAG}[INVITE] OC accept queued: ${url}`);
+      return true;
+    } catch(e) { console.warn(APP_TAG, '[INVITE] OC err:', e); return false; }
   }
 
   async function fetchMailBody(href) {
