@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.241
+// @version      2000.247
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -32,7 +32,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.241
+/*  Jarvis Bot 2000.247
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -119,7 +119,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.241';
+  const APP_VERSION = '2000.247';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -1067,7 +1067,11 @@
     dailyLimitBooze: GM_getValue('cbDailyLimitBooze', 0),
     // No-XP limiter extra trigger: also cap an action if it has gained no XP for
     // this many minutes despite firing. 0 disables (streak count still applies).
-    noXpStaleMin:  GM_getValue('cbNoXpStaleMin', 0)
+    noXpStaleMin:  GM_getValue('cbNoXpStaleMin', 0),
+    /* Seconds between XP readings. The game's own page polls every 15s, and our
+     * refresh fires the identical request, so anything near 15-20s matches what a
+     * browser left open does by itself. See xpPollMs(). */
+    xpPollSec:     GM_getValue('cbXpPollSec', 20)
   };
 
   /* === DELAY SYSTEM === */
@@ -3041,6 +3045,25 @@
   const OC_INVITE_RE  = new RegExp(`(?:${OC_SUBJ}[\\s\\S]{0,60}?${INV_WORD})|(?:${INV_WORD}[\\s\\S]{0,60}?${OC_SUBJ})`, 'i');
   const DTM_INVITE_RE = new RegExp(`(?:${DTM_SUBJ}[\\s\\S]{0,60}?${INV_WORD})|(?:${INV_WORD}[\\s\\S]{0,60}?${DTM_SUBJ})`, 'i');
 
+  /* === COMPLETION NOTIFICATIONS (2000.247) ===
+   * The game mails you when an OC or DTM finishes:
+   *     "Organized Crime Notification"   /   "DTM notification"
+   * (ids change every time, so match on the wording, not the link.)
+   *
+   * This is the missing timing signal. A payout arrives when the crime EXECUTES —
+   * potentially hours after we snapshotted the commit — so it always landed in
+   * the unattributed bucket and, with jail running, got labelled jail. The
+   * notification tells us exactly WHEN, so the gain can be moved to where it
+   * belongs, and the jail busts caught up in the same reading subtracted out at
+   * the learned per-bust rate.
+   *
+   * Deliberately does NOT match the invitations: "notification" contains no
+   * invite word, so OC_INVITE_RE / DTM_INVITE_RE can't fire on these, and these
+   * can't fire on an invite.
+   */
+  const OC_DONE_RE  = /organi[sz]ed\s*crime\s*notification/i;
+  const DTM_DONE_RE = /\bdtm\s*notification\b/i;
+
   /* Retry budget per invite mail.
    *
    * markHandledInvite() used to be called BEFORE the accept was attempted, so a
@@ -3257,6 +3280,34 @@
         for (let i = 0; i < cells.length; i++) {
           const cl = cells[i].querySelector('a[href*="mailbox.aspx"]');
           if (cl) { subject = (cl.textContent||cells[i].textContent||'').trim()||subject; break; }
+        }
+
+        /* OC/DTM completion notification — the signal that a payout has landed.
+         * Recorded, then deliberately FALLS THROUGH: it's a real game message and
+         * should still reach the normal new-mail alert if that's switched on.
+         *
+         * Guarded by a highest-id watermark rather than a timestamp, because
+         * parseTmnDate reads the game's Amsterdam clock as UTC and is an hour or
+         * two out. On the first ever poll it just records the watermark, so a
+         * mailbox full of old notifications can't retro-label today's history. */
+        const doneKind = OC_DONE_RE.test(rowTxt) ? 'oc'
+                       : DTM_DONE_RE.test(rowTxt) ? 'dtm' : null;
+        if (doneKind) {
+          const seen = GM_getValue('cbLastPayoutMailId', null);
+          const nId = parseInt(mailId, 10) || 0;
+          if (seen === null) {
+            let maxId = 0;
+            for (const row of rows) {
+              const rl = [...row.querySelectorAll('a[href*="mailbox.aspx"]')].find(a => /[?&]id=\d+/i.test(a.getAttribute('href')||''));
+              if (rl) { const rid = parseInt(parseMailId(rl.getAttribute('href')||''),10)||0; if (rid > maxId) maxId = rid; }
+            }
+            GM_setValue('cbLastPayoutMailId', maxId);
+            console.log(`${APP_TAG}[XP] Completion-notification watermark set at mail ${maxId}`);
+          } else if (nId > Number(seen || 0)) {
+            GM_setValue('cbLastPayoutMailId', nId);
+            console.log(`${APP_TAG}[XP] ${doneKind.toUpperCase()} completion notification (mail ${mailId})`);
+            try { notePayout(doneKind); } catch(e) { console.warn(APP_TAG, '[XP] payout note failed', e); }
+          }
         }
 
         /* Invite handling. Both kinds run the identical gate sequence, so it lives
@@ -3512,7 +3563,7 @@
     for (const id of btnIds) {
       const btn = document.getElementById(id);
       if (btn && !btn.disabled) {
-        setTimeout(() => { btn.click(); localStorage.removeItem('cbPendOcHandle'); st.acting = false; setStatus('✅ OC role selected');
+        setTimeout(() => { snapshotXP('oc'); btn.click(); localStorage.removeItem('cbPendOcHandle'); st.acting = false; setStatus('✅ OC role selected');
           tgMsg('ocCreate', `🕵️ <b>OC Role Set</b>\n${st.player||'?'}`); }, 2000);
         return true;
       }
@@ -3618,6 +3669,7 @@
       tgMsg('dtmBuy', `🚚 <b>DTM Bought ${maxAmt}</b>\n${st.player||'?'} | 2h cooldown`);
       // Persistent lock survives the postback reload; checkStuck respects it
       localStorage.setItem('cbActionLockUntil', String(Date.now() + 8000));
+      snapshotXP('dtm');
       setTimeout(() => { buyBtn.click(); }, 900 + Math.floor(Math.random()*400));
       return true;
     }
@@ -4320,31 +4372,46 @@
     el.textContent = `now: ${nm} (${pick.pct}%)${safe.length ? '' : ' — none qualify'}`;
   }
 
-  /* Booze carry limit by rank. The game caps how much booze you can hold, and the
-   * cap rises with rank; buying your full allowance is strictly better than a
-   * fixed 5. Used only when smart picking is on — otherwise cfg.boozeBuy stands.
+  /* Booze carry limit by rank — CLOSED FORM (2000.242).
+   *
+   *     limit = 10 + rankLevel²      (rankLevel is 1-based: Scum 1 … Legend 17)
+   *
+   * Supplied by the user; e.g. Criminal is rank 5 → 10 + 25 = 35. It reproduces
+   * the hardcoded table it replaces EXACTLY at all 17 ranks (11,14,19,26,35,46,
+   * 59,74,91,110,131,154,179,206,235,266,299), which is the reason to trust it —
+   * the table was a set of observations, this is the rule behind them. Derived
+   * from the RANKS index so there is one ordered list of rank names in the file
+   * rather than two that can drift.
+   *
+   * Only used when smart picking is on; otherwise cfg.boozeBuy stands.
    */
-  const RANK_BOOZE_LIMITS = {
-    'Scum':11, 'Wannabe':14, 'Goon':19, 'Thug':26,
-    'Criminal':35, 'Wanted Criminal':46, 'Gangster':59,
-    'Hitman':74, 'Hired Gunner':91, 'Assassin':110,
-    'Boss':131, 'Don':154, 'Enemy of the State':179,
-    'Global Threat':206, 'Global Dominator':235,
-    'Global Disaster':266, 'Legend':299
-  };
+  function boozeCarryLimit(rankName) {
+    const i = RANKS.findIndex(r => r[0].toLowerCase() === String(rankName||'').trim().toLowerCase());
+    if (i < 0) return null;              // unknown name — caller falls back
+    return 10 + Math.pow(i + 1, 2);      // RANKS is 0-based, the formula is 1-based
+  }
 
   function boozeBuyQty() {
     if (!cfg.smartPick) return cfg.boozeBuy;
     // "Broke" cycle: a failed buy means no cash, so buy 1 to restart the loop.
     if (localStorage.getItem('cbBoozeBroke') === 'true') return 1;
     const rank = (document.querySelector('#ctl00_userInfo_lblrank')?.textContent || '').trim();
-    const lim = RANK_BOOZE_LIMITS[rank];
-    if (lim !== undefined) { dlog(APP_TAG, `[BOOZE] Rank "${rank}" → carry limit ${lim}`); return lim; }
+    const lim = boozeCarryLimit(rank);
+    if (lim !== null) { dlog(APP_TAG, `[BOOZE] Rank "${rank}" → carry limit ${lim}`); return lim; }
+    console.warn(APP_TAG, `[BOOZE] Rank "${rank}" not in RANKS — using the fixed amount ${cfg.boozeBuy}`);
     return cfg.boozeBuy;
   }
 
+  /* Sell ONE at a time in smart mode.
+   *
+   * It used to sell a random 1–3, on the assumption that varying the number
+   * looked more human. That is the wrong trade: the user reports the XP is per
+   * SALE, not per unit, so selling singly turns one full carry-load into as many
+   * XP-earning sales as you have units — buy your rank limit, then sell them off
+   * one by one. Three at a time simply threw two thirds of the XP away.
+   * Camouflage comes from the cadence system, not from the quantity field. */
   function boozeSellQty(available) {
-    const want = cfg.smartPick ? (1 + Math.floor(Math.random() * 3)) : cfg.boozeSell;
+    const want = cfg.smartPick ? 1 : cfg.boozeSell;
     return Math.max(1, Math.min(want, available));
   }
 
@@ -4888,13 +4955,19 @@
       }
     }
 
-    // ── Recent gains list ───────────────────────────────────────────
+    /* ── Recent gains list ──────────────────────────────────────────
+     * Shows up to 120 of the stored 250, and marks each figure with its source.
+     * An entry from the status bar is a ROUNDED bundle, not one action's gain —
+     * see onExperienceRead. Without the marker a "+0.3 booze" sitting among
+     * "+0.06 booze" reads as wild inconsistency in the game; with it, it reads
+     * as what it is: several actions' XP surfacing in one lump because the bar
+     * cannot resolve anything finer. */
     const histHost = _shadow.querySelector('#jb-xp-hist');
     if (histHost) {
       if (!xpState.history.length) {
         histHost.innerHTML = `<div class="jb-sub" style="text-align:center;color:var(--jb-text-ter)">No gains recorded yet.</div>`;
       } else {
-        histHost.innerHTML = xpState.history.slice(0, 20).map(h => {
+        const rows = xpState.history.slice(0, 120).map(h => {
           const t = new Date(h.t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
           if (h.rankUp) {
             return `<div style="display:flex;justify-content:space-between;padding:2px 0;border-top:1px solid var(--jb-border)">
@@ -4902,11 +4975,57 @@
               <span style="color:var(--jb-text-ter)">${t}</span>
             </div>`;
           }
-          return `<div style="display:flex;justify-content:space-between;padding:1px 0">
-            <span>${h.icon} <span style="color:var(--jb-text-sec)">${h.action}</span></span>
-            <span><b style="color:var(--jb-success)">+${h.gained}</b> <span style="color:var(--jb-text-ter)">${t}</span></span>
+          /* h.src is absent on anything recorded before 242 — those are shown
+           * plain rather than guessed at. */
+          const bar = h.src === 'bar';
+          const mark = bar
+            ? `<span title="From the status bar — rounded to its resolution, so this covers several actions, not just this one" style="color:var(--jb-warning)">≈</span>`
+            : '';
+          /* A reading that covered more than one action. The gain is real, the
+           * LABEL is the last action of several — so say what it really covered
+           * rather than implying that one action was worth the whole amount. */
+          const many = h.n > 1
+            ? `<span title="This one reading covered ${h.n} actions: ${esc(h.mix||'')}. The total is right; it is credited to the last of them because there is no way to split it." style="color:var(--jb-warning)">⊕${h.n}</span> `
+            : '';
+          /* Inferred = nothing claimed the reading but a jail bust was in the
+           * window, so we attributed it to jail. Worth distinguishing from a
+           * measured attribution. */
+          const inf = h.inf
+            ? `<span title="Inferred: no action claimed this reading, but a jail bust happened in the window. Jail deliberately doesn't claim readings, so leftover XP alongside a bust is taken as jail's." style="color:var(--jb-text-ter)">?</span>`
+            : '';
+          /* Reconciled against the game's own completion mail — the most certain
+           * attribution in the list, so it gets the strongest mark. */
+          const pay = h.pay
+            ? `<span title="Confirmed by the game's own completion notification${h.split ? `, with ${h.split} XP split back to the jail busts in the same reading at the learned per-bust rate` : ''}." style="color:var(--jb-success)">✓</span> `
+            : '';
+          const label = h.n > 1
+            ? `<span style="color:var(--jb-text-sec)">${esc(h.mix || h.action)}</span>${inf}`
+            : `<span style="color:var(--jb-text-sec)">${h.action}</span>${inf}`;
+          const amountClr = h.pay ? 'var(--jb-success)'
+                          : (bar || h.n > 1) ? 'var(--jb-warning)' : 'var(--jb-success)';
+          return `<div style="display:flex;justify-content:space-between;padding:1px 0;gap:6px">
+            <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${pay}${many}${h.icon} ${label}</span>
+            <span style="flex:0 0 auto">${mark}<b style="color:${amountClr}">+${h.gained}</b>${h.split ? `<span style="color:var(--jb-text-ter)" title="split back to jail"> −${h.split}</span>` : ''} <span style="color:var(--jb-text-ter)">${t}</span></span>
           </div>`;
         }).join('');
+        const step = barXpStep();
+        const clean = xpState.cleanReads || 0, bund = xpState.bundledReads || 0;
+        const pct = (clean + bund) ? Math.round((clean / (clean + bund)) * 100) : null;
+        const attrib = pct === null ? ''
+          : ` <b style="color:${pct >= 80 ? 'var(--jb-success)' : 'var(--jb-warning)'}">${pct}%</b> of readings covered a single action — the rest are shared, so treat the per-action bars as approximate below that.`;
+        const jr = jailAvgXp();
+        const jailRate = jr > 0
+          ? ` Jail measures <b>${jr.toFixed(3)}</b> XP per bust over ${xpState.jailSamples} clean reading${xpState.jailSamples===1?'':'s'} — that rate is what gets subtracted when a payout shares a reading with busts.`
+          : '';
+        const note = `<div class="jb-sub" style="border-top:1px solid var(--jb-border);margin-top:4px;padding-top:3px;font-size:9px;color:var(--jb-text-ter)">
+          <b style="color:var(--jb-warning)">≈</b> = read from the status bar, rounded to ${step ? '±' + step + ' XP' : 'its resolution'} at this rank.
+          <b style="color:var(--jb-warning)">⊕n</b> = one reading covering n actions; the amount is right but it is credited to the last of them.
+          <b style="color:var(--jb-success)">✓</b> = matched to the game's own OC/DTM completion mail — the most certain line here.
+          <b style="color:var(--jb-text-ter)">?</b> = inferred jail (nothing claimed it, but a bust was in the window).
+          Unmarked figures are exact and cover a single action.${attrib}${jailRate}
+          Showing ${Math.min(120, xpState.history.length)} of ${xpState.history.length} kept.
+        </div>`;
+        histHost.innerHTML = rows + note;
       }
     }
   }
@@ -4924,7 +5043,7 @@
     const links = [...document.querySelectorAll('a[id*="btnBreak"]')].filter(a => !a.hasAttribute('disabled') && a.href && a.href.includes('javascript:'));
     if (links.length > 0) {
       st.acting = true; st.action = 'jailbreak'; GM_setValue('cbActStart', now);
-      snapshotXP('jail');
+      snapshotXPQuiet('jail');   // never steals a reading — see snapshotXPQuiet
       links[Math.floor(Math.random()*links.length)].click();
       // This is a real attempt (success or fail) — count it
       incJailCount();
@@ -5246,7 +5365,12 @@
     });
     if (sellCt > 0) {
       const sellBtn = document.getElementById('ctl00_main_btnSellSelected');
-      if (sellBtn) { snapshotXP('garage'); sellBtn.click(); setTimeout(() => { st.acting=false; st.action=''; st.lastGarage=Date.now(); st.refresh=true; GM_setValue('cbActStart',0); saveSt(); window.location.href='/authenticated/crimes.aspx?'+Date.now(); }, rndDelay(DLY.normal)); return; }
+      /* No snapshotXP here: selling cars earns NO XP (confirmed by the user,
+       * 2000.246). Claiming the next reading for it would have credited garage
+       * with whatever the following crime or bust earned — and with the no-XP
+       * limiter on, garage would eventually disable itself for "gaining no XP",
+       * which was never a fault. */
+      if (sellBtn) { sellBtn.click(); setTimeout(() => { st.acting=false; st.action=''; st.lastGarage=Date.now(); st.refresh=true; GM_setValue('cbActStart',0); saveSt(); window.location.href='/authenticated/crimes.aspx?'+Date.now(); }, rndDelay(DLY.normal)); return; }
     }
 
     // Repair VIP
@@ -5499,6 +5623,7 @@
         const commitBtn = document.getElementById('ctl00_main_btnCommitOC');
         if (commitBtn && !commitBtn.disabled) {
           await wait(rndDelay(DLY.normal));
+          snapshotXP('oc');   // nothing tagged OC before 242, so every OC gain landed in "other"
           formSubmit(commitBtn);
           const mode = st.ocRepeat||'once';
           let willRepeat = false;
@@ -5892,13 +6017,13 @@
             </div>
             <div class="jb-pane" data-pane="actions">
             <div class="jb-sect-title">Action selection</div>
-            <label class="jb-switch jb-mb" title="OFF = pick at random from the crimes you've ticked, and buy a fixed booze amount. ON = pick the most valuable crime still succeeding at or above the threshold below, and buy your full rank carry limit of booze."><input type="checkbox" id="jb-smartpick" ${cfg.smartPick?'checked':''}> 🎯 <span id="jb-smartpick-label">${cfg.smartPick?'Smart (best value)':'Random (spread)'}</span></label>
+            <label class="jb-switch jb-mb" title="OFF = pick at random from the crimes you've ticked, and buy/sell fixed booze amounts. ON = pick the most valuable crime still succeeding at or above the threshold below, buy your full rank carry limit of booze, and sell it one unit at a time."><input type="checkbox" id="jb-smartpick" ${cfg.smartPick?'checked':''}> 🎯 <span id="jb-smartpick-label">${cfg.smartPick?'Smart (best value)':'Random (spread)'}</span></label>
             <div class="jb-row jb-mb">
               <label class="jb-label" style="white-space:nowrap">Min success %:</label>
               <input class="jb-input jb-input-sm" type="number" id="jb-smart-minpct" value="${cfg.smartMinPct}" min="0" max="100" step="5">
               <span class="jb-sub" id="jb-smart-preview">—</span>
             </div>
-            <div class="jb-sub jb-mb" style="color:var(--jb-text-ter);font-size:9px">Smart takes the <b>most valuable</b> crime still at or above that success rate — not simply the safest. At high rank the odds barely differ (sampled 97/95/94/94/90%), so picking on odds alone would always choose the cheapest crime. The game re-rolls the odds every visit, so this is re-decided from the live page each time: on a bad roll it steps down to the best crime that's safe enough, and back up next visit. The preview above is a snapshot of right now. Raise to play safer, lower to reach for bigger jobs. Booze: smart buys your rank carry limit and sells 1–3 at a time.</div>
+            <div class="jb-sub jb-mb" style="color:var(--jb-text-ter);font-size:9px">Smart takes the <b>most valuable</b> crime still at or above that success rate — not simply the safest. At high rank the odds barely differ (sampled 97/95/94/94/90%), so picking on odds alone would always choose the cheapest crime. The game re-rolls the odds every visit, so this is re-decided from the live page each time: on a bad roll it steps down to the best crime that's safe enough, and back up next visit. The preview above is a snapshot of right now. Raise to play safer, lower to reach for bigger jobs.<br><b>Booze:</b> smart buys your full rank carry limit (10 + rank level², so 35 at Criminal) and then sells <b>one at a time</b> — the XP is per sale, not per unit, so a full load sold singly earns it once per unit instead of once per batch.</div>
             <hr class="jb-sep">
             <div class="jb-sect-title">Daily counts &amp; limits</div>
             <label class="jb-switch jb-mb" title="Counting always runs. This switch only decides whether hitting a limit turns the action off for the rest of the game-day."><input type="checkbox" id="jb-daily-on" ${cfg.dailyLimitOn?'checked':''}> 📅 Enforce the limits below</label>
@@ -6188,7 +6313,13 @@
             <div class="jb-sect-title">Advanced</div>
             <label class="jb-switch jb-mb"><input type="checkbox" id="jb-resume" ${resume.on?'checked':''}> Auto-Resume</label>
             <label class="jb-switch jb-mb"><input type="checkbox" id="jb-stats-on" ${stats.on?'checked':''}> Stats Collection</label>
-            <label class="jb-switch jb-mb" title="Derive XP from the status-bar rank %, which is server-rendered on every page load. Corrects the total when hndlr.ashx stops delivering. Verified accurate to 0.07 XP against a live payload."><input type="checkbox" id="jb-xpbar-on" ${GM_getValue('cbXpBarOn',true)!==false?'checked':''}> 📊 Status-bar XP fallback</label>
+            <label class="jb-switch jb-mb" title="Backstop for when the game's exact XP feed goes quiet: derives XP from the status-bar rank %, which is server-rendered on every page load. It STANDS DOWN whenever an exact reading has arrived in the last 10 minutes — it is rounded to the rank's step (0.3 XP at Global Dominator), so it must never compete with the real figures."><input type="checkbox" id="jb-xpbar-on" ${GM_getValue('cbXpBarOn',true)!==false?'checked':''}> 📊 Status-bar XP fallback</label>
+            <div class="jb-row" title="How often to read your XP. The game's own page polls every 15 seconds while it sits open, and Jarvis fires the identical request — so 15-20s matches what an ordinary open browser does by itself.">
+              <label class="jb-label" style="white-space:nowrap">XP read every (s):</label>
+              <input class="jb-input jb-input-sm" type="number" id="jb-xp-poll" value="${cfg.xpPollSec}" min="10" max="300" step="5">
+              <span class="jb-sub">10–300 · default 20</span>
+            </div>
+            <div class="jb-sub jb-mb" style="color:var(--jb-text-ter);font-size:9px">Every action inside one gap shares a single reading and is credited to whichever fired last (shown as <b>⊕</b> in the charts). Reading more often is what makes per-action XP accurate. This was 60–180s until 2000.245 — <b>slower than the game's own page</b>, which cost accuracy for camouflage it never actually bought. ±25% jitter is applied so it isn't a metronome.</div>
             <label class="jb-switch jb-mb"><input type="checkbox" id="jb-noxp-on" ${cfg.noXpLimiterOn?'checked':''}> 📉 No-XP daily limiter</label>
             <div class="jb-row jb-mb">
               <label class="jb-label">No-XP streak limit:</label>
@@ -6395,7 +6526,7 @@
             <div id="jb-xp-bars" style="background:var(--jb-surface-alt);border-radius:4px;padding:6px;margin-bottom:8px"></div>
 
             <div class="jb-sect-title">Recent gains</div>
-            <div id="jb-xp-hist" style="background:var(--jb-surface-alt);border-radius:4px;padding:6px;max-height:140px;overflow-y:auto;font-size:10px"></div>
+            <div id="jb-xp-hist" style="background:var(--jb-surface-alt);border-radius:4px;padding:6px;max-height:280px;overflow-y:auto;font-size:10px"></div>
 
             <button class="jb-btn" id="jb-xp-report-now" style="width:100%;margin-top:8px">📤 Send XP Report Now</button>
             <button class="jb-btn jb-btn-danger" id="jb-xp-reset" style="width:100%;margin-top:6px">Reset XP Session</button>
@@ -6858,6 +6989,13 @@
       if (ab) ab.addEventListener('change', e => {
         cfg.antiBotOn = e.target.checked; GM_setValue('cbAntiBotOn', cfg.antiBotOn);
         setStatus(cfg.antiBotOn ? '🚨 Anti-bot detection on' : '🚨 Anti-bot detection off');
+      }); }
+    { const xp = _shadow.querySelector('#jb-xp-poll');
+      if (xp) xp.addEventListener('change', e => {
+        cfg.xpPollSec = Math.max(10, Math.min(300, parseInt(e.target.value,10)||20));
+        e.target.value = cfg.xpPollSec; GM_setValue('cbXpPollSec', cfg.xpPollSec);
+        GM_setValue('cbLastStatRefresh', 0);   // take effect now, not after the old gap
+        setStatus(`📊 XP read every ~${cfg.xpPollSec}s`);
       }); }
     { const ns = _shadow.querySelector('#jb-noxp-stale');
       if (ns) ns.addEventListener('change', e => {
@@ -7517,9 +7655,34 @@
    */
 
   const XP_ACTIONS = ['crime','gta','booze','jail','garage','oc','dtm'];
+  /* Recent-gains history. Raised from 40 to 250 in 2000.242 — the list is the
+   * most useful thing on the charts for spotting what an action is actually
+   * worth, and 40 entries is under an hour of play. Each entry is ~120 bytes, so
+   * 250 costs about 30 KB of GM storage: cheap next to the sample array.
+   * RAISING a cap is safe; LOWERING one silently destroys stored history, which
+   * is why the configurable caps added in 232 were removed in 233. Don't
+   * reintroduce them. */
+  const XP_HISTORY_CAP = 250;
+  const XP_SAMPLE_CAP  = 400;
   const xpState = {
     total:        GM_getValue('cbXpTotal', 0),
+    /* Last EXACT value from the XHR feed, tracked separately from `total`.
+     * `total` may have been nudged by the status-bar fallback, whose rounding can
+     * overshoot the truth by up to half its step; gains are measured against this
+     * instead so an overshoot can never swallow a real one. See onExperienceRead. */
+    apiTotal:     GM_getValue('cbXpApiTotal', 0),
+    lastApiAt:    GM_getValue('cbXpLastApiAt', 0),
     sessionGain:  GM_getValue('cbXpSessionGain', 0),
+    sessionBase:  GM_getValue('cbXpSessionBase', 0),
+    // How many readings covered exactly one action vs several — the honest
+    // measure of how far to trust the per-action bars. See onExperienceRead.
+    cleanReads:   GM_getValue('cbXpCleanReads', 0),
+    bundledReads: GM_getValue('cbXpBundledReads', 0),
+    // Recent per-bust XP samples, from readings that contained nothing but jail.
+    // The MEDIAN of these is what gets subtracted when an OC/DTM payout shares a
+    // reading with busts — see jailAvgXp().
+    jailRates:    GM_getValue('cbXpJailRates', null) || [],
+    jailSamples:  GM_getValue('cbXpJailSamples', 0),
     sessionStart: GM_getValue('cbXpSessionStart', Date.now()),
     perAction:    GM_getValue('cbXpPerAction', null) || {},
     history:      GM_getValue('cbXpHistory', null) || [],
@@ -7615,10 +7778,32 @@
     };
   }
 
+  /* How long the bar stays quiet after an exact reading. The bar is a FALLBACK
+   * for when hndlr.ashx stops delivering — that is its entire job. Letting it
+   * compete tick-by-tick with a live feed is pure downside: it can only ever be
+   * less precise, and its rounding actively corrupted the record (see
+   * onExperienceRead). While exact values are arriving, it stands down. */
+  const XP_BAR_STANDDOWN_MS = 10 * 60 * 1000;
+  let _barStoodDownLogged = false;
+
   // Feeds the derived value into the EXISTING onExperienceRead() — no change to
   // the interceptor or to how gains are recorded, just a second source for it.
   function syncXpFromBar() {
     if (GM_getValue('cbXpBarOn', true) === false) return;
+
+    const sinceApi = Date.now() - (xpState.lastApiAt || 0);
+    if (xpState.lastApiAt && sinceApi < XP_BAR_STANDDOWN_MS) {
+      if (!_barStoodDownLogged) {
+        _barStoodDownLogged = true;
+        dlog(APP_TAG, `[XP] Status-bar source standing down — exact feed is live (${Math.round(sinceApi/1000)}s ago)`);
+      }
+      return;
+    }
+    if (_barStoodDownLogged && xpState.lastApiAt) {
+      _barStoodDownLogged = false;
+      console.log(`${APP_TAG}[XP] No exact reading for ${Math.round(sinceApi/60000)}m — status-bar fallback taking over`);
+    }
+
     const d = deriveXpFromBar();
     if (!d) return;
     if (!_barXpLogged) {
@@ -7632,8 +7817,11 @@
     // Only ever correct upward: if the interceptor has a fresher (higher) figure,
     // leave it alone rather than dragging the total backwards.
     if (xpState.total > 0 && d.xp <= xpState.total) return;
-    onExperienceRead(d.xp);
+    onExperienceRead(d.xp, 'bar');
   }
+
+  // Current resolution of the status-bar source, for the charts to report.
+  function barXpStep() { const d = deriveXpFromBar(); return d ? d.step : null; }
 
   /* === ON-DEMAND STAT REFRESH (re-added 2000.226) ===
    * Fires the game's own status poll instead of waiting for its 15s interval,
@@ -7643,8 +7831,28 @@
    * script's maybeForceStatRefresh, with its unenforced snapshot-age guard
    * actually implemented (see below).
    */
-  const STAT_REFRESH_MIN_MS = 60000;
-  const STAT_REFRESH_MAX_MS = 180000;
+  /* HOW OFTEN TO READ XP (reworked 2000.245).
+   *
+   * This was 60–180s, and that was the wrong number in the wrong direction. The
+   * game's OWN page fires pstats(N) on an inline setInterval every **15
+   * seconds** while it sits open — and clicking #ctl00_imgRefresh calls that
+   * exact same function, producing an identical hndlr.ashx?m=pst request. The
+   * server cannot tell a click from the page's own timer.
+   *
+   * So polling at 60–180s was not "safer than a normal player" — it was SLOWER
+   * than what a normal player's browser does unattended, while costing us every
+   * action that fired inside the gap (they bundle into one reading and get
+   * credited to whichever went last — see snapshotXP). We were paying accuracy
+   * for camouflage we never actually gained.
+   *
+   * Default is now 20s with ±25% jitter: near the page's own cadence, never a
+   * fixed metronome. cfg.xpPollSec exposes it because it is a genuine trade the
+   * user should own.
+   */
+  function xpPollMs() {
+    const base = Math.max(10, Math.min(300, Number(cfg.xpPollSec) || 20)) * 1000;
+    return base * (0.75 + Math.random() * 0.5);   // ±25%
+  }
   // A read fired too soon after an action returns the PRE-action value, which
   // lands as a false "+0" and (with the limiter on) feeds the no-XP streak. The
   // reference script documents this 4s floor but computes _snapAge and never uses
@@ -7685,14 +7893,26 @@
     const snapFresh = snapT && age >= XP_SNAP_MIN_AGE_MS && age < 60000 && snapT !== bypassedFor;
 
     const last = GM_getValue('cbLastStatRefresh', 0);
-    const interval = STAT_REFRESH_MIN_MS + Math.floor(Math.random() * (STAT_REFRESH_MAX_MS - STAT_REFRESH_MIN_MS));
-    if (!snapFresh && Date.now() - last < interval) return false;
+    if (!snapFresh && Date.now() - last < xpPollMs()) return false;
+
+    /* Only count an attempt that actually HAPPENED.
+     *
+     * These two stamps used to be written before forceStatRefresh() ran, and
+     * regardless of what it returned. forceStatRefresh fails whenever
+     * #ctl00_imgRefresh isn't on the page — which is common, because Jarvis is
+     * navigating constantly and lands on plenty of pages mid-load. A failed
+     * attempt therefore burned BOTH the post-action bypass (so that action's gain
+     * was never read on its own, and bundled into the next reading) AND the
+     * routine throttle (so nothing else was tried for another cycle). The one
+     * moment we most need a reading — just after an action — was the one most
+     * likely to be silently skipped. */
+    const ok = forceStatRefresh();
+    if (!ok) { dlog(APP_TAG, '[XP] Stat refresh unavailable on this page — will retry'); return false; }
 
     if (snapFresh) GM_setValue('cbXpRefreshBypassedFor', snapT);
     GM_setValue('cbLastStatRefresh', Date.now());
-    const ok = forceStatRefresh();
-    if (ok && snapFresh) console.log(`${APP_TAG}[XP] Stat refresh (${snap.action} +${Math.round(age/1000)}s)`);
-    else if (ok) dlog(APP_TAG, '[XP] Stat refresh (routine)');
+    if (snapFresh) console.log(`${APP_TAG}[XP] Stat refresh (${snap.action} +${Math.round(age/1000)}s)`);
+    else dlog(APP_TAG, '[XP] Stat refresh (routine)');
     return ok;
   }
 
@@ -7774,10 +7994,18 @@
     /* No trimming here. 2000.232 briefly added configurable caps that trimmed on
      * every save, but lowering one silently and permanently discarded stored
      * chart history — a destructive setting sitting next to harmless ones.
-     * Removed in 233; onExperienceRead's own 400/40 limits are the only caps.
+     * Removed in 233; the XP_HISTORY_CAP / XP_SAMPLE_CAP constants applied in
+     * onExperienceRead are the only caps.
      * The background-poll interval gives the real memory win and costs nothing. */
     GM_setValue('cbXpTotal', xpState.total);
+    GM_setValue('cbXpApiTotal', xpState.apiTotal);
+    GM_setValue('cbXpLastApiAt', xpState.lastApiAt);
     GM_setValue('cbXpSessionGain', xpState.sessionGain);
+    GM_setValue('cbXpSessionBase', xpState.sessionBase);
+    GM_setValue('cbXpCleanReads', xpState.cleanReads || 0);
+    GM_setValue('cbXpBundledReads', xpState.bundledReads || 0);
+    GM_setValue('cbXpJailRates', xpState.jailRates || []);
+    GM_setValue('cbXpJailSamples', xpState.jailSamples || 0);
     GM_setValue('cbXpSessionStart', xpState.sessionStart);
     GM_setValue('cbXpPerAction', xpState.perAction);
     GM_setValue('cbXpHistory', xpState.history);
@@ -7786,6 +8014,9 @@
 
   function resetXpSession() {
     xpState.sessionGain = 0;
+    // Re-baseline: session gain is now derived as total − base, so the base has
+    // to move with the reset or the counter would resume from the old figure.
+    xpState.sessionBase = xpState.total || 0;
     xpState.sessionStart = Date.now();
     XP_ACTIONS.forEach(a => { xpState.perAction[a] = 0; });
     xpState.history = [];
@@ -7794,48 +8025,312 @@
     updateXpUI();
   }
 
-  // Record which action just fired so the next XP gain can be attributed to it.
+  /* Record which action just fired so the next XP gain can be attributed to it.
+   *
+   * ALSO appends to a PENDING list, and that list is the honest part. One XP
+   * reading covers everything that has happened since the previous one — the feed
+   * is polled every 60–180s, while several actions can come due within a few
+   * seconds of each other. When that happens the whole accumulated gain is
+   * credited to whichever action fired LAST, so a "+0.483 crime" can in truth be
+   * one crime plus five booze sales. The number is right; the label is a guess.
+   * Recording what the reading actually covers lets the charts say so.
+   */
+  const LS_XP_PENDING = 'cbXpPending';
+  const XP_PENDING_MAX_AGE = 30 * 60 * 1000;   // ignore anything older; it isn't ours
+
+  function xpPendingList() {
+    let p = [];
+    try { p = JSON.parse(localStorage.getItem(LS_XP_PENDING) || '[]'); } catch(_) {}
+    if (!Array.isArray(p)) return [];
+    const cut = Date.now() - XP_PENDING_MAX_AGE;
+    return p.filter(e => e && e.a && e.t > cut);
+  }
+
+  function _xpQueue(action) {
+    const p = xpPendingList();
+    p.push({ a: action, t: Date.now() });
+    while (p.length > 40) p.shift();
+    try { localStorage.setItem(LS_XP_PENDING, JSON.stringify(p)); } catch(_) {}
+  }
+
   function snapshotXP(action) {
     const snap = { action, t: Date.now() };
     GM_setValue('cbXpSnapshot', snap);
     GM_setValue('cbXpStreakSnap', snap);
+    _xpQueue(action);
   }
 
-  // Called by the API interceptor whenever a fresh Experience value is seen.
-  function onExperienceRead(rawXp) {
+  /* QUIET snapshot — records that the action happened, but does NOT claim the
+   * next XP reading and does NOT trigger a forced refresh. For JAIL (2000.246).
+   *
+   * Jail's interval defaults to THREE SECONDS. Snapshotting it normally did two
+   * bad things:
+   *   1. It overwrote the snapshot of whatever real action was still waiting for
+   *      its XP reading. Fire a crime, have a bust land 3s later, and the crime's
+   *      gain was credited to jail. Attribution for crime/GTA/booze has been
+   *      quietly leaking into jail for as long as both have been enabled.
+   *   2. It asked for a forced XP read every few seconds. (In practice the reads
+   *      mostly didn't happen — a new bust replaced the snapshot before it aged
+   *      past the 4s floor — so jail was already going unattributed. The requests
+   *      were pure cost with no benefit.)
+   *
+   * So jail no longer competes. Anything left over once the named actions have
+   * taken their share is inferred to be jail, which is sound because jail is the
+   * only remaining thing Jarvis does that earns XP: garage does not (see
+   * doGarage), and crime/GTA/booze/OC/DTM all snapshot properly.
+   */
+  function snapshotXPQuiet(action) { _xpQueue(action); }
+
+  /* === OC/DTM PAYOUT RECONCILIATION (2000.247) ===
+   *
+   * Driven by the game's own completion mail (OC_DONE_RE / DTM_DONE_RE). Two
+   * directions, because the mail poll (~30s) and the XP poll (~20s) race:
+   *
+   *   BACKWARDS — the usual case. The payout was already read and filed as
+   *     inferred-jail before the mail arrived. Find that entry and move it.
+   *   FORWARDS — the mail got here first. Park a marker; the next unclaimed gain
+   *     takes it.
+   *
+   * And the split you asked for: a reading that caught the payout probably caught
+   * some jail busts too. jailAvgXp() is LEARNED from readings that contained
+   * nothing but busts, so we can subtract `busts × average` and hand the rest to
+   * the OC. No invented constants — if we've never seen a clean jail-only
+   * reading, no split is attempted and the whole gain moves.
+   */
+  const PAYOUT_LOOKBACK_MS = 15 * 60 * 1000;   // how far back a notification may reach
+  const PAYOUT_FORWARD_MS  = 5 * 60 * 1000;    // how long a mail-first marker waits
+  const JAIL_RATE_KEEP     = 25;               // recent samples kept
+
+  /* MEDIAN, not mean. A reading credited to jail can still be carrying an OC/DTM
+   * payout — those queue nothing, which is the entire reason the notification
+   * signal exists — so the sample set will occasionally contain a wild value.
+   * A mean is dragged by one; a median shrugs it off and self-heals as clean
+   * samples arrive. */
+  function jailAvgXp() {
+    const r = Array.isArray(xpState.jailRates) ? xpState.jailRates : [];
+    if (!r.length) return 0;
+    const s = [...r].sort((a, b) => a - b);
+    const m = s.length >> 1;
+    return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+  }
+
+  /* Feed the per-bust rate, ONLY from a reading that covered jail alone.
+   * Returns the value recorded (0 if none), so the caller can note it on the
+   * entry — a later completion notification uses that to UNLEARN the sample if
+   * the reading turns out to have been a payout after all. */
+  function learnJailRate(gained, covered) {
+    if (!covered.length || !covered.every(e => e.a === 'jail')) return 0;
+    const per = gained / covered.length;
+    if (!(per > 0)) return 0;
+    if (!Array.isArray(xpState.jailRates)) xpState.jailRates = [];
+    const med = jailAvgXp();
+    if (med > 0 && xpState.jailRates.length >= 3 && per > med * 5) {
+      dlog(APP_TAG, `[XP] Ignoring ${per.toFixed(4)}/bust — ${Math.round(per/med)}× the median, almost certainly a payout`);
+      return 0;
+    }
+    xpState.jailRates.push(per);
+    while (xpState.jailRates.length > JAIL_RATE_KEEP) xpState.jailRates.shift();
+    xpState.jailSamples = xpState.jailRates.length;
+    dlog(APP_TAG, `[XP] Jail rate: ${jailAvgXp().toFixed(4)}/bust over ${xpState.jailSamples} samples`);
+    return per;
+  }
+
+  // Move a recorded gain to the OC/DTM that actually earned it. Returns true if
+  // the entry was changed.
+  function applyPayout(kind, entry) {
+    if (!entry || entry.pay) return false;             // already reconciled
+    const jn = entry.jn || 0, avg = jailAvgXp();
+    const jailPart = (jn > 0 && avg > 0)
+      ? Math.min(entry.gained, parseFloat((jn * avg).toFixed(4)))
+      : 0;
+    const payPart = parseFloat((entry.gained - jailPart).toFixed(4));
+    if (!(payPart > 0)) return false;                  // all of it was jail — leave it
+
+    const from = entry.action;
+    if (from && typeof xpState.perAction[from] === 'number')
+      xpState.perAction[from] = parseFloat(Math.max(0, xpState.perAction[from] - payPart).toFixed(4));
+    xpState.perAction[kind] = parseFloat(((xpState.perAction[kind] || 0) + payPart).toFixed(4));
+
+    entry.action = kind;
+    entry.icon   = ACTION_ICON[kind] || '⚡';
+    entry.gained = payPart;
+    entry.pay    = true;                               // confirmed by the game itself
+    delete entry.inf;                                  // no longer a guess
+    if (jailPart > 0) entry.split = jailPart;
+
+    /* UNLEARN. If this reading had already taught the per-bust rate, that lesson
+     * was wrong — the XP was mostly a payout. Pull the sample back out rather
+     * than leaving the median to outvote it. */
+    if (entry.lr && Array.isArray(xpState.jailRates)) {
+      const i = xpState.jailRates.findIndex(v => Math.abs(v - entry.lr) < 1e-9);
+      if (i >= 0) {
+        xpState.jailRates.splice(i, 1);
+        xpState.jailSamples = xpState.jailRates.length;
+        dlog(APP_TAG, `[XP] Unlearned ${entry.lr.toFixed(4)}/bust — that reading was a ${kind} payout`);
+      }
+      delete entry.lr;
+    }
+
+    console.log(`${APP_TAG}[XP] ${kind.toUpperCase()} payout confirmed by notification: +${payPart}` +
+                (jailPart > 0 ? ` (${jailPart} split back to ${jn} jail bust${jn===1?'':'s'})` : '') +
+                (from !== kind ? ` — was recorded as ${from}` : ''));
+    return true;
+  }
+
+  /* Called when a completion mail is seen. Looks back for the reading that
+   * carried the payout; if there isn't one yet, parks a forward marker. */
+  function notePayout(kind) {
+    const cut = Date.now() - PAYOUT_LOOKBACK_MS;
+    const hit = xpState.history.find(h =>
+      !h.rankUp && !h.pay && h.t >= cut && (h.inf || h.action === 'other' || h.action === 'jail'));
+    if (hit && applyPayout(kind, hit)) {
+      saveXpState();
+      try { updateXpUI(); } catch(_){}
+      return;
+    }
+    GM_setValue('cbXpPayoutPending', { kind, t: Date.now() });
+    console.log(`${APP_TAG}[XP] ${kind.toUpperCase()} completion noted — waiting for the reading that carries it`);
+  }
+
+  // "crime, booze×5" — what a bundled reading actually covered.
+  function xpMixSummary(list) {
+    const counts = {};
+    list.forEach(e => { counts[e.a] = (counts[e.a] || 0) + 1; });
+    return Object.entries(counts)
+      .sort((x, y) => y[1] - x[1])
+      .map(([a, n]) => n > 1 ? `${a}×${n}` : a)
+      .join(', ');
+  }
+
+  /* Called with a fresh Experience value. `src` is 'api' for an exact figure from
+   * the game's own XHR, or 'bar' for one derived from the status-bar percentage.
+   *
+   * THE SOURCE MATTERS AND IS NOW RECORDED. The bar renders two decimals of a
+   * percentage, so its resolution is one ten-thousandth of the rank span — 0.3 XP
+   * at Global Dominator, 0.2 at Global Threat. A booze sell worth 0.08 XP is
+   * therefore invisible to it until three or four of them have accumulated, at
+   * which point the whole lot surfaces as one +0.3 attributed to whichever action
+   * happened to fire last. That is exactly the "+0.3 booze" in a list of 0.06s:
+   * not a booze gain at all, but several actions' worth of XP rounded into one
+   * entry. Marking the source lets the charts say so instead of implying a
+   * precision that isn't there. */
+  function onExperienceRead(rawXp, src) {
     const xp = parseFloat(rawXp);
     if (!Number.isFinite(xp) || xp <= 0) return;
+    const source = src === 'bar' ? 'bar' : 'api';
 
-    const prev = xpState.total;
-    if (prev === 0) {
-      xpState.total = xp;
-      xpState.samples.push({ t: Date.now(), total: xp });
-      if (xpState.samples.length > 400) xpState.samples.shift();
+    /* Measure the gain against the last reading FROM THE SAME KIND OF SOURCE.
+     *
+     * This is the fix for "it misses every other booze". The bar's value is the
+     * true XP rounded to its own step, so it can sit ABOVE the truth by up to
+     * half a step. When that happened, `total` was left inflated, and the next
+     * exact reading came in BELOW it — the old code saw xp < prev, quietly reset
+     * the total and recorded no gain at all. A real 0.08 sale vanished, then the
+     * one after it was measured correctly, giving exactly the every-other-one
+     * pattern. Comparing an exact reading against the last exact reading makes a
+     * bar overshoot unable to eat anything. */
+    if (source === 'api') { xpState.lastApiAt = Date.now(); }
+    const prev = source === 'api' ? (xpState.apiTotal || 0) : xpState.total;
+
+    if (prev === 0) {                       // first reading of this kind — baseline only
+      xpState.total = Math.max(xpState.total, xp);
+      if (source === 'api') xpState.apiTotal = xp;
+      if (!xpState.sessionBase) xpState.sessionBase = xp;
+      /* A baseline attributes nothing, so anything queued before it belongs to a
+       * gain we will never see. Leaving it would make the FIRST real reading look
+       * bundled when it covered one action. */
+      localStorage.removeItem(LS_XP_PENDING);
+      xpState.samples.push({ t: Date.now(), total: xpState.total });
+      if (xpState.samples.length > XP_SAMPLE_CAP) xpState.samples.shift();
       saveXpState();
       updateXpUI();
       return;
     }
     if (xp === prev) { maybeFeedNoXpLimiter(false); return; }
-    if (xp < prev)  { xpState.total = xp; saveXpState(); return; }
+    if (xp < prev) {
+      // A genuine decrease (rank reset, or our own overshoot being corrected).
+      xpState.total = xp;
+      if (source === 'api') xpState.apiTotal = xp;
+      saveXpState();
+      return;
+    }
 
     const gained = parseFloat((xp - prev).toFixed(4));
     xpState.total = xp;
-    xpState.sessionGain = parseFloat((xpState.sessionGain + gained).toFixed(4));
+    if (source === 'api') xpState.apiTotal = xp;
+
+    /* Session gain is DERIVED from the baseline, not accumulated. Accumulating
+     * deltas meant every provisional bar reading was permanently banked, so a
+     * later exact correction could not undo it and the session total drifted
+     * upward all evening. Derived, it is self-correcting by construction. */
+    if (!xpState.sessionBase) xpState.sessionBase = Math.max(0, xp - gained);
+    xpState.sessionGain = parseFloat(Math.max(0, xpState.total - xpState.sessionBase).toFixed(4));
+
+    /* What this reading actually covered. Everything queued since the last
+     * attribution shares this one gain; the label is merely the last CLAIMING
+     * action of them. The per-action total still goes to that one — with nothing
+     * to split on, any division would be invented, and clean single-action
+     * readings dominate the sample often enough for the bars to stay meaningful.
+     * The counts below let the charts report how much of the record is a guess. */
+    const covered = xpPendingList();
+    localStorage.removeItem(LS_XP_PENDING);
+    const bundled = covered.length > 1;
 
     const snap = GM_getValue('cbXpSnapshot', null);
-    let action = 'other';
+    let action = 'other', inferred = false;
     if (snap && snap.action && (Date.now() - snap.t) < 90000) {
       action = snap.action;
       GM_setValue('cbXpSnapshot', null);
+    } else if (covered.some(e => e.a === 'jail')) {
+      /* Nothing claimed this reading, but a jail bust is in the window. Jail is
+       * deliberately quiet (see snapshotXPQuiet) and is the only remaining
+       * XP-earning thing Jarvis does that doesn't claim a reading, so unclaimed
+       * XP alongside a bust is jail's. Flagged as inferred rather than measured.
+       *
+       * KNOWN LIMIT: an OC or DTM payout arrives when the crime EXECUTES, which
+       * can be hours after its snapshot expired. If jail is running, such a
+       * payout lands here and is labelled jail. Those gains are far larger than a
+       * bust, so they stand out in the history — if that starts happening, the
+       * fix is a size guard, and it needs a real observed OC payout to set it. */
+      action = 'jail';
+      inferred = true;
     }
+    if (bundled) xpState.bundledReads = (xpState.bundledReads || 0) + 1;
+    else         xpState.cleanReads   = (xpState.cleanReads   || 0) + 1;
+
     if (typeof xpState.perAction[action] !== 'number') xpState.perAction[action] = 0;
     xpState.perAction[action] = parseFloat((xpState.perAction[action] + gained).toFixed(4));
 
-    xpState.history.unshift({ t: Date.now(), gained, action, icon: ACTION_ICON[action] || '⚡', total: xp });
-    if (xpState.history.length > 40) xpState.history.pop();
+    const entry = { t: Date.now(), gained, action, icon: ACTION_ICON[action] || '⚡', total: xp, src: source };
+    if (bundled) { entry.n = covered.length; entry.mix = xpMixSummary(covered); }
+    if (inferred) entry.inf = true;
+    // Busts caught in this reading, kept so a later OC/DTM notification can
+    // subtract their share at the learned rate rather than guessing.
+    const jn = covered.filter(e => e.a === 'jail').length;
+    if (jn) entry.jn = jn;
+    xpState.history.unshift(entry);
+    if (xpState.history.length > XP_HISTORY_CAP) xpState.history.pop();
+
+    /* Reconcile BEFORE learning. The completion mail can arrive first, and if it
+     * has, this reading is a payout rather than a measurement of jail. Learning
+     * from it first was self-defeating: the bogus rate then made the split
+     * consume the entire gain, payPart came out at zero, and applyPayout refused
+     * the reassignment it had itself just made impossible. */
+    const pend = GM_getValue('cbXpPayoutPending', null);
+    if (pend && pend.kind && (Date.now() - pend.t) < PAYOUT_FORWARD_MS &&
+        (entry.inf || action === 'other' || action === 'jail')) {
+      if (applyPayout(pend.kind, entry)) GM_setValue('cbXpPayoutPending', null);
+    }
+
+    // A jail-only reading is the one thing that measures a bust cleanly — but
+    // only if it wasn't just claimed as a payout above.
+    if (entry.action === 'jail' && !entry.pay) {
+      const lr = learnJailRate(entry.gained, covered);
+      if (lr) entry.lr = lr;
+    }
 
     xpState.samples.push({ t: Date.now(), total: xp });
-    if (xpState.samples.length > 400) xpState.samples.shift();
+    if (xpState.samples.length > XP_SAMPLE_CAP) xpState.samples.shift();
 
     saveXpState();
     maybeFeedNoXpLimiter(true);
@@ -7843,7 +8338,7 @@
 
     const mins = (Date.now() - xpState.sessionStart) / 60000;
     const rate = mins >= 2 ? ((xpState.sessionGain / mins) * 60).toFixed(1) : '…';
-    console.log(`${APP_TAG}[XP] +${gained} [${ACTION_ICON[action]||''}${action}] | session +${xpState.sessionGain} | total ${xp.toFixed(2)} | ${rate}/hr`);
+    console.log(`${APP_TAG}[XP] +${gained}${source==='bar'?'≈':''} [${ACTION_ICON[action]||''}${action}] | session +${xpState.sessionGain} | total ${xp.toFixed(2)} | ${rate}/hr`);
   }
 
   function maybeFeedNoXpLimiter(gained) {
@@ -8030,7 +8525,7 @@
               const d = Array.isArray(data) ? data[0] : data;
               if (!d) return;
               const xp = d.Experience ?? d.experience ?? d.XP ?? d.xp;
-              if (xp !== undefined && xp !== null) onExperienceRead(xp);
+              if (xp !== undefined && xp !== null) onExperienceRead(xp, 'api');
             } catch (e) { /* non-JSON / partial — ignore */ }
           }
         });
@@ -8857,6 +9352,7 @@
           [...document.querySelectorAll('input[type="submit"]')].find(b => /complete/i.test(b.value||''));
         if (compBtn && !compBtn.disabled) {
           await wait(rndDelay(DLY.normal));
+          snapshotXP('dtm');
           formSubmit(compBtn);
           tgMsg('dtmBuy', `✅ <b>DTM Committed</b>\n${st.player||'?'}`);
           resetCreateDTM();
@@ -8888,6 +9384,7 @@
         if (maxAmt > 0 && drugIn && buyBtn && !buyBtn.disabled) {
           drugIn.value = String(maxAmt);
           await wait(rndDelay(DLY.quick));
+          snapshotXP('dtm');
           buyBtn.click();
           tgMsg('dtmBuy', `🚚 <b>DTM Bought ${maxAmt}</b>\n${st.player||'?'}`);
           storeDtm({ ready: false, total: 7200, h: 2, m: 0, s: 0, at: Date.now() });
