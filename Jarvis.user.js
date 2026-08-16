@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.247
+// @version      2000.253
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -26,13 +26,14 @@
 // @grant        GM_addStyle
 // @grant        GM_xmlhttpRequest
 // @connect      api.telegram.org
+// @connect      discord.com
 // @connect      raw.githubusercontent.com
 // @connect      starvinggeeks.net
 // @updateURL    https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.meta.js
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.247
+/*  Jarvis Bot 2000.253
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -119,7 +120,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.247';
+  const APP_VERSION = '2000.253';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -893,6 +894,19 @@
     function initLogin() {
       resetLogin();
 
+      /* Halted — do not log back in.
+       *
+       * The halt lets the session lapse on purpose, so an auto-login here would
+       * undo the whole thing: back in, keep-alive running, polls resuming, right
+       * after you deliberately stopped. Read straight from GM storage because
+       * this branch runs long before `st` exists.
+       */
+      if (GM_getValue('cbHalted', false)) {
+        showOverlay('⛔ Jarvis STOPPED\nAuto-login disabled.\nTick ALL on the panel to resume.');
+        console.log('[JB Login] Halted — not logging in');
+        return;
+      }
+
       // Watch-logout parking: we've just logged out because a watched player
       // came online. Leave TMN entirely so the captcha/auto-login can't fire.
       // The tab sits off-site until you manually come back.
@@ -1071,7 +1085,35 @@
     /* Seconds between XP readings. The game's own page polls every 15s, and our
      * refresh fires the identical request, so anything near 15-20s matches what a
      * browser left open does by itself. See xpPollMs(). */
-    xpPollSec:     GM_getValue('cbXpPollSec', 20)
+    xpPollSec:     GM_getValue('cbXpPollSec', 20),
+    /* Ready reminders: OC/DTM goes ready and then sits there unused because you
+     * didn't see the one alert. Re-ping every N minutes while it's STILL ready,
+     * capped, and disarming the moment the timer goes back on cooldown. 0 = off. */
+    readyRepeatMin: GM_getValue('cbReadyRepeatMin', 15),
+    readyRepeatMax: GM_getValue('cbReadyRepeatMax', 4),
+    /* Mod presence. Staff are the four STAFF_IDS accounts; presence comes from the
+     * online watch's own players.aspx parse, so it works whether or not Watch is on. */
+    modWatchOn:     GM_getValue('cbModWatchOn', false),
+    modPollSec:     GM_getValue('cbModPollSec', 60),
+    noJailOnMod:    GM_getValue('cbNoJailOnMod', false),
+    modBreakOn:     GM_getValue('cbModBreakOn', false),
+    modBreakMin:    GM_getValue('cbModBreakMin', 60),   // minutes
+    modBreakMax:    GM_getValue('cbModBreakMax', 120),
+    modBreakLogout: GM_getValue('cbModBreakLogout', true),
+    /* Hold HQ (panic) — hide inside your network HQ so you can't be shot.
+     * Capped, and it switches ITSELF off at the cap: this is a panic button, not
+     * a way of life, and forgetting it was on would cost you a whole day. */
+    holdHqOn:      GM_getValue('cbHoldHqOn', false),
+    holdHqMins:    GM_getValue('cbHoldHqMins', 10),   // minutes per entry
+    holdHqMax:     GM_getValue('cbHoldHqMax', 6),     // entries before auto-off (~1h)
+    /* Hourly forum refresh — camouflage. Ours FETCHES rather than navigates; see
+     * doForumRefresh for why navigating would strand us. */
+    forumRefreshOn: GM_getValue('cbForumRefreshOn', false),
+    forumRefreshMin: GM_getValue('cbForumRefreshMin', 60),
+    /* OC/DTM allow-list gating off the Starvinggeeks lists. Stacks with the
+     * existing whitelist/blacklist — every gate must pass. */
+    inviteAlliedOnly: GM_getValue('cbInviteAlliedOnly', false),
+    inviteSafeOnly:   GM_getValue('cbInviteSafeOnly', false)
   };
 
   /* === DELAY SYSTEM === */
@@ -1112,6 +1154,47 @@
     // new mail while Jarvis is sitting idle — see mailIntervalMs() for why.
     msgCheckInt: GM_getValue('cbMsgCheckInt', 30)
   };
+
+  /* === DISCORD WEBHOOK ===
+   * A second alert channel, for the two events that are genuinely nicer as a
+   * Discord post than a phone notification: rank-ups (worth keeping) and witness
+   * statements (worth sharing).
+   *
+   * THE WEBHOOK URL IS DELIBERATELY NOT HARDCODED, unlike the reference script.
+   * `scoobyghub/v100` is a PUBLIC repo and `Jarvis.user.js` is served raw from
+   * githubusercontent, so a URL baked in here is a URL published to the world —
+   * and a Discord webhook URL is a credential: anyone holding it can post to that
+   * channel as often as they like. The reference can hardcode its own because it
+   * lives on a local disk, not in a public repo. Paste yours once; it is stored in
+   * GM storage, which is per-device and never leaves the machine.
+   *
+   * Sends go through the SAME persistent queue as Telegram — see the queue
+   * section for why one-shot fire-and-forget is not good enough here.
+   */
+  const dc = {
+    enabled: GM_getValue('cbDcEnabled', false),
+    url:     GM_getValue('cbDcUrl', ''),
+    rankup:  GM_getValue('cbDcRankup', true),
+    witness: GM_getValue('cbDcWitness', true),
+    /* Post from THIS device. Jarvis runs on 3 PCs and a tablet against one
+     * account, each with its own storage — so a rank-up is detected by every
+     * device that happens to be running, and each would post the same embed.
+     * Nothing in a userscript can dedup across machines, so the honest fix is a
+     * per-device switch: leave it on for one, off for the rest. */
+    thisDevice: GM_getValue('cbDcThisDevice', true)
+  };
+
+  function saveDc() {
+    GM_setValue('cbDcEnabled', dc.enabled);
+    GM_setValue('cbDcUrl', dc.url);
+    GM_setValue('cbDcRankup', dc.rankup);
+    GM_setValue('cbDcWitness', dc.witness);
+    GM_setValue('cbDcThisDevice', dc.thisDevice);
+  }
+
+  function dcConfigured() {
+    return !!(dc.enabled && /^https:\/\/(discord\.com|discordapp\.com)\/api\/webhooks\//i.test(dc.url));
+  }
 
   function saveTg() {
     GM_setValue('cbTgToken', tg.token); GM_setValue('cbTgChat', tg.chat);
@@ -1162,7 +1245,11 @@
     { key:'propDrop',    label:'Property dropped',      def:true  },
     { key:'watchdog',    label:'Watchdog',              def:true  },
     { key:'rankup',      label:'Rank up',               def:true  },
-    { key:'xpReport',    label:'Hourly XP report',      def:true  }
+    { key:'xpReport',    label:'Hourly XP report',      def:true  },
+    { key:'readyAgain',  label:'OC/DTM still ready',    def:true  },
+    { key:'witness',     label:'Witness mail',          def:true  },
+    { key:'modOnline',   label:'Staff/mod online',      def:true  },
+    { key:'holdHq',      label:'Hold HQ (panic)',       def:true  }
   ];
 
   const tgMsgOn = {};
@@ -1212,40 +1299,203 @@
     pumpTgQueue();
   }
 
+  /* Queue an embed for Discord. Same persistent queue as Telegram — a webhook
+   * post interrupted by navigation is exactly as lost as a Telegram one, and the
+   * retry/backoff/429 machinery here was built the hard way. Items carry a `dest`
+   * so one pump serves both; anything without one is Telegram, which keeps every
+   * pre-existing queued item working across the upgrade. */
+  function sendDiscord(embed) {
+    if (!dcConfigured()) return;
+    const q = _loadTgQ();
+    q.push({ id: Date.now() + '_' + Math.random().toString(36).slice(2, 7),
+             dest: 'dc', payload: { embeds: [embed] }, attempts: 0, nextAt: 0 });
+    if (q.length > 50) q.splice(0, q.length - 50);
+    _saveTgQ(q);
+    pumpTgQueue();
+  }
+
   function pumpTgQueue() {
-    if (!tg.enabled || !tg.token || !tg.chat) return;
+    /* Gated PER ITEM, not up front. The old single check returned early unless
+     * Telegram was configured, which would have stranded every Discord item for
+     * anyone using Discord alone. */
+    const tgOk = !!(tg.enabled && tg.token && tg.chat);
+    const dcOk = dcConfigured();
+    if (!tgOk && !dcOk) return;
     const q = _loadTgQ();
     if (!q.length) return;
     const now = Date.now();
     for (const item of q) {
       if (_tgInFlight[item.id]) continue;
       if (now < (item.nextAt || 0)) continue;
+      const isDc = item.dest === 'dc';
+      if (isDc ? !dcOk : !tgOk) continue;      // channel switched off — leave it queued
+      const label = isDc ? 'Discord' : 'TG';
       _tgInFlight[item.id] = true;
       item.attempts = (item.attempts || 0) + 1;
       _saveTgQ(q);
       GM_xmlhttpRequest({
-        method:'POST', url:`https://api.telegram.org/bot${tg.token}/sendMessage`,
+        method:'POST',
+        url: isDc ? dc.url : `https://api.telegram.org/bot${tg.token}/sendMessage`,
         timeout:15000, headers:{'Content-Type':'application/json'},
-        data:JSON.stringify({chat_id:tg.chat, text:item.msg, parse_mode:'HTML'}),
+        data: isDc ? JSON.stringify(item.payload)
+                   : JSON.stringify({chat_id:tg.chat, text:item.msg, parse_mode:'HTML'}),
         onload: r => {
           delete _tgInFlight[item.id];
-          if (r.status === 200) {
+          // Discord webhooks answer 204 No Content on success, Telegram 200.
+          if (r.status === 200 || r.status === 204) {
             _removeTgQ(item.id);
-            console.log(APP_TAG, 'TG sent');
+            console.log(APP_TAG, label, 'sent');
           } else if (r.status === 429) {
+            /* Two different shapes: Telegram nests it under `parameters`, Discord
+             * puts `retry_after` at the top level and in SECONDS as a float. */
             let wait = 5000;
-            try { const j = JSON.parse(r.responseText); if (j.parameters && j.parameters.retry_after) wait = (j.parameters.retry_after + 1) * 1000; } catch(_){}
-            console.error(APP_TAG, 'TG 429 — retry in', wait, 'ms');
+            try {
+              const j = JSON.parse(r.responseText);
+              const ra = (j.parameters && j.parameters.retry_after) != null ? j.parameters.retry_after : j.retry_after;
+              if (ra != null) wait = Math.ceil((Number(ra) + 1) * 1000);
+            } catch(_){}
+            console.error(APP_TAG, label, '429 — retry in', wait, 'ms');
             _deferTgQ(item.id, Date.now() + wait);
           } else {
-            console.error(APP_TAG, 'TG fail', r.status);
+            console.error(APP_TAG, label, 'fail', r.status, isDc ? (r.responseText||'').slice(0,120) : '');
             _backoffOrDropTgQ(item.id, item.attempts);
           }
         },
-        onerror: () => { delete _tgInFlight[item.id]; console.error(APP_TAG, 'TG err'); _backoffOrDropTgQ(item.id, item.attempts); },
-        ontimeout: () => { delete _tgInFlight[item.id]; console.error(APP_TAG, 'TG timeout'); _backoffOrDropTgQ(item.id, item.attempts); }
+        onerror: () => { delete _tgInFlight[item.id]; console.error(APP_TAG, label, 'err'); _backoffOrDropTgQ(item.id, item.attempts); },
+        ontimeout: () => { delete _tgInFlight[item.id]; console.error(APP_TAG, label, 'timeout'); _backoffOrDropTgQ(item.id, item.attempts); }
       });
     }
+  }
+
+  /* === DISCORD EMBEDS ===
+   * Reworked from the reference's, which repeat your own name in the title, the
+   * description and again in a field, and carry no context beyond the bare event.
+   *
+   * The shape here is: AUTHOR = who this is about, TITLE = what happened,
+   * FIELDS = the specifics, FOOTER = provenance. Your name appears once.
+   *
+   * Both carry information the reference cannot: our rank-up is detected from the
+   * status bar as a from→to transition (theirs parses a mail blob), and we have
+   * live XP totals to hang off it.
+   */
+  const DC_COLOUR = { rankup: 0xF1C40F, witness: 0xC0392B };
+
+  function dcBase(title, colour) {
+    return {
+      title,
+      color: colour,
+      author: { name: st.player || 'Unknown player' },
+      timestamp: new Date().toISOString(),
+      footer: { text: `${APP_NAME} ${APP_VERSION}` }
+    };
+  }
+
+  /* === POST ONCE, NEVER FLOOD ===
+   * Four ways the same event could post more than once, and all four are real:
+   *
+   *   1. MULTIPLE TABS on one device. updateTimers runs per tab, not master-only,
+   *      so two open tabs both see the rank change. → master tab only.
+   *   2. THE SAME EVENT RE-DETECTED. A rank-up is spotted by comparing the status
+   *      bar to a stored name; anything that resets that stored name re-fires it.
+   *      → seenOnce(), which is localStorage-backed and therefore shared by every
+   *      tab on the device and survives reloads.
+   *   3. THE QUEUE'S AT-LEAST-ONCE DELIVERY. Documented and accepted for Telegram:
+   *      if the page navigates in the ~100ms before a 200 is recorded, the item is
+   *      retried and can land twice. → a short content-hash guard, which is the
+   *      "duplicate-suppression guard" §8 has listed as optional since 177.
+   *   4. MULTIPLE DEVICES. Not solvable in-script — see dc.thisDevice.
+   *
+   * The event key is what makes 2 work, so it must identify the EVENT, not the
+   * message: a rank-up is keyed from→to, a witness by its mail id.
+   */
+  const DC_DUP_WINDOW_MS = 60000;
+
+  function dcRecentlySent(embed) {
+    const h = contentHash(JSON.stringify(embed));
+    let arr = [];
+    try { arr = JSON.parse(localStorage.getItem('cbDcRecent') || '[]'); } catch(_) {}
+    if (!Array.isArray(arr)) arr = [];
+    const now = Date.now();
+    arr = arr.filter(e => e && now - e.t < DC_DUP_WINDOW_MS);
+    if (arr.some(e => e.h === h)) {
+      console.log(APP_TAG, '[DC] Suppressed an identical embed sent moments ago');
+      try { localStorage.setItem('cbDcRecent', JSON.stringify(arr)); } catch(_){}
+      return true;
+    }
+    arr.push({ h, t: now });
+    while (arr.length > 20) arr.shift();
+    try { localStorage.setItem('cbDcRecent', JSON.stringify(arr)); } catch(_){}
+    return false;
+  }
+
+  // `key` identifies the EVENT. Returns true if it was actually queued.
+  function dcSendOnce(bucket, key, embed) {
+    if (!dcConfigured()) return false;
+    if (!dc.thisDevice) { dlog(APP_TAG, '[DC] This device is set not to post — skipping'); return false; }
+    if (!tabs.isMaster)  { dlog(APP_TAG, '[DC] Not the master tab — skipping'); return false; }
+    if (!seenOnce(bucket, key, 60)) { console.log(APP_TAG, `[DC] Already posted ${bucket}:${key} — not posting again`); return false; }
+    if (dcRecentlySent(embed)) return false;
+    sendDiscord(embed);
+    return true;
+  }
+
+  function discordRankUp(fromName, toName) {
+    if (!dc.rankup || !dcConfigured()) return;
+    const e = dcBase(`⭐ Ranked up to ${toName}`, DC_COLOUR.rankup);
+    e.description = `**${fromName}**  →  **${toName}**`;
+    const fields = [];
+    if (xpState.total > 0) fields.push({ name: 'Total XP', value: xpState.total.toFixed(2), inline: true });
+    if (xpState.sessionGain > 0) fields.push({ name: 'This session', value: `+${xpState.sessionGain}`, inline: true });
+    try {
+      const rp = xpRankProgress(xpState.total);
+      if (rp && rp.next) fields.push({ name: 'Next rank', value: `${rp.next} — ${rp.toNext.toFixed(0)} XP to go`, inline: false });
+      else if (rp && !rp.next) fields.push({ name: 'Next rank', value: 'Max rank reached', inline: false });
+    } catch(_){}
+    if (fields.length) e.fields = fields;
+    // Keyed by the transition, so the same rank-up can never post twice however
+    // many times it is re-detected.
+    dcSendOnce('dcrank', `${fromName}>${toName}`, e);
+  }
+
+  function discordWitness(mailId, killer, victim) {
+    if (!dc.witness || !dcConfigured()) return;
+    const e = dcBase('👁️ Witness statement', DC_COLOUR.witness);
+    e.description = `Saw **${killer}** kill **${victim}**.`;
+    e.fields = [
+      { name: 'Killer', value: killer, inline: true },
+      { name: 'Victim', value: victim, inline: true }
+    ];
+    const city = getCurCity();
+    if (city) e.fields.push({ name: 'Where', value: city, inline: true });
+    // Keyed by the mail id — one statement per mail, for ever.
+    dcSendOnce('dcwit', String(mailId || `${killer}>${victim}`), e);
+  }
+
+  /* The test deliberately bypasses the once-only dedup — you may well want to
+   * press it twice — but it must be UNMISTAKABLY a test, in the title, the body
+   * and the footer. A test post that reads like a real rank-up is worse than no
+   * test at all, especially in a channel other people can see. */
+  function testDiscord() {
+    if (!dcConfigured()) {
+      alert('Enable Discord and paste a valid webhook URL first.\n\nIt should look like:\nhttps://discord.com/api/webhooks/…');
+      return;
+    }
+    const e = {
+      title: '🧪 THIS IS A TEST',
+      description: '**THIS IS A TEST MESSAGE — no rank-up and no murder has happened.**\n\n' +
+                   'You pressed "Test Discord" in Jarvis. Real alerts look different and are posted once each.',
+      color: 0x95A5A6,                       // deliberately grey: not the gold or red of a real alert
+      author: { name: `${st.player || 'Unknown player'} — test` },
+      fields: [
+        { name: 'Rank-up alerts', value: dc.rankup ? '✅ on' : '⛔ off', inline: true },
+        { name: 'Witness alerts', value: dc.witness ? '✅ on' : '⛔ off', inline: true },
+        { name: 'Posting from this device', value: dc.thisDevice ? '✅ yes' : '⛔ no', inline: true }
+      ],
+      timestamp: new Date().toISOString(),
+      footer: { text: `THIS IS A TEST · ${APP_NAME} ${APP_VERSION}` }
+    };
+    sendDiscord(e);                          // not dcSendOnce: repeat tests are fine
+    alert('Test sent — check the channel.\n\nIt is clearly marked THIS IS A TEST.');
   }
 
   function startTgPump() {
@@ -1491,7 +1741,11 @@
     ocRepeat:  GM_getValue('cbOcRepeat', 'once'),
     ocLeft:    GM_getValue('cbOcLeft', 0),
     autoTravel:GM_getValue('cbAutoTravel', false),
-    autoDtmList:GM_getValue('cbAutoDtmList', false)
+    autoDtmList:GM_getValue('cbAutoDtmList', false),
+    /* HALTED — the ALL switch is a power switch, not a summary of the others.
+     * See the HARD HALT section for what this actually stops and why it has to
+     * be more than "turn the actions off". */
+    halted:    GM_getValue('cbHalted', false)
   };
 
   /* === BREAK SYSTEM CONFIG === */
@@ -1756,6 +2010,10 @@
 
   function getBreakStatus() {
     if (breaks.isSleeping) return { active:true, type:'sleep', msg:`😴 Sleeping until ${breaks.wakeTime}` };
+    // Mod-online break — reported as a break so the panel, the ready reminders and
+    // the watchdog's "deliberate wait" check all treat it as one.
+    if (typeof modBreakActive === 'function' && modBreakActive())
+      return { active:true, type:'mod', msg:`🛑 Mod break (${modBreakRemainingMin()}m left)` };
     if (breaks.lunchEndAt > 0 && Date.now() < breaks.lunchEndAt) {
       const rem = Math.ceil((breaks.lunchEndAt - Date.now())/60000);
       return { active:true, type:'lunch', msg:`🍔 Lunch (${rem}m left)` };
@@ -1768,6 +2026,102 @@
   }
 
   let paused = false;
+
+  /* === HARD HALT (the ALL switch) ===
+   *
+   * "Off" has to mean OFF AT THE NETWORK, not just "the actions are unticked".
+   *
+   * The reason is the script check. A moderator sends one and then watches
+   * whether the account keeps behaving like somebody is sitting at it. With the
+   * actions merely switched off, Jarvis still polled the inbox every 30s, fetched
+   * the OC/DTM/travel timers every 60s, re-fetched protection, scanned the
+   * players page, pinged keep-alive every 5 minutes and fired the XP status
+   * refresh — a steady drumbeat of requests on your session cookie saying "still
+   * here" while you are demonstrably not answering. That is the exact opposite of
+   * what "I've stopped" is supposed to look like, and it is worse than useless:
+   * it is evidence against you.
+   *
+   * So halting stops every request Jarvis makes TO THE GAME, and stops
+   * navigating. Three layers, because timers are not the only entry point:
+   *   1. mainLoop returns immediately (kills every loop-driven action + nav)
+   *   2. the fetching timers are cleared, so there are no wakeups to leak through
+   *   3. each fetch entry point checks isHalted() itself, so a stray call from a
+   *      handler, a retry or a setTimeout still can't reach the network
+   * plus safeNav() refusing outright, as the single navigation choke point.
+   *
+   * WHAT DELIBERATELY KEEPS RUNNING — all of it local or outbound-to-Telegram,
+   * none of it visible to the game:
+   *   · the Telegram send queue and the critical-alert queue. A queued script
+   *     check alert MUST still reach you; that is the whole point of stopping.
+   *   · the panel, so you can turn it back on.
+   *   · reading the page already in front of you (staff-check / anti-bot
+   *     detection), which costs nothing and is worth keeping.
+   *
+   * KNOWN CONSEQUENCE, and it is the correct one: with keep-alive stopped the
+   * session will eventually time out. Being logged out is what "stopped" should
+   * look like. Auto-login is suppressed while halted for the same reason —
+   * otherwise the halt would quietly log you back in and start the drumbeat again.
+   */
+  function isHalted() { return !!st.halted; }
+
+  function haltAll(reason) {
+    st.halted = true;
+    GM_setValue('cbHalted', true);   // written directly too: the login page reads it before st exists
+    saveSt();
+    try { if (_loopTimer) { clearTimeout(_loopTimer); _loopTimer = null; } _loopDueAt = 0; } catch(_){}
+    try { owStop(); } catch(_){}
+    try { propWatchStop(); } catch(_){}
+    try { modWatchStop(); } catch(_){}
+    try { stopKeepAlive(); } catch(_){}
+    try { stopFetchTimers(); } catch(_){}
+    // Anything mid-flight must not resume on the next page.
+    try {
+      st.acting = false; st.action = ''; st.pending = ''; GM_setValue('cbActStart', 0);
+      localStorage.removeItem('cbActionLockUntil');
+    } catch(_){}
+    saveSt();
+    console.log(`${APP_TAG}[HALT] Stopped — no further requests to the game.${reason ? ' (' + reason + ')' : ''}`);
+    setStatus('⛔ STOPPED — no activity');
+  }
+
+  /* Everything that polls, watches or keeps the session warm, in one idempotent
+   * place. Called by init() when not halted, and by resumeAll().
+   *
+   * It has to be BOTH places: a page that loads while halted never runs the
+   * start-up path, so resuming has to be able to bring the whole lot up from
+   * cold. The `_oneShotsDone` flag covers the inits that are not safe to run
+   * twice — initServerTime sets an unheld interval, and initKeepAliveExtras adds
+   * event listeners — while the rest are start/stop pairs that clear first.
+   */
+  let _oneShotsDone = false;
+  function startAllServices() {
+    if (isHalted()) return;
+    try { startTimers(); } catch(_){}
+    try { migrateOwList(); } catch(_){}
+    try { owStart(); } catch(_){}
+    try { propWatchStart(); } catch(_){}
+    try { modWatchStart(); } catch(_){}
+    try { startWatchdog(); } catch(_){}
+    try { startKeepAlive(); } catch(_){}
+    try { initSgLists(); } catch(_){}
+    try { initPlayerHover(); } catch(_){}
+    if (!_oneShotsDone) {
+      _oneShotsDone = true;
+      try { initKeepAliveExtras(); } catch(_){}
+      try { initServerTime(); } catch(_){}
+      try { initHot(); } catch(_){}
+    }
+  }
+
+  function resumeAll(reason) {
+    st.halted = false;
+    GM_setValue('cbHalted', false);
+    saveSt();
+    startAllServices();
+    console.log(`${APP_TAG}[HALT] Resumed.${reason ? ' (' + reason + ')' : ''}`);
+    setStatus('▶️ Resumed');
+    try { schedLoop(1000); } catch(_){}
+  }
 
   function saveSt() {
     const m = {
@@ -1786,7 +2140,8 @@
       cbCreateOC:st.createOC, cbOcTrans:st.ocTrans, cbOcWeapon:st.ocWeapon,
       cbOcExplo:st.ocExplo, cbOcSched:st.ocSched, cbOcType:st.ocType,
       cbOcRepeat:st.ocRepeat, cbOcLeft:st.ocLeft,
-      cbAutoTravel:st.autoTravel, cbAutoDtmList:st.autoDtmList
+      cbAutoTravel:st.autoTravel, cbAutoDtmList:st.autoDtmList,
+      cbHalted:st.halted
     };
     for (const [k,v] of Object.entries(m)) GM_setValue(k, v);
   }
@@ -2238,7 +2593,11 @@
     } catch(_) { return false; }
   }
 
+  /* Chokepoint for the online watch, property watch and mod watch. Rejecting
+   * rather than resolving empty keeps every caller's existing error path — they
+   * all log a failed scan and keep their last reading, which is exactly right. */
   function owFetch(url) {
+    if (isHalted()) return Promise.reject(new Error('halted'));
     const ac = new AbortController();
     const tm = setTimeout(() => ac.abort(), OW_TIMEOUT);
     return fetch(url, { method:'GET', credentials:'include', cache:'no-store', signal:ac.signal, headers:{'X-CB-Watch':'1'} })
@@ -2499,6 +2858,154 @@
     // Will be implemented in UI section
   }
 
+  /* === MOD PRESENCE (no jail on Mod · mod-online break) ===
+   *
+   * Two separate behaviours off one detection, both default OFF:
+   *
+   *   NO JAIL ON MOD  — while staff are online, stop attempting jail busts.
+   *     Jail is the loudest thing Jarvis does: cfg.jailInt defaults to THREE
+   *     SECONDS, so it's a page load every few seconds, all day. That is the
+   *     activity a moderator watching the jail list would notice first. Nothing
+   *     else is suppressed, because nothing else is anywhere near as noisy.
+   *
+   *   MOD-ONLINE BREAK — roll a 1-2h break, optionally logging out. The blunt
+   *     option for when you'd rather simply not be there.
+   *
+   * DETECTION IS THE GAME'S OWN MARKER, not a name list. players.aspx renders a
+   * staff member's profile link with an inline `color: #FF9900`, so the site
+   * itself tells us who is staff. That catches EVERY moderator, including ones we
+   * could never have named — an earlier draft matched the four STAFF_IDS accounts
+   * and would have sat blind to anyone else. Fetching reuses the online watch's
+   * fetchOwPage (same proven request), but the parse is separate because the
+   * watch's parseOwPlayers deliberately discards styling.
+   *
+   * MARC IS EXCLUDED. The owner's account shows highlighted essentially always, so
+   * counting it would leave the feature permanently triggered — jail off forever,
+   * or a break that re-arms the moment it ends. The reference script skips marc in
+   * exactly the same place and for the same reason.
+   *
+   * FAILING OPEN IS DELIBERATE. A failed fetch does not assert "a mod is online"
+   * and pause you indefinitely on a network blip; the last good reading is kept
+   * and allowed to go stale, and a stale reading stops suppressing anything (see
+   * modsOnline). The cost of failing closed — a silent all-day halt you'd only
+   * notice hours later — is far worse than the cost of one unsuppressed bust.
+   */
+  const MOD_STALE_MS = 5 * 60 * 1000;   // a reading older than this suppresses nothing
+  const LS_MOD_BREAK_UNTIL = 'cbModBreakUntil';
+  const MOD_HILITE_RE = /color:\s*#FF9900/i;
+  const MOD_IGNORE = new Set(['marc']);  // owner — permanently highlighted, see above
+  let _modBusy = false, _modTimer = null;
+
+  /* Staff names on a players.aspx document, read from the game's own highlight.
+   * Separate from parseOwPlayers because that one drops the inline style, and
+   * changing it would risk the online watch for no gain here. */
+  function parseModsFromDoc(doc) {
+    const out = [], seen = new Set();
+    for (const a of doc.querySelectorAll('a[href*="profile.aspx?id="]')) {
+      const name = (a.textContent || '').trim();
+      if (!name || seen.has(name.toLowerCase())) continue;
+      if (MOD_IGNORE.has(name.toLowerCase())) continue;
+      if (!MOD_HILITE_RE.test(a.getAttribute('style') || '')) continue;
+      seen.add(name.toLowerCase());
+      out.push(name);
+    }
+    return out;
+  }
+
+  function modState() {
+    try { const s = JSON.parse(localStorage.getItem('cbModOnline') || 'null'); return s && typeof s === 'object' ? s : null; }
+    catch(_) { return null; }
+  }
+
+  // Names of staff currently online, or [] — an unavailable/stale reading yields
+  // [] so every caller treats "we don't know" as "don't suppress".
+  function modsOnline() {
+    const s = modState();
+    if (!s || !Array.isArray(s.names)) return [];
+    if (Date.now() - (s.at || 0) > MOD_STALE_MS) return [];
+    return s.names;
+  }
+
+  // The gate doJailbreak consults. Separate from jailShouldHoldOff() (which yields
+  // to a due action) because the reasons are unrelated and both must be able to
+  // hold jail independently.
+  function modJailBlocked() {
+    if (!cfg.modWatchOn || !cfg.noJailOnMod) return false;
+    return modsOnline().length > 0;
+  }
+
+  function modBreakActive() {
+    const until = parseInt(localStorage.getItem(LS_MOD_BREAK_UNTIL) || '0', 10);
+    if (!until) return false;
+    if (Date.now() >= until) {
+      localStorage.removeItem(LS_MOD_BREAK_UNTIL);
+      console.log(`${APP_TAG}[MOD] Break over — resuming`);
+      tgMsg('modOnline', `▶️ <b>Mod break over</b>\n${st.player||'?'} | back on`);
+      return false;
+    }
+    return true;
+  }
+
+  function modBreakRemainingMin() {
+    const until = parseInt(localStorage.getItem(LS_MOD_BREAK_UNTIL) || '0', 10);
+    return until ? Math.max(0, Math.ceil((until - Date.now()) / 60000)) : 0;
+  }
+
+  function startModBreak(names) {
+    if (modBreakActive()) return;                       // already on one
+    const lo = Math.max(1, Number(cfg.modBreakMin) || 60);
+    const hi = Math.max(lo, Number(cfg.modBreakMax) || lo);
+    const mins = lo + Math.floor(Math.random() * (hi - lo + 1));
+    localStorage.setItem(LS_MOD_BREAK_UNTIL, String(Date.now() + mins * 60000));
+    console.log(`${APP_TAG}[MOD] ${names.join(', ')} online — taking a ${mins}m break`);
+    tgMsg('modOnline', `🛑 <b>Mod online</b> — ${esc(names.join(', '))}\n${st.player||'?'} | ${mins}m break${cfg.modBreakLogout ? ', logging out' : ''}`);
+    if (cfg.modBreakLogout) {
+      /* Reuse the watch-logout suppression so auto-login doesn't sign straight
+       * back in — without this the login page would log us back in within
+       * seconds and the break would be over before it started. */
+      GM_setValue('cbOwLogoutUntil', Date.now() + mins * 60000);
+      setTimeout(() => doLogout('mod online: ' + names.join(', ')), 2000);
+    }
+  }
+
+  async function modScan() {
+    if (!cfg.modWatchOn || !tabs.isMaster || _modBusy) return;
+    _modBusy = true;
+    try {
+      const f = await fetchOwPage();
+      const names = parseModsFromDoc(f.doc);
+      const prev = modState();
+      const was = (prev && Array.isArray(prev.names)) ? prev.names : [];
+      localStorage.setItem('cbModOnline', JSON.stringify({ names, at: Date.now(), ok: true }));
+
+      // Alert + break only on the transition, so a mod sitting online all evening
+      // doesn't re-trigger every poll.
+      const fresh = names.filter(n => !was.includes(n));
+      if (fresh.length) {
+        console.log(`${APP_TAG}[MOD] Staff online: ${names.join(', ')}`);
+        if (cfg.modBreakOn) startModBreak(names);
+        else tgMsg('modOnline', `👮 <b>Staff online</b> — ${esc(names.join(', '))}\n${st.player||'?'}${cfg.noJailOnMod ? ' | jail paused' : ''}`);
+      } else if (was.length && !names.length) {
+        console.log(`${APP_TAG}[MOD] Staff offline — all clear`);
+        tgMsg('modOnline', `✅ <b>Staff offline</b>\n${st.player||'?'} | all clear`);
+      }
+    } catch (e) {
+      /* Keep the last reading and let it age out rather than asserting anything.
+       * See the section note: failing open is the deliberate choice here. */
+      console.warn(APP_TAG, '[MOD] scan failed:', e && e.message ? e.message : e);
+    } finally { _modBusy = false; }
+  }
+
+  function modWatchStart() {
+    modWatchStop();
+    if (!cfg.modWatchOn) return;
+    const ms = Math.max(30, Math.min(600, Number(cfg.modPollSec) || 60)) * 1000;
+    _modTimer = setInterval(modScan, ms);
+    setTimeout(modScan, 7000);
+  }
+
+  function modWatchStop() { if (_modTimer) clearInterval(_modTimer); _modTimer = null; }
+
   /* === SCRIPT CHECK MONITOR === */
 
   let _scActive = false, _scSubmitted = false;
@@ -2614,6 +3121,7 @@
   const TRAVEL_PATH = '/authenticated/travel.aspx';
 
   async function fetchTravel() {
+    if (isHalted()) return;
     try {
       const url = `${window.location.origin}${TRAVEL_PATH}?_=${Date.now()}`;
       dlog('[JB][TRAVEL] Fetching:', url);
@@ -2721,6 +3229,7 @@
   const LS_PROT_END = 'cbProtEnd', LS_PROT_ST = 'cbProtStatus';
 
   async function fetchProt() {
+    if (isHalted()) return;
     try {
       const url = `${window.location.origin}/authenticated/statistics.aspx?p=p&_=${Date.now()}`;
       const r = await fetch(url, { method:'GET', headers:{'Cache-Control':'no-cache'}, credentials:'same-origin' });
@@ -2789,6 +3298,49 @@
 
   /* === OC/DTM READY ALERTS === */
 
+  /* Re-ping while an OC/DTM sits READY and unused.
+   *
+   * The first alert fires once on the cooldown→ready transition. If you miss it,
+   * a 2h cooldown can sit finished all evening — the alert is gone and nothing
+   * says so again. These reminders repeat while the timer is STILL ready.
+   *
+   * Three rules that keep it a reminder rather than a nag:
+   *   CAPPED     — at most cfg.readyRepeatMax re-pings, then it gives up. An OC
+   *                you're deliberately holding shouldn't buzz you all night.
+   *   AUTO-DISARM— the counter resets the moment the timer goes back on cooldown,
+   *                so doing the OC silently ends the reminders. So does jail, a
+   *                break, or sleep: those are times you can't act anyway.
+   *   RELOAD-PROOF— the next-due time lives in localStorage and is checked on the
+   *                timer tick, never a setTimeout. Jarvis navigates every few
+   *                seconds, so a pending timer would rarely survive to fire.
+   */
+  function readyReminder(kind, rdy, label) {
+    const nk = 'cbRdyNext_' + kind, ck = 'cbRdyCount_' + kind;
+    const every = Math.max(0, Number(cfg.readyRepeatMin) || 0);
+    const cap   = Math.max(0, Number(cfg.readyRepeatMax) || 0);
+
+    // Not ready any more (or the feature is off) — disarm and forget the count.
+    if (!rdy || !every || !cap) {
+      localStorage.removeItem(nk); localStorage.removeItem(ck);
+      return;
+    }
+    // Can't act on it right now, so don't nag — but keep the count, because the
+    // reminder is still owed once you're free.
+    if (st.inJail || paused || getBreakStatus().active) return;
+
+    const now = Date.now();
+    const due = parseInt(localStorage.getItem(nk) || '0', 10);
+    if (!due) { localStorage.setItem(nk, String(now + every * 60000)); return; }
+    if (now < due) return;
+
+    const n = parseInt(localStorage.getItem(ck) || '0', 10) + 1;
+    if (n > cap) { localStorage.removeItem(nk); return; }   // capped — stop, stay disarmed
+    localStorage.setItem(ck, String(n));
+    localStorage.setItem(nk, String(now + every * 60000));
+    tgMsg('readyAgain', `🔔 <b>${label} STILL READY</b>\n${st.player||'?'} | reminder ${n}/${cap} · ready ${every*n}m ago`);
+    console.log(`${APP_TAG}[READY] ${label} still ready — reminder ${n}/${cap}`);
+  }
+
   function checkReadyAlerts() {
     if (!tg.enabled || !st.notifyReady || st.inJail) return;
     const dtm = getDtm();
@@ -2799,6 +3351,7 @@
         localStorage.setItem('cbDtmReadyState','ready');
         tgMsg('dtmReady', `✅ <b>DTM READY</b>\n${st.player||'?'} | ${fmtDate()}`);
       } else if (!rdy && last === 'ready') localStorage.setItem('cbDtmReadyState','cd');
+      readyReminder('dtm', rdy, 'DTM');
     }
     const oc = getOc();
     if (oc) {
@@ -2809,6 +3362,7 @@
         tgMsg('ocReady', `✅ <b>OC READY</b>\n${st.player||'?'} | ${fmtDate()}`);
         if (st.createOC && getCreateOCState() === 'idle') try { triggerCreateOC(); } catch(e){}
       } else if (!rdy && last === 'ready') localStorage.setItem('cbOcReadyState','cd');
+      readyReminder('oc', rdy, 'OC');
     }
   }
 
@@ -2923,6 +3477,7 @@
   }
 
   async function collectTimers() {
+    if (isHalted()) return;
     if (st.inJail || paused) return;
     try {
       const [d, o] = await Promise.all([fetchDtmTimer(), fetchOcTimer()]);
@@ -2953,6 +3508,14 @@
    * not the minute. It used to be a bare setInterval with no handle, so it could
    * never be cleared or retuned.
    */
+  /* Clears only the FETCHING timers. The display timer is deliberately left
+   * alone by haltAll — it is local work (panel repaint, Telegram pumps) and
+   * stopping it would freeze the UI you need in order to un-halt. */
+  function stopFetchTimers() {
+    if (_timerFetchIv) { clearInterval(_timerFetchIv); _timerFetchIv = null; }
+    if (_protIv)       { clearInterval(_protIv);       _protIv = null; }
+  }
+
   function restartTimerIntervals() {
     if (_timerDispIv)  { clearInterval(_timerDispIv);  _timerDispIv = null; }
     if (_timerFetchIv) { clearInterval(_timerFetchIv); _timerFetchIv = null; }
@@ -3064,6 +3627,26 @@
   const OC_DONE_RE  = /organi[sz]ed\s*crime\s*notification/i;
   const DTM_DONE_RE = /\bdtm\s*notification\b/i;
 
+  /* === WITNESS MAIL ===
+   * YOU witnessed somebody else's murder — not somebody witnessing you. The game
+   * mails you when a kill happens in front of you, and the body names both
+   * parties:  "You've witnessed [KILLER] kill [VICTIM]!"
+   *
+   * Alert-only. This is intelligence about two other PLAYERS, and what you do
+   * with it — tell the victim, stay quiet, avoid the killer — is a judgement
+   * call Jarvis has no business making automatically. Same line
+   * EXCLUDED_CRIME_IDS draws: no automated action aimed at a real person.
+   *
+   * Both patterns are the reference script's, verified against its source rather
+   * than guessed (an earlier draft guessed, and guessed the direction backwards).
+   * The subject test is deliberately kept as loose as theirs — witness + murder
+   * in either order — while the body extraction is exact.
+   */
+  const WITNESS_RE = /witness[\s\S]{0,40}?murder|murder[\s\S]{0,40}?witness/i;
+  // Straight and curly apostrophe: the mail is matched after HTML→text, so the
+  // entity has already decoded and either form can reach us.
+  const WITNESS_BODY_RE = /You['’]ve\s+witnessed\s+(.+?)\s+kill\s+(.+?)\s*!/i;
+
   /* Retry budget per invite mail.
    *
    * markHandledInvite() used to be called BEFORE the accept was attempted, so a
@@ -3090,7 +3673,9 @@
     return n;
   }
 
+  // Chokepoint for every mail read — inbox poll, bodies, accept links.
   function gmGet(url) {
+    if (isHalted()) return Promise.reject(new Error('halted'));
     return new Promise((res, rej) => {
       GM_xmlhttpRequest({
         method:'GET', url, timeout:GM_TIMEOUT,
@@ -3231,6 +3816,7 @@
   let _mailBusy = false;
 
   async function checkMail() {
+    if (isHalted()) return;
     if (_mailBusy) return;
     _mailBusy = true;
     try {
@@ -3307,6 +3893,46 @@
             GM_setValue('cbLastPayoutMailId', nId);
             console.log(`${APP_TAG}[XP] ${doneKind.toUpperCase()} completion notification (mail ${mailId})`);
             try { notePayout(doneKind); } catch(e) { console.warn(APP_TAG, '[XP] payout note failed', e); }
+          }
+        }
+
+        /* Witness mail — alert only, never acted on. Same highest-id watermark as
+         * the completion notifications above and for the same reason: on a first
+         * poll a mailbox full of old witness mail must not fire a burst of stale
+         * alerts. Falls through, so it still reaches the normal new-mail alert.
+         *
+         * The full subject is logged on every match because WITNESS_RE was written
+         * without a confirmed example — read a real one off the console and tighten
+         * the pattern from that. */
+        if (WITNESS_RE.test(rowTxt)) {
+          const seenW = GM_getValue('cbLastWitnessMailId', null);
+          const nId = parseInt(mailId, 10) || 0;
+          if (seenW === null) {
+            let maxId = 0;
+            for (const row of rows) {
+              const rl = [...row.querySelectorAll('a[href*="mailbox.aspx"]')].find(a => /[?&]id=\d+/i.test(a.getAttribute('href')||''));
+              if (rl) { const rid = parseInt(parseMailId(rl.getAttribute('href')||''),10)||0; if (rid > maxId) maxId = rid; }
+            }
+            GM_setValue('cbLastWitnessMailId', maxId);
+            console.log(`${APP_TAG}[WITNESS] Watermark set at mail ${maxId} — alerts start from the next one`);
+          } else if (nId > Number(seenW || 0)) {
+            GM_setValue('cbLastWitnessMailId', nId);
+            let wBody = '';
+            try { wBody = await fetchMailBody(href) || ''; } catch(_){}
+            const wm = wBody.match(WITNESS_BODY_RE);
+            if (wm) {
+              const killer = wm[1].trim(), victim = wm[2].trim();
+              console.log(`${APP_TAG}[WITNESS] ${killer} killed ${victim} (mail ${mailId})`);
+              tgMsg('witness', `👁️ <b>WITNESSED A MURDER</b>\n${st.player||'?'} | ${fmtDate()}\n<b>${esc(killer)}</b> killed <b>${esc(victim)}</b>`);
+              try { discordWitness(mailId, killer, victim); } catch(e) { console.warn(APP_TAG, '[DC] witness', e); }
+            } else {
+              /* Body didn't parse. Still alert — knowing a murder happened in
+               * front of you matters even without the names — and log the body so
+               * the pattern can be corrected if the game rewords it. */
+              console.warn(`${APP_TAG}[WITNESS] mail ${mailId} matched the subject but not the body — subject: "${subject}" | body: ${wBody.substring(0,200)}`);
+              const preview = wBody ? `\n<pre>${esc(wBody.substring(0,300))}</pre>` : '';
+              tgMsg('witness', `👁️ <b>WITNESSED A MURDER</b>\n${st.player||'?'} | ${fmtDate()}\n${esc(subject)}${preview}`);
+            }
           }
         }
 
@@ -3441,6 +4067,44 @@
     finally { _mailBusy = false; }
   }
 
+  /* === ALLIED / SAFE INVITE GATE ===
+   * Only accept OC/DTM invites from people on your Starvinggeeks allied and/or
+   * safe lists. Stacks with the existing whitelist and blacklist — every gate has
+   * to pass, and this is an ALLOW-list, so the safe direction on any doubt is to
+   * refuse.
+   *
+   * Two failure modes worth naming, because both are silent otherwise:
+   *   - The lists come from the SG fetch, which only runs when SG lists are on.
+   *     Enabling either gate therefore switches SG on and forces a fetch (see the
+   *     settings handler) — without that you'd be gating against an empty list and
+   *     refusing everything for no visible reason.
+   *   - An EMPTY list still refuses, because "allied only" with no allied names
+   *     means nobody qualifies. That is correct allow-list behaviour, but it looks
+   *     identical to a bug, so it logs loudly and says which list was empty.
+   *
+   * `extractInviter` returning null also refuses, exactly as an unknown name
+   * would — same safe direction as the existing whitelist, same caveat.
+   */
+  function inviteListGate(kind, inviter) {
+    if (!cfg.inviteAlliedOnly && !cfg.inviteSafeOnly) return { ok: true };
+    const K = kind.toUpperCase();
+    const who = String(inviter || '').trim().toLowerCase();
+    if (!who) return { ok: false, why: 'the inviter could not be read from the mail' };
+
+    const allied = cfg.inviteAlliedOnly ? (sgAllied || []) : [];
+    const safe   = cfg.inviteSafeOnly   ? (sgSafe   || []) : [];
+    if (cfg.inviteAlliedOnly && !allied.length)
+      console.warn(`${APP_TAG}[INVITE] ${K}: "allied only" is on but the allied list is EMPTY — are the SG lists switched on and fetching?`);
+    if (cfg.inviteSafeOnly && !safe.length)
+      console.warn(`${APP_TAG}[INVITE] ${K}: "safe only" is on but the safe list is EMPTY — are the SG lists switched on and fetching?`);
+
+    if (allied.includes(who)) return { ok: true, via: 'allied' };
+    if (safe.includes(who))   return { ok: true, via: 'safe' };
+
+    const on = [cfg.inviteAlliedOnly && 'allied', cfg.inviteSafeOnly && 'safe'].filter(Boolean).join('/');
+    return { ok: false, why: `not on your ${on} list` };
+  }
+
   /* Both return TRUE for a settled outcome — accepted, or deliberately refused by
    * a list — and FALSE for a failure worth retrying (no accept link, exception).
    * The caller only burns the invite permanently on true, or after
@@ -3466,6 +4130,14 @@
           tgMsg('blocked', `🚫 <b>DTM Blocked</b>\n${st.player||'?'} | ${inv||'Unknown'} not whitelisted`);
           return true;
         }
+      }
+      { const g = inviteListGate('dtm', inv);
+        if (!g.ok) {
+          console.log(`${APP_TAG}[INVITE] DTM blocked — "${inv||'(unreadable)'}" ${g.why}`);
+          tgMsg('blocked', `🚫 <b>DTM Blocked</b>\n${st.player||'?'} | ${esc(inv||'Unknown')} ${esc(g.why)}`);
+          return true;
+        }
+        if (g.via) dlog(APP_TAG, `[INVITE] DTM allowed — ${inv} is on the ${g.via} list`);
       }
       if (!url) {
         console.warn(`${APP_TAG}[INVITE] DTM ${mailId}: no accept link in the mail body`);
@@ -3499,6 +4171,14 @@
           tgMsg('blocked', `🚫 <b>OC Blocked</b>\n${st.player||'?'} | ${inv||'Unknown'} not whitelisted`);
           return true;
         }
+      }
+      { const g = inviteListGate('oc', inv);
+        if (!g.ok) {
+          console.log(`${APP_TAG}[INVITE] OC blocked — "${inv||'(unreadable)'}" ${g.why}`);
+          tgMsg('blocked', `🚫 <b>OC Blocked</b>\n${st.player||'?'} | ${esc(inv||'Unknown')} ${esc(g.why)}`);
+          return true;
+        }
+        if (g.via) dlog(APP_TAG, `[INVITE] OC allowed — ${inv} is on the ${g.via} list`);
       }
       if (!wasAlerted('OC', mailId)) {
         markAlerted('OC', mailId);
@@ -4199,6 +4879,10 @@
 
   let _navigating = false;
   function safeNav(url) {
+    /* The single navigation choke point. Loading a page is the loudest "I'm
+     * here" signal there is, so this refuses outright while halted rather than
+     * relying on every caller having been gated. */
+    if (isHalted()) { dlog(APP_TAG, '[HALT] Navigation refused:', url); return true; }
     if (st.inJail && !url.includes('jail.aspx')) { setStatus('Blocked — in jail'); return true; }
     if (_navigating) return true; // already navigating — don't stack redirects
     _navigating = true;
@@ -5032,6 +5716,10 @@
 
   function doJailbreak() {
     if (!st.jail || st.acting || st.inJail || paused) return;
+    /* Staff online and "no jail on Mod" enabled — stand down. Checked here as well
+     * as in mainLoop so a bust can never slip through a path that reaches
+     * doJailbreak directly. */
+    if (modJailBlocked()) return;
     if (jailLimitReached()) {
       // Safety: should already be off, but double-check
       if (st.jail) { st.jail = false; saveSt(); }
@@ -5096,6 +5784,7 @@
   }
 
   async function bgHeal(target) {
+    if (isHalted()) return false;
     if (_healActive) return false;
     _healActive = true;
     const want = Math.max(1, Math.min(100, Number(target) || 100));
@@ -5511,6 +6200,177 @@
     return true;
   }
 
+  /* === HOLD HQ (PANIC) ===
+   * You're being shot at and want out of reach. Entering your network HQ takes
+   * you off the street for N minutes at a time; this re-enters until you turn it
+   * off or the cap trips.
+   *
+   * THREE RULES, and the first is the important one:
+   *
+   * 1. NEVER ENTER A DAMAGED HQ. If the building is destroyed while you're inside
+   *    it, you die. `#ctl00_main_lbldamage` above zero means we refuse, alert, and
+   *    keep refusing — a panic button that kills you is worse than no button.
+   * 2. IT SWITCHES ITSELF OFF at `cfg.holdHqMax` entries (~1h by default). This is
+   *    a panic mode, not a way to play: left on and forgotten it would idle away a
+   *    whole day's actions. The cap is the thing that makes it safe to reach for.
+   * 3. It does NOT auto-travel to the HQ. If you're in the wrong city it says so
+   *    and waits. Travelling has its own long cooldown and would strand you
+   *    somewhere you didn't choose while under fire — that's your call, not ours.
+   *
+   * Everything else is paused while this runs: hiding and committing crimes at the
+   * same time is not hiding.
+   */
+  const HQ_PATH = '/authenticated/network.aspx?p=p';
+  const LS_HQ_CITY = 'cbHqCity', LS_HQ_NEXT = 'cbHqNextAt', LS_HQ_COUNT = 'cbHqEnterCount';
+
+  function hqCityKey(s) {
+    // The HQ location reads "Miami - Something"; the status bar reads "Miami".
+    return String(s || '').trim().toLowerCase().replace(/\s*-\s*.*/, '');
+  }
+
+  function hqEnterCount() { return parseInt(localStorage.getItem(LS_HQ_COUNT) || '0', 10) || 0; }
+  function hqNextAt()     { return parseInt(localStorage.getItem(LS_HQ_NEXT)  || '0', 10) || 0; }
+
+  function hqDisable(why) {
+    cfg.holdHqOn = false;
+    GM_setValue('cbHoldHqOn', false);
+    localStorage.removeItem(LS_HQ_COUNT);
+    localStorage.removeItem(LS_HQ_NEXT);
+    console.log(`${APP_TAG}[HQ] Hold HQ off — ${why}`);
+    tgMsg('holdHq', `🏠 <b>Hold HQ off</b>\n${st.player||'?'} | ${esc(why)}`);
+    try { const cb = _shadow && _shadow.querySelector('#jb-holdhq-on'); if (cb) cb.checked = false; } catch(_){}
+    try { updateHqUI(); } catch(_){}
+  }
+
+  function updateHqUI() {
+    if (!_shadow) return;
+    const row = _shadow.querySelector('#jb-hq-row'), el = _shadow.querySelector('#jb-hq-state');
+    if (!row || !el) return;
+    if (!cfg.holdHqOn) { row.style.display = 'none'; return; }
+    row.style.display = 'flex';
+    const n = hqEnterCount(), max = Math.max(1, Number(cfg.holdHqMax) || 6);
+    const next = hqNextAt(), rem = next ? Math.max(0, Math.ceil((next - Date.now()) / 1000)) : 0;
+    el.innerHTML = rem > 0
+      ? `<span style="color:var(--jb-success)">inside · ${Math.floor(rem/60)}:${String(rem%60).padStart(2,'0')} · ${n}/${max}</span>`
+      : `<span style="color:var(--jb-warning)">entering · ${n}/${max}</span>`;
+  }
+
+  // Returns true if it took control of this tick.
+  async function doHoldHq() {
+    if (!cfg.holdHqOn) return false;
+
+    const max = Math.max(1, Number(cfg.holdHqMax) || 6);
+    if (hqEnterCount() >= max) {
+      hqDisable(`safety cap reached (${max} entries)`);
+      return false;
+    }
+
+    const curCity = hqCityKey(getCurCity());
+    const onNet = /\/authenticated\/network\.aspx/i.test(location.pathname);
+
+    if (!onNet) {
+      const next = hqNextAt();
+      if (next && Date.now() < next) {          // inside and still counting down
+        setStatus(`🏠 Hold HQ — ${Math.ceil((next - Date.now())/60000)}m left`);
+        updateHqUI();
+        return true;                            // hold the loop; nothing else should run
+      }
+      const hqCity = localStorage.getItem(LS_HQ_CITY) || '';
+      if (hqCity && curCity && hqCityKey(hqCity) !== curCity) {
+        // Wrong city — say so and wait. Deliberately does not travel; see the note.
+        setStatus(`🏠 Hold HQ — travel to ${hqCity}`);
+        tgOnce('hq_city', 900, `🏠 <b>Hold HQ</b>\n${st.player||'?'} | you're in ${esc(getCurCity()||'?')}, HQ is in ${esc(hqCity)} — travel there to hide`);
+        return true;
+      }
+      setStatus('🏠 Hold HQ — going to the HQ');
+      safeNav(HQ_PATH + '&_=' + Date.now());
+      return true;
+    }
+
+    // On the network page.
+    const loc = (document.getElementById('ctl00_main_lblLocation')?.textContent || '').trim();
+    if (loc) localStorage.setItem(LS_HQ_CITY, loc);
+
+    if (loc && curCity && hqCityKey(loc) !== curCity) {
+      setStatus(`🏠 Hold HQ — travel to ${loc}`);
+      tgOnce('hq_city', 900, `🏠 <b>Hold HQ</b>\n${st.player||'?'} | HQ is in ${esc(loc)}, you're in ${esc(getCurCity()||'?')}`);
+      return true;
+    }
+
+    /* Rule 1. A damaged HQ can be destroyed while you're in it, and that kills
+     * you. Refuse, and keep refusing — this is the one condition where doing
+     * nothing is unambiguously right. */
+    const dmg = parseInt((document.getElementById('ctl00_main_lbldamage')?.textContent || '0').replace(/[^\d]/g, ''), 10) || 0;
+    if (dmg > 0) {
+      setStatus(`🏠 Hold HQ — REFUSING, HQ at ${dmg}% damage`);
+      tgOnce('hq_damage', 600, `⚠️ <b>Hold HQ refused</b>\n${st.player||'?'} | HQ has ${dmg}% damage — entering could kill you if it's destroyed`);
+      console.warn(`${APP_TAG}[HQ] ${dmg}% damage — not entering`);
+      return true;
+    }
+
+    const enterBtn = document.getElementById('ctl00_main_btnenter');
+    const minsBox  = document.getElementById('ctl00_main_txtmins');
+    if (enterBtn && minsBox && !enterBtn.disabled) {
+      const mins = Math.max(1, Math.min(60, Number(cfg.holdHqMins) || 10));
+      const n = hqEnterCount() + 1;
+      minsBox.value = String(mins);
+      try { minsBox.dispatchEvent(new Event('change', { bubbles: true })); } catch(_){}
+      localStorage.setItem(LS_HQ_COUNT, String(n));
+      localStorage.setItem(LS_HQ_NEXT, String(Date.now() + mins * 60000));
+      console.log(`${APP_TAG}[HQ] Entering for ${mins}m (${n}/${max})`);
+      setStatus(`🏠 Hold HQ — entering ${mins}m (${n}/${max})`);
+      if (n === 1) tgMsg('holdHq', `🏠 <b>Hold HQ</b>\n${st.player||'?'} | hiding in ${esc(loc||'HQ')}, ${mins}m at a time, max ${max}`);
+      updateHqUI();
+      await humanWait(DLY.quick);
+      enterBtn.click();
+      return true;
+    }
+
+    // No enter button: already inside. Sit out the timer.
+    const next = hqNextAt();
+    setStatus(next ? `🏠 Hold HQ — inside, ${Math.max(1, Math.ceil((next - Date.now())/60000))}m left` : '🏠 Hold HQ — inside');
+    updateHqUI();
+    return true;
+  }
+
+  /* === HOURLY FORUM REFRESH (camouflage) ===
+   * A real player's session touches the forum now and then. This does the same
+   * on a jittered ~hourly schedule.
+   *
+   * IT FETCHES, IT DOES NOT NAVIGATE — and that difference is forced on us, not a
+   * preference. `/authenticated/forum.aspx` is in SKIP_PAGES, so Jarvis returns
+   * early there and never starts its main loop. The reference can navigate to the
+   * forum because its architecture runs everywhere; ours would land on the forum,
+   * stop dead, and sit there until you noticed. A same-origin GET produces the
+   * identical request server-side with the identical session cookie, which is the
+   * only thing the camouflage depends on.
+   */
+  const FORUM_PATH = '/authenticated/forum.aspx';
+
+  function forumNextDue() { return parseInt(GM_getValue('cbForumNextAt', 0) || 0, 10); }
+
+  function scheduleForumRefresh(fromNow) {
+    const base = Math.max(5, Math.min(1440, Number(cfg.forumRefreshMin) || 60)) * 60000;
+    // ±25% so it isn't on the hour every hour, which is its own tell.
+    const ms = fromNow != null ? fromNow : base * (0.75 + Math.random() * 0.5);
+    GM_setValue('cbForumNextAt', Date.now() + ms);
+  }
+
+  async function doForumRefresh() {
+    if (isHalted()) return;
+    if (!cfg.forumRefreshOn || !tabs.isMaster) return;
+    const due = forumNextDue();
+    if (!due) { scheduleForumRefresh(); return; }      // first run: schedule, don't fire
+    if (Date.now() < due) return;
+    scheduleForumRefresh();                            // reschedule first, so a failure can't loop
+    try {
+      const r = await fetch(FORUM_PATH + '?_=' + Date.now(), { credentials:'same-origin', cache:'no-store' });
+      dlog(APP_TAG, `[FORUM] Refreshed (HTTP ${r.status})`);
+    } catch (e) {
+      dlog(APP_TAG, '[FORUM] Refresh failed:', e && e.message ? e.message : e);
+    }
+  }
+
   /* === HOT CITY === */
 
   const LS_HOT = 'cbHotCity', LS_HOT_UNTIL = 'cbHotUntil', LS_HOT_PEND = 'cbHotPend';
@@ -5545,10 +6405,13 @@
     return null;
   }
 
-  function isInHot() {
-    const hot = getHot(); if (!hot) return false;
-    try { const el = document.getElementById('ctl00_userInfo_lblcity'); const cur = (el?el.textContent:'').trim(); return cur.toLowerCase().includes(hot.toLowerCase()) || hot.toLowerCase().includes(cur.toLowerCase()); } catch(_) { return false; }
-  }
+  /* isInHot() lives with the auto-travel code further down — there used to be a
+   * second copy here, which hoisting made dead. Worth knowing WHY it had to go
+   * rather than just being tidied: it lacked the empty-city guard, and
+   * `hot.includes('')` is true, so it reported "in the hot city" whenever the
+   * status bar hadn't rendered. Harmless while the later definition won, but it
+   * would have silently started OCs in the wrong city the moment anyone moved
+   * or deleted that one. */
 
   function getCurCity() { try { const el = document.getElementById('ctl00_userInfo_lblcity'); return (el?el.textContent:'').trim(); } catch(_) { return ''; } }
 
@@ -5563,6 +6426,7 @@
   }
 
   function fetchHot() {
+    if (isHalted()) return;   // navigates to the stats page
     if (getHot()) return;
     // Throttle: only redirect to the stats page at most once every 5 minutes,
     // otherwise repeated calls cause a navigation storm (severe slowdown).
@@ -5978,6 +6842,7 @@
               <label class="jb-switch"><input type="checkbox" id="jb-notify-ready"> 🔔 Alerts</label>
               <label class="jb-switch"><input type="checkbox" id="jb-auto-travel" ${st.autoTravel?'checked':''}> ✈️ Auto Travel</label>
               <label class="jb-switch" title="ADVERTISE yourself on the DTM list (ocads.aspx) when a DTM is ready, so others can invite you"><input type="checkbox" id="jb-auto-dtmlist" ${st.autoDtmList?'checked':''}> 📋 DTM List</label>
+              <label class="jb-switch" title="PANIC: hide inside your network HQ so you can't be shot. Pauses everything else, re-enters until the cap, then switches itself off. Never enters a damaged HQ — if it's destroyed while you're inside, you die."><input type="checkbox" id="jb-holdhq-on" ${cfg.holdHqOn?'checked':''}> 🏠 Hold HQ</label>
             </div>
           </div>
         </div>
@@ -5996,6 +6861,11 @@
       <div id="jb-dtmkick-row" style="display:none;justify-content:space-between;align-items:center;padding:3px 10px;font-size:10px;border-top:1px solid var(--jb-border);color:var(--jb-text-ter)">
         <span>🥾 DTM partner:</span>
         <span id="jb-dtmkick" style="font-weight:600"></span>
+      </div>
+
+      <div id="jb-hq-row" style="display:none;justify-content:space-between;align-items:center;padding:3px 10px;font-size:10px;border-top:1px solid var(--jb-border);color:var(--jb-text-ter)">
+        <span>🏠 Hold HQ:</span>
+        <span id="jb-hq-state" style="font-weight:600"></span>
       </div>
 
       <div class="jb-footer" id="jb-status">Ready</div>
@@ -6160,11 +7030,11 @@
             <label class="jb-switch jb-mb"><input type="checkbox" id="jb-tg-on" ${tg.enabled?'checked':''}> Enable</label>
             <div class="jb-mb">
               <label class="jb-label">Bot Token</label>
-              <input class="jb-input" id="jb-tg-token" value="${tg.token}" placeholder="From @BotFather">
+              <input class="jb-input" id="jb-tg-token" value="${esc(tg.token)}" placeholder="From @BotFather">
             </div>
             <div class="jb-mb">
               <label class="jb-label">Chat ID</label>
-              <input class="jb-input" id="jb-tg-chat" value="${tg.chat}" placeholder="From @userinfobot">
+              <input class="jb-input" id="jb-tg-chat" value="${esc(tg.chat)}" placeholder="From @userinfobot">
             </div>
             <div class="jb-row" title="How often the inbox is polled in the background. This is the ONLY thing that spots new mail while Jarvis is idle — the on-page envelope only updates when a page loads, so with jail off and Away cadence the page can sit still for many minutes.">
               <label class="jb-label" style="white-space:nowrap">Mail check (s):</label>
@@ -6192,6 +7062,35 @@
                 ${TG_MSGS.map(m => `<label class="jb-switch" style="font-size:10px"><input type="checkbox" class="jb-tgmsg-cb" data-key="${m.key}" ${tgMsgOn[m.key]?'checked':''}> ${m.label}</label>`).join('')}
               </div>
             </div>
+            <hr class="jb-sep">
+            <div class="jb-sect-title">Discord</div>
+            <label class="jb-switch jb-mb"><input type="checkbox" id="jb-dc-on" ${dc.enabled?'checked':''}> 🎮 Send to a Discord webhook</label>
+            <div class="jb-mb">
+              <label class="jb-label">Webhook URL</label>
+              <input class="jb-input" id="jb-dc-url" value="${esc(dc.url)}" placeholder="https://discord.com/api/webhooks/…">
+              <div class="jb-sub" id="jb-dc-url-state" style="font-size:9px"></div>
+            </div>
+            <div class="jb-grid jb-mb">
+              <label class="jb-switch"><input type="checkbox" id="jb-dc-rankup" ${dc.rankup?'checked':''}> ⭐ Rank ups</label>
+              <label class="jb-switch"><input type="checkbox" id="jb-dc-witness" ${dc.witness?'checked':''}> 👁️ Witness</label>
+            </div>
+            <label class="jb-switch jb-mb" title="Jarvis runs on several devices against one account. Each one spots the same rank-up and would post its own copy. Leave this ON for one device and OFF for the rest."><input type="checkbox" id="jb-dc-device" ${dc.thisDevice?'checked':''}> 📮 Post from <b>this</b> device</label>
+            <button class="jb-btn" id="jb-dc-test">Test Discord</button>
+            <div class="jb-sub jb-mb" style="color:var(--jb-text-ter);font-size:9px;margin-top:6px"><b>Each event posts once.</b> Rank-ups are keyed by the rank change and witness statements by their mail, so neither can post twice however often it is re-detected, and only the master tab posts. The one thing the script cannot see is your <b>other devices</b> — they each have their own storage, so if two are running they would both post. Turn "post from this device" off everywhere except one.<br>Independent of Telegram; they share the retry queue, so a post interrupted by a page change is redelivered rather than lost.<br><b>The URL is stored on this device only</b> and is deliberately not built into the script: this repo is public and the script is served raw from GitHub, so a webhook in the source would be one anyone could post to.</div>
+            <hr class="jb-sep">
+            <div class="jb-sect-title">Ready reminders</div>
+            <div class="jb-sub jb-mb" style="color:var(--jb-text-ter);font-size:9px">The OC/DTM ready alert fires once. Miss it and a finished 2h cooldown can sit unused all evening with nothing to say so. These re-ping while it is <b>still</b> ready, and stop the moment you use it.</div>
+            <div class="jb-row">
+              <label class="jb-label" style="white-space:nowrap">Remind every:</label>
+              <input class="jb-input jb-input-sm" type="number" id="jb-ready-every" value="${cfg.readyRepeatMin}" min="0" max="240" step="5">
+              <span class="jb-sub">min · 0 = off</span>
+            </div>
+            <div class="jb-row jb-mb">
+              <label class="jb-label" style="white-space:nowrap">Give up after:</label>
+              <input class="jb-input jb-input-sm" type="number" id="jb-ready-max" value="${cfg.readyRepeatMax}" min="0" max="20">
+              <span class="jb-sub">reminders</span>
+            </div>
+            <div class="jb-sub jb-mb" style="color:var(--jb-text-ter);font-size:9px">Silent while you're in jail, paused, or on a break — you couldn't act on it anyway, and the reminder is still owed when you're free. The "OC/DTM still ready" switch in the per-message grid above turns them off entirely.</div>
             <hr class="jb-sep">
             <div class="jb-sect-title">Logout Alerts</div>
             <div class="jb-grid jb-mb">
@@ -6254,6 +7153,49 @@
             <label class="jb-switch jb-mb" title="Signs out properly when the sleep window opens, instead of leaving the session open to time out. Logs back in automatically at wake time."><input type="checkbox" id="jb-sleep-logout" ${breaks.sleepLogout?'checked':''}> Log out on sleep</label>
             <div class="jb-sub jb-mb" style="color:var(--jb-warning)">⚠️ Health is monitored during coffee/lunch breaks. With "Logout on sleep" ON, no health monitoring while logged out overnight.</div>
             <div class="jb-sub jb-mb" id="jb-break-status">Break status: ${getBreakStatus().msg||'None active'}</div>
+            <hr class="jb-sep">
+            <div class="jb-sect-title">Staff / mod online</div>
+            <label class="jb-switch jb-mb" title="Reads the players page for anyone the game itself highlights as staff. Runs independently of Online Watch — you don't need Watch on for this."><input type="checkbox" id="jb-mod-on" ${cfg.modWatchOn?'checked':''}> 👮 Watch for staff online</label>
+            <div class="jb-row jb-mb">
+              <label class="jb-label" style="white-space:nowrap">Check every:</label>
+              <input class="jb-input jb-input-sm" type="number" id="jb-mod-poll" value="${cfg.modPollSec}" min="30" max="600" step="30">
+              <span class="jb-sub">s</span>
+            </div>
+            <label class="jb-switch jb-mb" title="Stop attempting jail busts while staff are online. Jail runs every few seconds by default, so it is by far the noisiest thing Jarvis does — nothing else is suppressed."><input type="checkbox" id="jb-mod-nojail" ${cfg.noJailOnMod?'checked':''}> ⛓️ No jail while staff are online</label>
+            <label class="jb-switch jb-mb" title="The blunt option: when staff come online, stop everything for a random 1-2 hours."><input type="checkbox" id="jb-mod-break" ${cfg.modBreakOn?'checked':''}> 🛑 Take a break when staff come online</label>
+            <div class="jb-row">
+              <label class="jb-label">Break:</label>
+              <input class="jb-input jb-input-sm" type="number" id="jb-mod-break-min" value="${cfg.modBreakMin}" min="1" max="600">
+              <span class="jb-sub">to</span>
+              <input class="jb-input jb-input-sm" type="number" id="jb-mod-break-max" value="${cfg.modBreakMax}" min="1" max="600">
+              <span class="jb-sub">min</span>
+            </div>
+            <label class="jb-switch jb-mb" title="Log out for the duration as well, instead of idling on the page. Auto-login is suppressed for the same period so it can't sign straight back in."><input type="checkbox" id="jb-mod-break-logout" ${cfg.modBreakLogout?'checked':''}> 🚪 Log out for the break</label>
+            <div class="jb-sub jb-mb" style="color:var(--jb-text-ter);font-size:9px">Staff are detected by <b>the game's own highlight</b> on the players page (the orange name), so this covers every moderator rather than a list of names we'd have to keep up to date. <b>Marc is ignored</b> — the owner's account is highlighted essentially always, and counting it would leave this permanently triggered. A failed or stale check suppresses <b>nothing</b>: it fails open deliberately, because a silent all-day halt caused by a network blip is far worse than one unsuppressed bust. Jail shows <b>⏸M</b> in the status line while held.</div>
+            <div class="jb-sub jb-mb" id="jb-mod-status">Not checked yet</div>
+            <hr class="jb-sep">
+            <div class="jb-sect-title">Hold HQ (panic)</div>
+            <div class="jb-sub jb-mb" style="color:var(--jb-text-ter);font-size:9px">The switch is on the front panel — it's a panic button, so it lives where you can reach it. These are its limits.</div>
+            <div class="jb-row">
+              <label class="jb-label" style="white-space:nowrap">Enter for:</label>
+              <input class="jb-input jb-input-sm" type="number" id="jb-hq-mins" value="${cfg.holdHqMins}" min="1" max="60">
+              <span class="jb-sub">min at a time</span>
+            </div>
+            <div class="jb-row jb-mb">
+              <label class="jb-label" style="white-space:nowrap">Give up after:</label>
+              <input class="jb-input jb-input-sm" type="number" id="jb-hq-max" value="${cfg.holdHqMax}" min="1" max="50">
+              <span class="jb-sub">entries, then switch off</span>
+            </div>
+            <div class="jb-sub jb-mb" style="color:var(--jb-text-ter);font-size:9px"><b>It never enters a damaged HQ</b> — if the building is destroyed while you're inside it, you die, so a non-zero damage reading means it refuses and alerts instead. <b>It won't travel for you</b> either: wrong city and it says so and waits, because travel has its own long cooldown and stranding you somewhere under fire should be your call. And it <b>switches itself off at the cap</b> — left on and forgotten this would idle away a whole day.</div>
+            <hr class="jb-sep">
+            <div class="jb-sect-title">Forum refresh (camouflage)</div>
+            <label class="jb-switch jb-mb" title="Touches the forum on a jittered hourly schedule, like a real session would."><input type="checkbox" id="jb-forum-on" ${cfg.forumRefreshOn?'checked':''}> 🌐 Hourly forum refresh</label>
+            <div class="jb-row jb-mb">
+              <label class="jb-label" style="white-space:nowrap">Roughly every:</label>
+              <input class="jb-input jb-input-sm" type="number" id="jb-forum-min" value="${cfg.forumRefreshMin}" min="5" max="1440" step="5">
+              <span class="jb-sub">min · ±25% jitter</span>
+            </div>
+            <div class="jb-sub jb-mb" style="color:var(--jb-text-ter);font-size:9px">This <b>fetches</b> the forum rather than navigating to it. The forum is on Jarvis's excluded-pages list, so actually going there would stop the script dead and leave the tab sitting on it. A background request produces the same thing server-side.</div>
             </div>
             <div class="jb-pane" data-pane="system">
             <div class="jb-sect-title">Appearance</div>
@@ -6277,11 +7219,11 @@
             <div class="jb-sect-title">Login</div>
             <div class="jb-mb">
               <label class="jb-label">Username</label>
-              <input class="jb-input" id="jb-login-user" value="${LOGIN.user}">
+              <input class="jb-input" id="jb-login-user" value="${esc(LOGIN.user)}">
             </div>
             <div class="jb-mb">
               <label class="jb-label">Password</label>
-              <input class="jb-input" id="jb-login-pass" type="text" value="${LOGIN.pass}">
+              <input class="jb-input" id="jb-login-pass" type="text" value="${esc(LOGIN.pass)}">
             </div>
             <label class="jb-switch jb-mb"><input type="checkbox" id="jb-auto-submit" ${LOGIN.autoSubmit?'checked':''}> Auto-submit</label>
             <div class="jb-mb">
@@ -6359,6 +7301,12 @@
             <div id="jb-bl-entries"></div>
             <button class="jb-btn jb-btn-outline" id="jb-bl-add" style="width:100%;margin-top:6px">+ Add Player</button>
             <hr class="jb-sep">
+            <div class="jb-sect-title">Starvinggeeks lists</div>
+            <div class="jb-sub jb-mb">Only accept invites from people on your own allied / safe lists. Stacks with the whitelist and blacklist above — every filter has to pass.</div>
+            <label class="jb-switch jb-mb" title="Only accept OC/DTM invites from players on your allied list."><input type="checkbox" id="jb-inv-allied" ${cfg.inviteAlliedOnly?'checked':''}> 🤝 Allied only <span class="jb-sub" id="jb-inv-allied-n"></span></label>
+            <label class="jb-switch jb-mb" title="Only accept OC/DTM invites from players on your safe list."><input type="checkbox" id="jb-inv-safe" ${cfg.inviteSafeOnly?'checked':''}> ✅ Safe only <span class="jb-sub" id="jb-inv-safe-n"></span></label>
+            <div class="jb-sub jb-mb" style="color:var(--jb-text-ter);font-size:9px">With both on, either list qualifies. These need the <b>SG lists</b> switch on the front panel — turning one of these on enables it and fetches. An <b>empty list refuses everything</b>, which is correct for an allow-list but looks exactly like a fault, so the counts are shown above and every refusal is logged with its reason.</div>
+            <hr class="jb-sep">
             <button class="jb-btn" id="jb-clear-cd" style="width:100%;margin-top:6px;background:var(--jb-warning)">Clear Cooldowns</button>
           </div>
         </div>
@@ -6424,19 +7372,19 @@
             </div>
             <div class="jb-mb">
               <label class="jb-label">Transporter</label>
-              <input class="jb-input" id="jb-oc-trans" value="${st.ocTrans}" placeholder="Username">
+              <input class="jb-input" id="jb-oc-trans" value="${esc(st.ocTrans)}" placeholder="Username">
             </div>
             <div class="jb-mb">
               <label class="jb-label">Weapon Master</label>
-              <input class="jb-input" id="jb-oc-weapon" value="${st.ocWeapon}" placeholder="Username">
+              <input class="jb-input" id="jb-oc-weapon" value="${esc(st.ocWeapon)}" placeholder="Username">
             </div>
             <div class="jb-mb">
               <label class="jb-label">Explosive Expert</label>
-              <input class="jb-input" id="jb-oc-explo" value="${st.ocExplo}" placeholder="Username">
+              <input class="jb-input" id="jb-oc-explo" value="${esc(st.ocExplo)}" placeholder="Username">
             </div>
             <hr class="jb-sep">
             <label class="jb-label">Schedule</label>
-            <input class="jb-input jb-mb" type="datetime-local" id="jb-oc-sched" value="${st.ocSched||''}" style="color-scheme:dark">
+            <input class="jb-input jb-mb" type="datetime-local" id="jb-oc-sched" value="${esc(st.ocSched)||''}" style="color-scheme:dark">
             <div class="jb-sub jb-mb">Triggers when time + cooldown both ready. Blank = cooldown only.</div>
             <div class="jb-row jb-mb">
               <label class="jb-label">Repeat:</label>
@@ -6463,12 +7411,12 @@
             <label class="jb-switch jb-mb" title="Instead of always inviting the same person, take someone off the DTM list (ocads.aspx) who is currently online. Falls back to the partner below if nobody suitable is there."><input type="checkbox" id="jb-dtm-autopartner" ${cfg.dtmAutoPartner?'checked':''}> 🎲 Pick an online partner from the DTM list</label>
             <div class="jb-mb">
               <label class="jb-label">Partner <span class="jb-sub" id="jb-dtm-partner-role">${cfg.dtmAutoPartner?'(fallback if the list is empty — may be left blank)':'(always invited)'}</span></label>
-              <input class="jb-input" id="jb-dtm-partner" value="${st.dtmPartner}" placeholder="Username">
+              <input class="jb-input" id="jb-dtm-partner" value="${esc(st.dtmPartner)}" placeholder="Username">
             </div>
             <div class="jb-sub jb-mb" style="color:var(--jb-text-ter);font-size:9px">Who's online is read from the players page, not from the list itself, so it stays right whatever the list shows. Your blacklist always applies; the whitelist applies when it's switched on. Anyone who ignores the invite is skipped for the rest of this DTM, so each retry reaches for somebody new.</div>
             <hr class="jb-sep">
             <label class="jb-label">Schedule</label>
-            <input class="jb-input jb-mb" type="datetime-local" id="jb-dtm-sched" value="${st.dtmSched||''}" style="color-scheme:dark">
+            <input class="jb-input jb-mb" type="datetime-local" id="jb-dtm-sched" value="${esc(st.dtmSched)||''}" style="color-scheme:dark">
             <div class="jb-sub jb-mb">Triggers when time + cooldown both ready. Blank = cooldown only.</div>
             <div class="jb-row jb-mb">
               <label class="jb-label">Repeat:</label>
@@ -6581,24 +7529,74 @@
     // ALL toggle
     const allCb = _shadow.querySelector('#jb-all-toggle');
     const allLabel = _shadow.querySelector('#jb-all-label');
+    /* ALL toggle.
+     *
+     * It used to write eight flags and read six, and — far worse — left five
+     * things running that it never touched: Create OC, Create DTM, auto-travel,
+     * DTM list and scrap. FOUR OF THOSE NAVIGATE, and in mainLoop they are
+     * handled ABOVE the idle gate, so "ALL off" could not reach them at all.
+     * Hitting ALL off with a Create DTM cycle in flight left Jarvis merrily
+     * driving to organizedcrime.aspx — which reads exactly as "it carried on
+     * where I left it". One tab is enough to see it.
+     *
+     * ALL now means all: everything that can act on its own, read and written
+     * from the same list so the two can't drift again.
+     */
+    const ALL_ST_KEYS  = ['crime','gta','booze','jail','health','garage','autoOC','autoDTM',
+                          'createOC','createDTM','autoTravel','autoDtmList','crusher'];
+    const ALL_CFG_KEYS = [['scrapOn','cbScrapOn']];
+
+    /* The ALL box is a POWER SWITCH, not a summary of the other toggles.
+     *
+     * Deriving it from the individual flags meant unticking one action made it
+     * read "ALL OFF" while the script was still very much running. It now
+     * reflects st.halted only: unchecked = stopped dead, checked = running.
+     * Turning a single action off no longer touches it, which is the honest
+     * reading — the script is still on, that action isn't. */
     function syncAll() {
-      const allOn = st.crime && st.gta && st.booze && st.jail && st.health && st.garage;
-      allCb.checked = allOn;
-      allLabel.textContent = allOn ? 'ALL ON' : 'ALL OFF';
-      allLabel.style.color = allOn ? 'var(--jb-success)' : 'var(--jb-danger)';
+      const running = !st.halted;
+      allCb.checked = running;
+      allLabel.textContent = running ? 'RUNNING' : 'STOPPED';
+      allLabel.style.color = running ? 'var(--jb-success)' : 'var(--jb-danger)';
+      allLabel.title = running
+        ? 'Jarvis is running. Unticking this stops it completely — no actions, no navigation, no background requests to the game at all.'
+        : 'Jarvis is STOPPED. Nothing is being requested from the game; only Telegram alerts still go out.';
     }
     syncAll();
     allCb.addEventListener('change', () => {
       const v = allCb.checked;
-      st.crime=v; st.gta=v; st.booze=v; st.jail=v; st.health=v; st.garage=v; st.autoOC=v; st.autoDTM=v;
-      saveSt(); syncAll();
-      for (const [id, key] of Object.entries(ribbonMap)) {
-        const btn = _shadow.querySelector(`#${id}`);
-        if (btn) {
-          btn.style.background = st[key] ? 'var(--jb-ribbon-on)' : 'var(--jb-ribbon-off)';
-          btn.style.color = st[key] ? 'var(--jb-ribbon-on-text)' : 'var(--jb-ribbon-off-text)';
-        }
+      ALL_ST_KEYS.forEach(k => { st[k] = v; });
+      ALL_CFG_KEYS.forEach(([k, gm]) => { cfg[k] = v; GM_setValue(gm, v); });
+      // Never switch the crusher on for someone who doesn't own one — the garage
+      // logic tolerates it, but the panel would claim a feature you don't have.
+      if (v && st.crusherOwned === false) st.crusher = false;
+      /* Switching off must also ABANDON work already in flight. The creation
+       * state machines live in localStorage and resume from wherever they were,
+       * so clearing the toggle alone would leave a half-built OC waiting to
+       * carry on the moment you switched it back on. */
+      if (!v) {
+        try { resetCreateOC(); } catch(_){}
+        try { resetCreateDTM(); } catch(_){}
+        try { localStorage.removeItem(LS_TRAVEL_PENDING); } catch(_){}
+        st.acting = false; st.action = ''; GM_setValue('cbActStart', 0);
       }
+      /* The hard part, and the reason this switch exists at all. Unticking must
+       * stop every request to the game, not merely untick the actions — see the
+       * HARD HALT section for why a "quiet" script that still polls is worse
+       * than useless. haltAll/resumeAll own that; this handler owns the flags. */
+      if (v) resumeAll('ALL switched on'); else haltAll('ALL switched off');
+      saveSt(); syncAll(); repaintRibbon();
+      // The panel switches for the non-ribbon toggles need moving too, or the
+      // UI disagrees with what Jarvis is actually doing.
+      [['#jb-create-oc','createOC'], ['#jb-create-dtm','createDTM'],
+       ['#jb-auto-travel','autoTravel'], ['#jb-auto-dtmlist','autoDtmList'],
+       ['#jb-crusher','crusher']].forEach(([sel, k]) => {
+        const el = _shadow.querySelector(sel);
+        if (el && !el.disabled) el.checked = st[k];
+      });
+      const sc = _shadow.querySelector('#jb-scrap-on');
+      if (sc) sc.checked = cfg.scrapOn;
+      setStatus(v ? 'ALL ON' : 'ALL OFF — everything stopped');
     });
 
     // Cadence mode switch (Away = camouflage / At PC = fast). Re-rolls pending
@@ -7077,6 +8075,174 @@
       }); }
     _shadow.querySelector('#jb-tg-test').addEventListener('click', testTg);
 
+    /* --- Discord ---
+     * The URL field validates as you type and says so, because a mistyped
+     * webhook fails silently otherwise: sends just queue up and 404, and you'd
+     * have no reason to look in the console. */
+    function renderDcState() {
+      const el = _shadow.querySelector('#jb-dc-url-state');
+      if (!el) return;
+      if (!dc.url) { el.textContent = 'No webhook set — nothing will be sent.'; el.style.color = 'var(--jb-text-ter)'; return; }
+      if (dcConfigured()) { el.textContent = '✓ Looks like a valid Discord webhook.'; el.style.color = 'var(--jb-success)'; return; }
+      if (!dc.enabled) { el.textContent = 'Discord is switched off.'; el.style.color = 'var(--jb-text-ter)'; return; }
+      el.textContent = '⚠️ That does not look like a Discord webhook URL — nothing will be sent.';
+      el.style.color = 'var(--jb-danger)';
+    }
+    { const d = _shadow.querySelector('#jb-dc-on');
+      if (d) d.addEventListener('change', e => {
+        dc.enabled = e.target.checked; saveDc(); renderDcState();
+        setStatus(dc.enabled ? '🎮 Discord on' : '🎮 Discord off');
+      }); }
+    { const u = _shadow.querySelector('#jb-dc-url');
+      if (u) u.addEventListener('input', e => { dc.url = e.target.value.trim(); saveDc(); renderDcState(); }); }
+    { const r = _shadow.querySelector('#jb-dc-rankup');
+      if (r) r.addEventListener('change', e => { dc.rankup = e.target.checked; saveDc(); }); }
+    { const w = _shadow.querySelector('#jb-dc-witness');
+      if (w) w.addEventListener('change', e => { dc.witness = e.target.checked; saveDc(); }); }
+    { const dv = _shadow.querySelector('#jb-dc-device');
+      if (dv) dv.addEventListener('change', e => {
+        dc.thisDevice = e.target.checked; saveDc();
+        setStatus(dc.thisDevice ? '📮 This device posts to Discord' : '📮 This device will NOT post to Discord');
+      }); }
+    { const t = _shadow.querySelector('#jb-dc-test');
+      if (t) t.addEventListener('click', testDiscord); }
+    renderDcState();
+
+    // --- Hold HQ (panic) ---
+    { const hq = _shadow.querySelector('#jb-holdhq-on');
+      if (hq) hq.addEventListener('change', e => {
+        cfg.holdHqOn = e.target.checked; GM_setValue('cbHoldHqOn', cfg.holdHqOn);
+        // A fresh panic starts a fresh budget — otherwise a previous session's
+        // count could trip the cap on the first entry, when you most need it.
+        localStorage.removeItem(LS_HQ_COUNT); localStorage.removeItem(LS_HQ_NEXT);
+        updateHqUI();
+        setStatus(cfg.holdHqOn ? '🏠 Hold HQ ON — hiding, everything else paused' : '🏠 Hold HQ off');
+      }); }
+    { const hm = _shadow.querySelector('#jb-hq-mins');
+      if (hm) hm.addEventListener('change', e => {
+        cfg.holdHqMins = Math.max(1, Math.min(60, parseInt(e.target.value,10)||10));
+        e.target.value = cfg.holdHqMins; GM_setValue('cbHoldHqMins', cfg.holdHqMins);
+      }); }
+    { const hx = _shadow.querySelector('#jb-hq-max');
+      if (hx) hx.addEventListener('change', e => {
+        cfg.holdHqMax = Math.max(1, Math.min(50, parseInt(e.target.value,10)||6));
+        e.target.value = cfg.holdHqMax; GM_setValue('cbHoldHqMax', cfg.holdHqMax);
+      }); }
+
+    // --- Forum refresh ---
+    { const fr = _shadow.querySelector('#jb-forum-on');
+      if (fr) fr.addEventListener('change', e => {
+        cfg.forumRefreshOn = e.target.checked; GM_setValue('cbForumRefreshOn', cfg.forumRefreshOn);
+        GM_setValue('cbForumNextAt', 0);   // reschedule from now either way
+        setStatus(cfg.forumRefreshOn ? '🌐 Forum refresh on' : '🌐 Forum refresh off');
+      }); }
+    { const fm = _shadow.querySelector('#jb-forum-min');
+      if (fm) fm.addEventListener('change', e => {
+        cfg.forumRefreshMin = Math.max(5, Math.min(1440, parseInt(e.target.value,10)||60));
+        e.target.value = cfg.forumRefreshMin; GM_setValue('cbForumRefreshMin', cfg.forumRefreshMin);
+        GM_setValue('cbForumNextAt', 0);
+      }); }
+
+    /* --- Allied / safe invite gating ---
+     * Turning either on ENABLES the SG lists and forces a fetch. Without that
+     * you'd be gating against an empty list and silently refusing every invite —
+     * the lists are the whole dependency, so the switch has to bring them with it. */
+    function renderInviteListCounts() {
+      const a = _shadow.querySelector('#jb-inv-allied-n'), s = _shadow.querySelector('#jb-inv-safe-n');
+      const fmt = (n, on) => !on ? '' : (n ? `(${n} names)` : '(EMPTY — nothing will be accepted)');
+      if (a) { a.textContent = fmt((sgAllied||[]).length, cfg.inviteAlliedOnly);
+               a.style.color = cfg.inviteAlliedOnly && !(sgAllied||[]).length ? 'var(--jb-danger)' : 'var(--jb-text-ter)'; }
+      if (s) { s.textContent = fmt((sgSafe||[]).length, cfg.inviteSafeOnly);
+               s.style.color = cfg.inviteSafeOnly && !(sgSafe||[]).length ? 'var(--jb-danger)' : 'var(--jb-text-ter)'; }
+    }
+    function ensureSgFor(which) {
+      if (!sgCfg.on) {
+        sgCfg.on = true; saveSgCfg();
+        const cb = _shadow.querySelector('#jb-sg-on'); if (cb) cb.checked = true;
+        console.log(`${APP_TAG}[INVITE] "${which} only" needs the SG lists — switching them on`);
+      }
+      try { initSgLists(); } catch(_){}
+      Promise.resolve(fetchSgLists(true)).then(renderInviteListCounts).catch(()=>{});
+    }
+    { const ia = _shadow.querySelector('#jb-inv-allied');
+      if (ia) ia.addEventListener('change', e => {
+        cfg.inviteAlliedOnly = e.target.checked; GM_setValue('cbInviteAlliedOnly', cfg.inviteAlliedOnly);
+        if (cfg.inviteAlliedOnly) ensureSgFor('allied');
+        renderInviteListCounts();
+        setStatus(cfg.inviteAlliedOnly ? '🤝 Invites: allied only' : '🤝 Allied-only off');
+      }); }
+    { const is = _shadow.querySelector('#jb-inv-safe');
+      if (is) is.addEventListener('change', e => {
+        cfg.inviteSafeOnly = e.target.checked; GM_setValue('cbInviteSafeOnly', cfg.inviteSafeOnly);
+        if (cfg.inviteSafeOnly) ensureSgFor('safe');
+        renderInviteListCounts();
+        setStatus(cfg.inviteSafeOnly ? '✅ Invites: safe only' : '✅ Safe-only off');
+      }); }
+    renderInviteListCounts();
+
+    // --- Ready reminders ---
+    { const re = _shadow.querySelector('#jb-ready-every');
+      if (re) re.addEventListener('change', e => {
+        cfg.readyRepeatMin = Math.max(0, Math.min(240, parseInt(e.target.value,10)||0));
+        e.target.value = cfg.readyRepeatMin; GM_setValue('cbReadyRepeatMin', cfg.readyRepeatMin);
+        // Re-arm from now, so a shortened interval doesn't wait out the old one.
+        ['dtm','oc'].forEach(k => localStorage.removeItem('cbRdyNext_' + k));
+        setStatus(cfg.readyRepeatMin ? `🔔 Ready reminders every ${cfg.readyRepeatMin}m` : '🔔 Ready reminders off');
+      }); }
+    { const rm = _shadow.querySelector('#jb-ready-max');
+      if (rm) rm.addEventListener('change', e => {
+        cfg.readyRepeatMax = Math.max(0, Math.min(20, parseInt(e.target.value,10)||0));
+        e.target.value = cfg.readyRepeatMax; GM_setValue('cbReadyRepeatMax', cfg.readyRepeatMax);
+        // Raising the cap should let an already-exhausted reminder speak again.
+        ['dtm','oc'].forEach(k => localStorage.removeItem('cbRdyCount_' + k));
+      }); }
+
+    // --- Staff / mod presence ---
+    { const mo = _shadow.querySelector('#jb-mod-on');
+      if (mo) mo.addEventListener('change', e => {
+        cfg.modWatchOn = e.target.checked; GM_setValue('cbModWatchOn', cfg.modWatchOn);
+        // Drop the cached reading on the way off, so a stale "mod online" can't
+        // keep suppressing jail after the feature is switched back on later.
+        if (!cfg.modWatchOn) localStorage.removeItem('cbModOnline');
+        modWatchStart();
+        setStatus(cfg.modWatchOn ? '👮 Staff watch on' : '👮 Staff watch off');
+      }); }
+    { const mp = _shadow.querySelector('#jb-mod-poll');
+      if (mp) mp.addEventListener('change', e => {
+        cfg.modPollSec = Math.max(30, Math.min(600, parseInt(e.target.value,10)||60));
+        e.target.value = cfg.modPollSec; GM_setValue('cbModPollSec', cfg.modPollSec);
+        modWatchStart();
+      }); }
+    { const mj = _shadow.querySelector('#jb-mod-nojail');
+      if (mj) mj.addEventListener('change', e => {
+        cfg.noJailOnMod = e.target.checked; GM_setValue('cbNoJailOnMod', cfg.noJailOnMod);
+        setStatus(cfg.noJailOnMod ? '⛓️ Jail pauses while staff are on' : '⛓️ Jail ignores staff');
+      }); }
+    { const mb = _shadow.querySelector('#jb-mod-break');
+      if (mb) mb.addEventListener('change', e => {
+        cfg.modBreakOn = e.target.checked; GM_setValue('cbModBreakOn', cfg.modBreakOn);
+        // Switching it off must also end a break it started, or you'd be stuck
+        // sitting out an hour with nothing left on screen explaining why.
+        if (!cfg.modBreakOn) localStorage.removeItem(LS_MOD_BREAK_UNTIL);
+        setStatus(cfg.modBreakOn ? '🛑 Mod break on' : '🛑 Mod break off');
+      }); }
+    { const bn = _shadow.querySelector('#jb-mod-break-min');
+      if (bn) bn.addEventListener('change', e => {
+        cfg.modBreakMin = Math.max(1, Math.min(600, parseInt(e.target.value,10)||60));
+        if (cfg.modBreakMax < cfg.modBreakMin) {          // keep the range coherent
+          cfg.modBreakMax = cfg.modBreakMin; GM_setValue('cbModBreakMax', cfg.modBreakMax);
+          const mx = _shadow.querySelector('#jb-mod-break-max'); if (mx) mx.value = cfg.modBreakMax;
+        }
+        e.target.value = cfg.modBreakMin; GM_setValue('cbModBreakMin', cfg.modBreakMin);
+      }); }
+    { const bx = _shadow.querySelector('#jb-mod-break-max');
+      if (bx) bx.addEventListener('change', e => {
+        cfg.modBreakMax = Math.max(cfg.modBreakMin, Math.min(600, parseInt(e.target.value,10)||120));
+        e.target.value = cfg.modBreakMax; GM_setValue('cbModBreakMax', cfg.modBreakMax);
+      }); }
+    { const bl = _shadow.querySelector('#jb-mod-break-logout');
+      if (bl) bl.addEventListener('change', e => { cfg.modBreakLogout = e.target.checked; GM_setValue('cbModBreakLogout', cfg.modBreakLogout); }); }
+
     // Per-message Telegram toggles
     _shadow.querySelectorAll('.jb-tgmsg-cb').forEach(cb => {
       cb.addEventListener('change', e => {
@@ -7155,6 +8321,30 @@
       updateJailCountUI();
       try { updateDailyCountUI(); } catch(_){}
       try { updateDtmKickUI(); } catch(_){}
+      try { updateHqUI(); } catch(_){}
+      /* Staff readout. Deliberately distinguishes "nobody on" from "we don't
+       * know" — a stale reading suppresses nothing, so saying "all clear" when
+       * the check is actually failing would be a lie you'd act on. */
+      try {
+        const ms = _shadow.querySelector('#jb-mod-status');
+        if (ms) {
+          if (!cfg.modWatchOn) { ms.textContent = 'Staff watch off'; ms.style.color = 'var(--jb-text-ter)'; }
+          else {
+            const s = modState(), on = modsOnline();
+            if (!s) { ms.textContent = 'Not checked yet'; ms.style.color = 'var(--jb-text-ter)'; }
+            else if (Date.now() - (s.at||0) > MOD_STALE_MS) {
+              ms.textContent = `⚠️ Last check ${fmtAgo(s.at)} — stale, suppressing nothing`;
+              ms.style.color = 'var(--jb-warning)';
+            } else if (on.length) {
+              ms.textContent = `👮 Online: ${on.join(', ')}${modBreakActive() ? ` · break ${modBreakRemainingMin()}m` : (cfg.noJailOnMod ? ' · jail held' : '')}`;
+              ms.style.color = 'var(--jb-danger)';
+            } else {
+              ms.textContent = `✅ No staff online (checked ${fmtAgo(s.at)})`;
+              ms.style.color = 'var(--jb-success)';
+            }
+          }
+        }
+      } catch(_){}
     }, 5000);
 
     // Whitelist modal
@@ -7389,6 +8579,7 @@
     updateJailCountUI();
     try { updateDailyCountUI(); } catch(_){}
     try { updateDtmKickUI(); } catch(_){}
+    try { updateHqUI(); } catch(_){}
     try { updateSmartPreview(); } catch(_){}
 
     // Drag — grab from anywhere on the panel except interactive controls
@@ -7878,6 +9069,10 @@
   }
 
   function maybeForceStatRefresh() {
+    /* This clicks the game's refresh control, which fires a real XHR to
+     * hndlr.ashx — indistinguishable from an open, active browser. Precisely the
+     * signal a halt exists to remove. */
+    if (isHalted()) return false;
     if (paused || _navigating || st.acting || st.inJail) return false;
     // The refresh control only exists on ordinary game pages.
     const p = window.location.pathname.toLowerCase();
@@ -7984,6 +9179,7 @@
       saveXpState();
     } catch(_){}
     tgMsg('rankup', `⭐ <b>RANK UP</b>\n${st.player||'?'} | ${esc(fromName)} → <b>${esc(toName)}</b>`);
+    try { discordRankUp(fromName, toName); } catch(e) { console.warn(APP_TAG, '[DC] rankup', e); }
     try { updateXpUI(); } catch(_){}
   }
 
@@ -8181,15 +9377,60 @@
    * carried the payout; if there isn't one yet, parks a forward marker. */
   function notePayout(kind) {
     const cut = Date.now() - PAYOUT_LOOKBACK_MS;
-    const hit = xpState.history.find(h =>
-      !h.rankUp && !h.pay && h.t >= cut && (h.inf || h.action === 'other' || h.action === 'jail'));
+    /* Pick the BIGGEST qualifying reading in the window, not the newest.
+     *
+     * `find` took the newest, which is wrong whenever a jail-only reading has
+     * landed since the payout — and with jail at a 3s interval that is the normal
+     * case, not the edge case. A payout dwarfs a bust (that size gap is the whole
+     * reason the split arithmetic exists), so the largest unclaimed gain is far
+     * more likely to be the one carrying it. Ties keep the newer entry. */
+    let hit = null;
+    for (const h of xpState.history) {
+      if (h.rankUp || h.pay || h.t < cut) continue;
+      if (!(h.inf || h.action === 'other' || h.action === 'jail')) continue;
+      if (!hit || h.gained > hit.gained) hit = h;   // history is newest-first, so > keeps the newer on a tie
+    }
     if (hit && applyPayout(kind, hit)) {
       saveXpState();
       try { updateXpUI(); } catch(_){}
       return;
     }
-    GM_setValue('cbXpPayoutPending', { kind, t: Date.now() });
+    queuePayoutPending(kind);
     console.log(`${APP_TAG}[XP] ${kind.toUpperCase()} completion noted — waiting for the reading that carries it`);
+  }
+
+  /* Pending payout markers are a QUEUE, not one slot.
+   *
+   * A single `cbXpPayoutPending` meant an OC and a DTM finishing inside one mail
+   * poll overwrote each other and only one was ever reconciled — and both of
+   * those readings are exactly the ones that would otherwise be mislabelled jail.
+   * Each marker is consumed by one reading and expires on age. */
+  function payoutPendingList() {
+    const q = GM_getValue('cbXpPayoutPending', null);
+    if (!q) return [];
+    // Migrate the old single-object form rather than dropping a live marker.
+    const arr = Array.isArray(q) ? q : [q];
+    const cut = Date.now() - PAYOUT_FORWARD_MS;
+    return arr.filter(p => p && p.kind && p.t > cut);
+  }
+
+  /* `at` preserves the ORIGINAL time when a marker is put back after a failed
+   * match. Stamping it afresh would make an unmatchable marker immortal —
+   * re-queued, re-tried, re-stamped, for ever. It has to keep ageing out. */
+  function queuePayoutPending(kind, at) {
+    const q = payoutPendingList();
+    q.push({ kind, t: at || Date.now() });
+    while (q.length > 6) q.shift();
+    GM_setValue('cbXpPayoutPending', q);
+  }
+
+  // Take the oldest still-valid marker, if any, and remove it from the queue.
+  function takePayoutPending() {
+    const q = payoutPendingList();
+    if (!q.length) { GM_setValue('cbXpPayoutPending', []); return null; }
+    const p = q.shift();
+    GM_setValue('cbXpPayoutPending', q);
+    return p;
   }
 
   // "crime, booze×5" — what a bundled reading actually covered.
@@ -8316,10 +9557,11 @@
      * from it first was self-defeating: the bogus rate then made the split
      * consume the entire gain, payPart came out at zero, and applyPayout refused
      * the reassignment it had itself just made impossible. */
-    const pend = GM_getValue('cbXpPayoutPending', null);
-    if (pend && pend.kind && (Date.now() - pend.t) < PAYOUT_FORWARD_MS &&
-        (entry.inf || action === 'other' || action === 'jail')) {
-      if (applyPayout(pend.kind, entry)) GM_setValue('cbXpPayoutPending', null);
+    if (entry.inf || action === 'other' || action === 'jail') {
+      const pend = takePayoutPending();
+      // Put it back if this reading turned out not to be reassignable, so the
+      // marker still gets its chance at the next unclaimed reading.
+      if (pend && !applyPayout(pend.kind, entry)) queuePayoutPending(pend.kind, pend.t);
     }
 
     // A jail-only reading is the one thing that measures a bust cleanly — but
@@ -8719,7 +9961,9 @@
       const inBreak = breaks.isSleeping ||
         (breaks.coffeeEndAt > 0 && Date.now() < breaks.coffeeEndAt) ||
         (breaks.lunchEndAt > 0 && Date.now() < breaks.lunchEndAt);
-      if (paused || inLock || inBreak) { _watchdogRestarts = 0; return; }
+      // A halt is a deliberate stop, not a stall — never "heal" it by restarting
+      // the loop or, worse, reloading the page.
+      if (isHalted() || paused || inLock || inBreak) { _watchdogRestarts = 0; return; }
 
       // Only restart if genuinely stalled well beyond any normal loop interval
       if (elapsed > watchdogTimeout()) {
@@ -8753,9 +9997,15 @@
   const KEEPALIVE_INTERVAL = 5 * 60 * 1000; // 5 minutes
   let _keepAliveIv = null;
 
+  function stopKeepAlive() {
+    if (_keepAliveIv) { clearInterval(_keepAliveIv); _keepAliveIv = null; }
+  }
+
   function startKeepAlive() {
     if (_keepAliveIv) clearInterval(_keepAliveIv);
+    if (isHalted()) return;   // stopped means stopped: let the session lapse
     _keepAliveIv = setInterval(() => {
+      if (isHalted()) return;
       if (paused || breaks.isSleeping) return;
       if (!tabs.isMaster) return;
       fetch(`${window.location.origin}/authenticated/players.aspx?_=${Date.now()}`, {
@@ -9541,6 +10791,23 @@
 
   async function mainLoop() {
     _lastLoopTick = Date.now(); // Watchdog heartbeat
+
+    /* HALTED — hard stop, checked before anything else including the master-tab
+     * election. Nothing below this line may run: every branch of the loop either
+     * navigates or fetches, and both say "somebody is here".
+     *
+     * The two pumps are the exception and they matter: a queued script-check
+     * alert has to keep being delivered while you're stopped, since being stopped
+     * is usually the response to one. They talk to Telegram, never to the game.
+     */
+    if (isHalted()) {
+      try { pumpCriticalAlerts(); } catch(_){}
+      try { pumpTgQueue(); } catch(_){}
+      setStatus('⛔ STOPPED — no activity');
+      schedLoop(5000);
+      return;
+    }
+
     const wasMaster = tabs.isMaster;
     tabs.check();
 
@@ -9595,6 +10862,13 @@
       schedLoop(30000); return;
     }
     coffeeJustEnded(); lunchJustEnded(); // clear ended breaks
+    /* Mod-online break. Sits with the other breaks rather than using `paused`,
+     * so it expires by itself and the health bypass above still protects you —
+     * being off the game for an hour shouldn't mean dying in it. */
+    if (modBreakActive()) {
+      setStatus(`🛑 Mod break — ${modBreakRemainingMin()}m left`);
+      schedLoop(30000); return;
+    }
     if (isCoffeeTime()) {
       const bs = getBreakStatus();
       setStatus(bs.msg);
@@ -9643,6 +10917,14 @@
       setStatus(`⛓️ Just released — resuming in ${jailHoldRemainingSec()}s`);
       try { updateJailCountUI(); } catch(_){}
       schedLoop(1000); return;
+    }
+
+    /* Hold HQ outranks everything below it. It is a panic mode — you are hiding
+     * because you're being shot at, and grinding crimes in the middle of that is
+     * not hiding. Sits below the jail/staff-check handling above, because those
+     * are about not getting banned, which outranks not getting shot. */
+    if (cfg.holdHqOn && !st.inJail) {
+      try { if (await doHoldHq()) { schedLoop(5000); return; } } catch(e) { console.warn(APP_TAG, '[HQ]', e); }
     }
 
     if (handleOcPage()) { schedLoop(3000); return; }
@@ -9741,6 +11023,7 @@
 
     try { checkReadyAlerts(); } catch(_){}
     try { maybeSendXpReport(); } catch(_){}
+    try { doForumRefresh(); } catch(_){}   // fire-and-forget; never gates the loop
     try { maybeForceStatRefresh(); } catch(_){}
 
     /* Health. The background path needs no navigation, so it is safe to run even
@@ -9803,7 +11086,7 @@
         } else if (crimeRdy) { if(pg==='crimes') doCrime(); else safeNav('/authenticated/crimes.aspx?'+Date.now()); }
         else if (gtaRdy) { if(pg==='gta') doGta(); else safeNav('/authenticated/crimes.aspx?p=g&'+Date.now()); }
         else if (boozeRdy) { if(pg==='booze') doBooze(); else safeNav('/authenticated/crimes.aspx?p=b&'+Date.now()); }
-        else if (jailRdy && !jailShouldHoldOff()) { if(pg==='jail') doJailbreak(); else safeNav('/authenticated/jail.aspx?'+Date.now()); }
+        else if (jailRdy && !jailShouldHoldOff() && !modJailBlocked()) { if(pg==='jail') doJailbreak(); else safeNav('/authenticated/jail.aspx?'+Date.now()); }
         else if (garageRdy) { if(pg==='garage') doGarage(); else safeNav('/authenticated/playerproperty.aspx?p=g&'+Date.now()); }
         else {
           const cr = Math.max(0, Math.ceil((cfg.crimeInt*1000-(now-st.lastCrime))/1000));
@@ -9811,8 +11094,12 @@
           const br = Math.max(0, Math.ceil((cfg.boozeInt*1000-(now-st.lastBooze))/1000));
           const jr = Math.max(0, Math.ceil((cfg.jailInt*1000-(now-st.lastJail))/1000));
           const gar= Math.max(0, Math.ceil((cfg.garageInt*1000-(now-st.lastGarage))/60000));
-          // ⏸J = jail is ready but yielding to an action that's due shortly
-          const yieldMark = (jailRdy && jailShouldHoldOff()) ? ' ⏸J' : '';
+          /* ⏸J = jail ready but yielding to an action due shortly.
+           * ⏸M = jail ready but held because staff are online. Distinct marks,
+           * because the two hold jail for unrelated reasons and one of them
+           * lasts until a moderator logs off. */
+          const yieldMark = (jailRdy && modJailBlocked()) ? ' ⏸M'
+                          : (jailRdy && jailShouldHoldOff()) ? ' ⏸J' : '';
           setStatus(`C:${cr}s G:${gr}s B:${br}s J:${jr}s Gar:${gar}m${yieldMark}`);
         }
       }
@@ -9839,25 +11126,32 @@
     tabs.check();
     buildUI();
     try { updateXpUI(); } catch(_){} // paint saved XP/rank straight away so it doesn't blank on load
+
+    /* A halt has to SURVIVE A PAGE LOAD, and this is where that is decided.
+     *
+     * Everything below the halt branch either starts a polling timer or fetches
+     * something. If init started them unconditionally the stop would last only
+     * until the next navigation — and since the user may well still be clicking
+     * around the game by hand while Jarvis is stopped, that is not a rare case.
+     *
+     * The XP interceptor is still installed: it is passive, it only observes
+     * requests the page itself makes, and it never originates one. The Telegram
+     * pumps still start, because a queued alert must keep going out.
+     */
     installXpInterceptor();
     startTgPump();
     startCriticalPump();
-    startTimers();
-    try { migrateOwList(); } catch(_) {}
-    owStart();
-    startWatchdog();
-    startKeepAlive();
-    initKeepAliveExtras();
-    initServerTime();
-    try { initHot(); } catch(_){}
-    try { propWatchStart(); } catch(_){}
-    try { initSgLists(); } catch(_){}
-    try { initPlayerHover(); } catch(_){}
 
-    if (tabs.isMaster) setStatus(`${APP_NAME} ${APP_VERSION} — Master tab`);
-    else setStatus('⏸ Secondary tab');
-
-    checkJailAny();
+    if (isHalted()) {
+      try { initPlayerHover(); } catch(_){}   // local, hover-driven only
+      setStatus('⛔ STOPPED — tick ALL to resume');
+      console.log(`${APP_TAG}[HALT] Loaded halted — no timers, no polling, no navigation.`);
+    } else {
+      startAllServices();
+      if (tabs.isMaster) setStatus(`${APP_NAME} ${APP_VERSION} — Master tab`);
+      else setStatus('⏸ Secondary tab');
+      checkJailAny();
+    }
 
     /* Teardown on BOTH beforeunload and pagehide.
      *
@@ -9873,7 +11167,7 @@
     const teardown = () => {
       if (_tornDown) return;
       _tornDown = true;
-      tabs.release(); owStop(); propWatchStop();
+      tabs.release(); owStop(); propWatchStop(); modWatchStop();
       stopKaWorker(); stopKaAudio(); releaseWakeLock();
       if (_loopTimer) { clearTimeout(_loopTimer); _loopTimer = null; }
       if (owFlashTimer) { clearInterval(owFlashTimer); owFlashTimer = null; }
@@ -9888,7 +11182,9 @@
       if (e.key === LS_MASTER) tabs.check();
     });
 
-    setTimeout(() => { st.lastJailCk = 0; runLoop(); }, 1500);
+    // Halted: the teardown and storage listeners above are registered either way,
+    // but the loop must not start. Resuming brings it up via resumeAll().
+    if (!isHalted()) setTimeout(() => { st.lastJailCk = 0; runLoop(); }, 1500);
   }
 
   init();
