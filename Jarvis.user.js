@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.255
+// @version      2000.256
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -33,7 +33,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.255
+/*  Jarvis Bot 2000.256
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -120,7 +120,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.255';
+  const APP_VERSION = '2000.256';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -7618,18 +7618,64 @@
         : 'Jarvis is STOPPED. Nothing is being requested from the game; only Telegram alerts still go out.';
     }
     syncAll();
+
+    /* SWITCHING BACK ON MUST RESTORE, NOT ENABLE EVERYTHING (2000.256).
+     *
+     * The handler used to do `ALL_ST_KEYS.forEach(k => st[k] = v)` in both
+     * directions. Off was right — everything off. ON was wrong: it set every
+     * flag TRUE, so Create OC, Create DTM, auto-travel, the DTM list and the
+     * crusher all came on even if you had deliberately left them off. Switching
+     * the script off and on again silently rewrote your setup, and the four that
+     * navigate would then start driving somewhere on the next tick.
+     *
+     * So the off direction snapshots your selection first, and the on direction
+     * puts exactly that back. */
+    const ALL_SNAP_KEY = 'cbAllWasOn';
+
+    function snapshotAllFlags() {
+      /* Never snapshot while already halted — the flags are all false then, and
+       * overwriting a good snapshot with that would lose the selection for real.
+       * (The checkbox only fires on a transition, so this is belt-and-braces.) */
+      if (st.halted) return;
+      const snap = { st: {}, cfg: {} };
+      ALL_ST_KEYS.forEach(k => { snap.st[k] = !!st[k]; });
+      ALL_CFG_KEYS.forEach(([k]) => { snap.cfg[k] = !!cfg[k]; });
+      GM_setValue(ALL_SNAP_KEY, snap);
+    }
+
+    // Returns false when there is nothing stored — see the handler for why that
+    // deliberately leaves the flags alone rather than defaulting them on.
+    function restoreAllFlags() {
+      const snap = GM_getValue(ALL_SNAP_KEY, null);
+      if (!snap || !snap.st) return false;
+      ALL_ST_KEYS.forEach(k => { if (k in snap.st) st[k] = !!snap.st[k]; });
+      ALL_CFG_KEYS.forEach(([k, gm]) => {
+        if (snap.cfg && k in snap.cfg) { cfg[k] = !!snap.cfg[k]; GM_setValue(gm, cfg[k]); }
+      });
+      return true;
+    }
+
+    let _allRestored = false;
     allCb.addEventListener('change', () => {
       const v = allCb.checked;
-      ALL_ST_KEYS.forEach(k => { st[k] = v; });
-      ALL_CFG_KEYS.forEach(([k, gm]) => { cfg[k] = v; GM_setValue(gm, v); });
-      // Never switch the crusher on for someone who doesn't own one — the garage
-      // logic tolerates it, but the panel would claim a feature you don't have.
-      if (v && st.crusherOwned === false) st.crusher = false;
-      /* Switching off must also ABANDON work already in flight. The creation
-       * state machines live in localStorage and resume from wherever they were,
-       * so clearing the toggle alone would leave a half-built OC waiting to
-       * carry on the moment you switched it back on. */
-      if (!v) {
+      if (v) {
+        /* No snapshot — an install halted before 2000.256, or one that has never
+         * been switched off. Leave every flag exactly as it is rather than
+         * turning them all on: guessing "all on" is precisely the bug this
+         * replaces, and it would be the one moment you weren't watching. */
+        _allRestored = restoreAllFlags();
+        if (!_allRestored) console.log(`${APP_TAG} ALL on — no saved selection to restore, leaving the toggles as they are`);
+        // Never switch the crusher on for someone who doesn't own one — the garage
+        // logic tolerates it, but the panel would claim a feature you don't have.
+        if (st.crusherOwned === false) st.crusher = false;
+      } else {
+        snapshotAllFlags();                       // must run BEFORE anything is cleared
+        ALL_ST_KEYS.forEach(k => { st[k] = false; });
+        ALL_CFG_KEYS.forEach(([k, gm]) => { cfg[k] = false; GM_setValue(gm, false); });
+        /* Switching off must also ABANDON work already in flight. The creation
+         * state machines live in localStorage and resume from wherever they were,
+         * so clearing the toggle alone would leave a half-built OC waiting to
+         * carry on the moment you switched it back on. */
         try { resetCreateOC(); } catch(_){}
         try { resetCreateDTM(); } catch(_){}
         try { localStorage.removeItem(LS_TRAVEL_PENDING); } catch(_){}
@@ -7651,7 +7697,9 @@
       });
       const sc = _shadow.querySelector('#jb-scrap-on');
       if (sc) sc.checked = cfg.scrapOn;
-      setStatus(v ? 'ALL ON' : 'ALL OFF — everything stopped');
+      setStatus(!v ? 'ALL OFF — everything stopped'
+                : _allRestored ? 'ALL ON — your previous selection restored'
+                : 'ALL ON — nothing saved, tick what you want');
     });
 
     // Cadence mode switch (Away = camouflage / At PC = fast). Re-rolls pending
