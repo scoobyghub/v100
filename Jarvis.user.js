@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.253
+// @version      2000.254
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -33,7 +33,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.253
+/*  Jarvis Bot 2000.254
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -120,7 +120,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.253';
+  const APP_VERSION = '2000.254';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -179,17 +179,37 @@
 
   /* === PAGE EXCLUSIONS === */
 
-  /* 2000.225 temporarily cut this to the forum only, to test whether
-   * statistics.aspx?p=p was special for XP capture. It wasn't — the real cause
-   * was timing (see maybeForceStatRefresh in the XP section), so the full list
-   * is restored here.
+  /* DELIBERATELY EMPTY (2000.254) — Jarvis now runs on every authenticated page.
+   *
+   * An excluded page is a page where this whole IIFE returns before init(), so
+   * nothing runs there: no UI, no main loop, and — the reason for emptying it —
+   * no XP interceptor. The game's own status poll fires every 15s while a page
+   * sits open, but with the script absent there is nobody listening, so time
+   * spent on an excluded page produced no XP readings and its gains surfaced
+   * later bundled into one lump.
+   *
+   * TEMPER YOUR EXPECTATIONS, and know the history before re-running it as an
+   * experiment: 2000.225 already cut this list to the forum alone, for exactly
+   * this reason, and it did NOT fix XP capture. The cause then was timing, not
+   * exclusions — solved by maybeForceStatRefresh (226) and the 20s poll (245).
+   * This buys back the readings lost while parked on one of these pages; it is
+   * not a fix for anything else.
+   *
+   * THE REAL COST is behavioural, not technical: these were the pages you could
+   * browse by hand without Jarvis dragging you off them. The main loop now runs
+   * here too, so opening the forum or a statistics page while the actions are on
+   * means being navigated to crimes.aspx a few seconds later. If that becomes
+   * annoying, the answer is to re-add the specific page below rather than to
+   * reach for the ALL switch.
+   *
+   * The matching logic underneath is untouched and handles an empty list fine —
+   * re-add any of these to restore the old behaviour for that page:
+   *   '/authenticated/forum.aspx', '/authenticated/personal.aspx',
+   *   '/authenticated/store.aspx?p=b', '/authenticated/statistics.aspx?p=C',
+   *   '/authenticated/statistics.aspx?p=G', '/authenticated/statistics.aspx?p=p',
+   *   '/authenticated/statistics.aspx?p=n'
    */
-  const SKIP_PAGES = [
-    '/authenticated/forum.aspx', '/authenticated/personal.aspx',
-    '/authenticated/store.aspx?p=b', '/authenticated/statistics.aspx?p=C',
-    '/authenticated/statistics.aspx?p=G', '/authenticated/statistics.aspx?p=p',
-    '/authenticated/statistics.aspx?p=n'
-  ];
+  const SKIP_PAGES = [];
   // Query-string values are matched case-sensitively (path is not) — e.g.
   // "?p=C" must not accidentally exclude "?p=c".
   const _curPathLower = window.location.pathname.toLowerCase();
@@ -6337,13 +6357,16 @@
    * A real player's session touches the forum now and then. This does the same
    * on a jittered ~hourly schedule.
    *
-   * IT FETCHES, IT DOES NOT NAVIGATE — and that difference is forced on us, not a
-   * preference. `/authenticated/forum.aspx` is in SKIP_PAGES, so Jarvis returns
-   * early there and never starts its main loop. The reference can navigate to the
-   * forum because its architecture runs everywhere; ours would land on the forum,
-   * stop dead, and sit there until you noticed. A same-origin GET produces the
-   * identical request server-side with the identical session cookie, which is the
-   * only thing the camouflage depends on.
+   * IT FETCHES, IT DOES NOT NAVIGATE. This used to be forced on us — the forum
+   * was in SKIP_PAGES, so navigating there made Jarvis return early, stop dead
+   * and sit on the forum until you noticed. SKIP_PAGES is empty as of 2000.254,
+   * so that trap is gone and a navigation would now work.
+   *
+   * Fetching is still the right call, and is now a choice rather than a
+   * workaround: a same-origin GET produces the identical request server-side
+   * with the identical session cookie — which is the entire basis of the
+   * camouflage — while costing no page load and, crucially, not yanking you off
+   * whatever you were doing once an hour. Don't "upgrade" this to a navigation.
    */
   const FORUM_PATH = '/authenticated/forum.aspx';
 
