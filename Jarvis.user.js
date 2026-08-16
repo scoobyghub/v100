@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.254
+// @version      2000.255
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -33,7 +33,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.254
+/*  Jarvis Bot 2000.255
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -120,7 +120,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.254';
+  const APP_VERSION = '2000.255';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -3140,6 +3140,21 @@
 
   const TRAVEL_PATH = '/authenticated/travel.aspx';
 
+  /* Is the page SAYING you have to wait, whether or not we can parse how long?
+   *
+   * This is the fix for "the timer says Ready when there's time left" (2000.255).
+   * The five patterns below extract a duration; if none of them match, the old
+   * code fell straight through to a "can I travel?" test that was satisfied by
+   * the destination radios or the Travel button merely EXISTING. The game renders
+   * that form on the cooldown page too — with the button disabled and a wait
+   * message above it — so any wording we couldn't parse was read as Ready, the
+   * panel showed Ready, and auto-travel would set off for a flight the game was
+   * never going to allow.
+   *
+   * So presence of a wait message now VETOES ready on its own. Being told "you
+   * must wait" is information even when the duration isn't. */
+  const TRAVEL_WAIT_RE = /before\s+you\s+can\s+travel|you\s+have\s+to\s+wait|you\s+cannot\s+travel|have\s+to\s+wait\s+\d/i;
+
   async function fetchTravel() {
     if (isHalted()) return;
     try {
@@ -3204,10 +3219,27 @@
         }
       }
 
-      const canNow = lower.includes('select a destination') ||
-                     lower.includes('where would you like') ||
-                     doc.querySelector('input[type=radio][name="ctl00$main$citieslist"]') !== null ||
-                     doc.querySelector('#ctl00_main_btnTravelNormal') !== null;
+      /* Nothing parsed. Before concluding "ready", check whether the page is
+       * telling us to wait in wording we don't recognise — see TRAVEL_WAIT_RE. */
+      const waiting = TRAVEL_WAIT_RE.test(msgTxt) || TRAVEL_WAIT_RE.test(bodyTxt);
+      if (waiting) {
+        /* On cooldown, duration unknown. Keep whatever timer we already had
+         * rather than claiming Ready, and log the exact text so the patterns
+         * above can be widened to cover it. */
+        console.warn(APP_TAG, '[TRAVEL] On cooldown but the remaining time did not parse — keeping the existing timer. Message:',
+                     (msgTxt || bodyTxt.replace(/\s+/g, ' ').slice(0, 200)));
+        updateTimers();
+        return;
+      }
+
+      /* Ready needs a control we could actually USE, not merely one present in
+       * the markup. Both buttons render on the cooldown page as well, disabled —
+       * testing only for existence is what made a cooldown look like Ready. */
+      const btnUsable = sel => { const b = doc.querySelector(sel); return !!b && !b.disabled; };
+      const canNow = btnUsable('#ctl00_main_btnTravelPrivate') ||
+                     btnUsable('#ctl00_main_btnTravelNormal') ||
+                     ((lower.includes('select a destination') || lower.includes('where would you like')) &&
+                      doc.querySelector('input[type=radio][name="ctl00$main$citieslist"]') !== null);
 
       if (canNow) {
         storeTravel({ cd:0, canNormal:true, at:Date.now() });
@@ -8721,27 +8753,25 @@
       try { cityRadio.dispatchEvent(new Event('change', {bubbles:true})); } catch(_){}
       console.log('[JB][TRAVEL] Selected city radio:', cityRadio.id, '(value:', cityRadio.value, ')');
 
-      // Wait briefly, then click travel button — jet if DTM is close to ready, otherwise normal
+      /* JET ONLY (2000.255).
+       *
+       * This used to choose between the private jet (20 min cooldown) and the
+       * normal plane (45 min) depending on whether an OC or DTM was due within
+       * 40 minutes. The normal plane is gone by request: the 45-minute cooldown
+       * is most of the useful window, and a flight that lands you somewhere with
+       * 45 minutes of grounding is rarely worth taking.
+       *
+       * Consequence, and it is deliberate: if the jet is unavailable — you can't
+       * afford it, or the game isn't offering it — Jarvis does NOT quietly fall
+       * back to the 45-minute plane. It says so and stays put. Falling back would
+       * reintroduce exactly the option you asked to remove, at the moment you
+       * were least watching. */
       setTimeout(() => {
-        // Decide jet vs normal: if EITHER an OC or a DTM is < 40 min from ready,
-        // use the jet (20 min cooldown) so we arrive in time; otherwise the
-        // normal plane (45 min cooldown).
-        const dtm = getDtm();
-        const oc  = getOc();
-        const dtmMinsLeft = dtm && !dtm.ready ? Math.ceil((dtm.total||0)/60) : 999;
-        const ocMinsLeft  = oc  && !oc.ready  ? Math.ceil((oc.total||0)/60)  : 999;
-        const soonestMins = Math.min(dtmMinsLeft, ocMinsLeft);
-        const soonKind    = ocMinsLeft <= dtmMinsLeft ? 'OC' : 'DTM';
-        const useJet = soonestMins < 40;
-
-        const btnId = useJet ? 'ctl00_main_btnTravelPrivate' : 'ctl00_main_btnTravelNormal';
-        const travelBtn = document.getElementById(btnId) ||
-                         (useJet
-                           ? [...document.querySelectorAll('input[type="submit"]')].find(b => /private\s*jet/i.test(b.value||''))
-                           : [...document.querySelectorAll('input[type="submit"]')].find(b => /^travel\s*\(normal\)/i.test(b.value||'')));
+        const travelBtn = document.getElementById('ctl00_main_btnTravelPrivate') ||
+                          [...document.querySelectorAll('input[type="submit"]')].find(b => /private\s*jet/i.test(b.value||''));
 
         if (travelBtn && !travelBtn.disabled) {
-          console.log(`[JB][TRAVEL] ${soonKind} in ${soonestMins}m — using ${useJet?'JET (20m cd)':'NORMAL (45m cd)'}`);
+          console.log('[JB][TRAVEL] Taking the private jet (20m cooldown)');
           st.acting = true; st.action = 'travel';
           GM_setValue('cbActStart', Date.now());
           travelBtn.click();
@@ -8750,20 +8780,22 @@
             localStorage.removeItem(LS_TRAVEL_PENDING);
             st.acting = false; st.action = '';
             GM_setValue('cbActStart', 0);
-            // Set correct cooldown: jet=20min, normal=45min
-            const cooldown = useJet ? 20*60 : 45*60;
-            storeTravel({ cd: cooldown, canNormal: false, at: Date.now() });
+            storeTravel({ cd: 20*60, canNormal: false, at: Date.now() });   // jet is always 20 min
             saveSt();
-            const mode = useJet ? '🛩️ Jet' : '✈️ Plane';
-            tgMsg('travel', `${mode} <b>Traveled</b>\n${st.player||'?'} → ${hotCity}${useJet?` | ${soonKind} in ${soonestMins}m`:''}`);
-            setStatus(`${mode} → ${hotCity}`);
+            tgMsg('travel', `🛩️ <b>Traveled</b>\n${st.player||'?'} → ${hotCity} | 20m cooldown`);
+            setStatus(`🛩️ Jet → ${hotCity}`);
             // Navigate away after travel completes
             setTimeout(() => {
               window.location.href = '/authenticated/crimes.aspx?' + Date.now();
             }, 1500);
           }, 2000);
         } else {
-          console.log('[JB][TRAVEL] Travel button not found or disabled:', btnId);
+          /* No jet — say so rather than sitting silent, because from the outside
+           * this looks identical to auto-travel simply not working. Throttled, as
+           * it re-checks every cycle while the hot city is elsewhere. */
+          console.warn(APP_TAG, '[TRAVEL] Private jet unavailable' + (travelBtn ? ' (button disabled)' : ' (button not found)') + ' — not travelling');
+          setStatus('🛩️ Jet unavailable — not travelling');
+          tgOnce('travel_nojet', 1800, `🛩️ <b>No jet</b>\n${st.player||'?'} | can't fly to ${esc(hotCity)} — the private jet isn't available and the 45m plane is disabled`);
           localStorage.removeItem(LS_TRAVEL_PENDING);
         }
       }, 500 + Math.floor(Math.random() * 500));
