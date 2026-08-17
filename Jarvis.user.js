@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.257
+// @version      2000.260
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -33,7 +33,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.257
+/*  Jarvis Bot 2000.260
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -120,7 +120,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.257';
+  const APP_VERSION = '2000.260';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -3209,14 +3209,58 @@
         if (me) { s = parseInt(me[1],10)||0; found = true; }
       }
 
-      if (found) {
-        const total = h*3600+m*60+s;
-        if (total > 0) {
-          storeTravel({ cd:total, canNormal:false, at:Date.now() });
-          dlog(`[JB][TRAVEL] Cooldown: ${h}h ${m}m ${s}s (${total}s)`);
-          updateTimers();
-          return;
-        }
+      const commTotal = found ? (h*3600+m*60+s) : null;
+
+      /* === THE PAGE CARRIES TWO COOLDOWNS — READ THE JET ONE (2000.260) ===
+       *
+       * This is the bug behind "travel was fine until we removed the 40m option".
+       *
+       * travel.aspx states BOTH:
+       *   "It is 0 hours 45 minutes and 0 seconds before you can travel commercially.
+       *    Private Jet travel is now available at increased cost."
+       * or with the jet still cooling:
+       *    "Private Jet travel is available in 0 hours 19 minutes and 46 seconds!"
+       *
+       * Every one of the five duration patterns above matches the COMMERCIAL
+       * sentence — it is the one that says "before you can travel". That was
+       * correct while we actually flew the commercial plane. 2000.255 made us
+       * JET ONLY and left the parse alone, so ever since, Jarvis has been sitting
+       * out the 45-minute commercial timer while the jet had been ready for 25
+       * minutes. It also explains the panel jumping: we store 20m after our own
+       * flight, then the next fetch overwrites it with the commercial 45m.
+       *
+       * Wording taken from the reference script's parseTravelCooldownFromPage,
+       * which has had this right all along.
+       *
+       * THE ENABLED BUTTON OUTRANKS BOTH NUMBERS. The game enables it exactly
+       * when you may fly, so it is the one signal that can't be out of step with
+       * whatever the sentence happens to say. */
+      const jetBtnReady = (() => { const b = doc.querySelector('#ctl00_main_btnTravelPrivate'); return !!b && !b.disabled; })();
+      let jetSecs = null;
+      if (/private\s*jet\s+travel\s+is\s+now\s+available/i.test(bodyTxt)) jetSecs = 0;
+      else {
+        const jm = bodyTxt.match(/private\s*jet[^.!]*?(?:available\s+in|remaining|:)\s*(?:(\d+)\s*hours?\s*)?(\d+)\s*minutes?\s*and\s*(\d+)\s*seconds?/i);
+        if (jm) jetSecs = (parseInt(jm[1]||'0',10))*3600 + (parseInt(jm[2],10)||0)*60 + (parseInt(jm[3],10)||0);
+      }
+
+      if (jetBtnReady || jetSecs !== null) {
+        const cd = jetBtnReady ? 0 : jetSecs;
+        storeTravel({ cd, canNormal:false, comm: commTotal, at:Date.now() });
+        dlog(APP_TAG, `[TRAVEL] Jet ${cd > 0 ? `in ${Math.round(cd/60)}m` : 'READY'}` +
+                      (commTotal != null ? ` (commercial ${Math.round(commTotal/60)}m — not used, jet only)` : ''));
+        updateTimers();
+        return;
+      }
+
+      if (found && commTotal > 0) {
+        /* Jet line unreadable. Fall back to the commercial number so we still
+         * hold SOME cooldown rather than claiming Ready — but say so, because on
+         * a jet-only setup this is the wrong timer and will read ~25m long. */
+        storeTravel({ cd:commTotal, canNormal:false, comm: commTotal, at:Date.now() });
+        console.warn(APP_TAG, `[TRAVEL] Could not read the Private Jet time — falling back to the commercial ${h}h ${m}m ${s}s, which runs ~25m long on jet-only. Page said:`,
+                     (msgTxt || bodyTxt.replace(/\s+/g, ' ').slice(0, 200)));
+        updateTimers();
+        return;
       }
 
       /* Nothing parsed. Before concluding "ready", check whether the page is
@@ -3547,10 +3591,102 @@
       });
     }
     restartTimerIntervals();
-    setTimeout(collectTimers, 3000);
-    setTimeout(fetchTravel, 4000);
-    setTimeout(fetchProt, 5000);
+    /* The 3s/4s/5s startup fetches that used to live here are GONE (2000.258).
+     * A page lasts about 2.5-3s under automation, so the 4s and 5s ones mostly
+     * died with it and the OC/DTM one was marginal. maybeBgFetch() below runs
+     * from the main loop instead, ~1.5s into every page load — sooner than any
+     * of them, and it can't be outrun by a navigation. */
   }
+
+  /* === BACKGROUND FETCHES ARE DUE-TIME DRIVEN, NOT INTERVAL DRIVEN (2000.258) ===
+   *
+   * This is why "the travel, OC and DTM times take a long time to appear".
+   *
+   * Every schedule here used to be a timer created fresh on each page load and
+   * destroyed by teardown on the next navigation:
+   *
+   *     setTimeout(collectTimers, 3000) · setTimeout(fetchTravel, 4000)
+   *     setTimeout(fetchProt, 5000)     · setInterval(…, 60000)
+   *
+   * A page lives roughly 2.5-3 SECONDS while Jarvis is working — init schedules
+   * the first loop tick at 1.5s, the loop acts, and it navigates. So the 4s and
+   * 5s timeouts usually died with the page, the 3s one was marginal, and THE 60s
+   * INTERVAL COULD NEVER FIRE AT ALL: nothing survives sixty seconds under
+   * constant navigation. Travel and protection were effectively only fetched on
+   * the odd occasion Jarvis happened to sit still for five seconds.
+   *
+   * The fix is the pattern the rest of this file already uses for anything that
+   * has to outlive a page — the ready reminders, the forum refresh, the XP
+   * report, the scrap backoff: keep the DUE TIME in storage and test it on a
+   * tick. maybeBgFetch() is called from the main loop, which runs ~1.5s into
+   * every page load, so the real gap between fetches is now the poll interval
+   * you set rather than "whenever a page happens to sit still long enough".
+   *
+   * ONE FETCH PER TICK, in priority order. The loop ticks every ~2-3s, so the
+   * three naturally stagger themselves — which is what the old 3/4/5s offsets
+   * were reaching for, without depending on the page living that long.
+   *
+   * The due time is stamped BEFORE the fetch, so a failure or a mid-flight
+   * navigation costs one cycle rather than retrying on every tick. Same
+   * reasoning as doForumRefresh rescheduling before it fires.
+   */
+  const BG_DUE = { ocdtm: 'cbDueOcDtm', travel: 'cbDueTravel', prot: 'cbDueProt' };
+  function bgDueAt(k) { return parseInt(GM_getValue(BG_DUE[k], 0) || 0, 10); }
+  function bgSetDue(k, ms) { GM_setValue(BG_DUE[k], Date.now() + ms); }
+
+  /* === POLL WHEN IT MATTERS, NOT ON A METRONOME (2000.260) ===
+   *
+   * The complaint that started this: travel checks the page too often. It does —
+   * and the checks buy nothing, because these are COUNTDOWNS WE ALREADY HOLD.
+   * getTravel/getOc/getDtm derive the remaining time locally from the stored
+   * cooldown, so re-fetching during a 2h OC tells us what we could have worked
+   * out for free. Only the fetch near zero carries information.
+   *
+   * So the next check is scheduled for just after the timer is due, the way the
+   * reference script does it (scheduleNext('hotcity', remaining + 10)) rather
+   * than every bgPollSec regardless.
+   *
+   * Capped at BG_QUIET_CAP so we still re-sync now and then — a cooldown can
+   * change for reasons we didn't cause (you travel by hand, an OC completes),
+   * and going silent for two hours would leave the panel confidently wrong.
+   *
+   * Never SHORTER than bgPollSec, so this can only ever reduce traffic.
+   */
+  const BG_QUIET_CAP = 10 * 60 * 1000;
+
+  function bgGapFor(kind, pollMs) {
+    let remMs = 0;
+    try {
+      if (kind === 'ocdtm') {
+        const o = getOc(), d = getDtm();          // whichever comes ready first
+        const a = (o && !o.ready) ? (o.total || 0) * 1000 : 0;
+        const b = (d && !d.ready) ? (d.total || 0) * 1000 : 0;
+        remMs = (a && b) ? Math.min(a, b) : (a || b);
+      } else if (kind === 'travel') {
+        const t = getTravel();
+        remMs = (t && !t.ready) ? (t.remaining || 0) * 1000 : 0;
+      }
+    } catch(_) {}
+    if (remMs <= 0) return pollMs;                // ready, or nothing stored yet
+    // Land just after it comes ready. Jittered, so it isn't a predictable beat.
+    return Math.min(BG_QUIET_CAP, Math.max(pollMs, remMs + 5000 + Math.floor(Math.random() * 10000)));
+  }
+
+  // Returns true if it fired something (the caller doesn't wait on it).
+  function maybeBgFetch() {
+    if (isHalted() || st.inJail || paused || st.acting) return false;
+    const pollMs = Math.max(30, Math.min(900, Number(cfg.bgPollSec) || 60)) * 1000;
+    const now = Date.now();
+    if (now >= bgDueAt('ocdtm'))  { bgSetDue('ocdtm',  bgGapFor('ocdtm', pollMs));  collectTimers(); return true; }
+    if (now >= bgDueAt('travel')) { bgSetDue('travel', bgGapFor('travel', pollMs)); fetchTravel();   return true; }
+    // Protection moves by the hour, not the minute — half the rate is plenty.
+    if (now >= bgDueAt('prot'))   { bgSetDue('prot',   pollMs * 2);                 fetchProt();     return true; }
+    return false;
+  }
+
+  // Settings changed the poll rate — bring the next fetch forward rather than
+  // leaving it parked behind the old, longer gap.
+  function resetBgDue() { Object.keys(BG_DUE).forEach(k => GM_setValue(BG_DUE[k], 0)); }
 
   /* Rebuilt rather than created once, so the Performance settings apply live.
    * Each background fetch parses a whole document with DOMParser, so on a
@@ -3577,10 +3713,13 @@
     const pollMs = Math.max(30, Math.min(900, Number(cfg.bgPollSec) || 60)) * 1000;
 
     _timerDispIv = setInterval(updateTimers, dispMs);
-    _timerFetchIv = setInterval(() => {
-      if (!st.inJail && !paused && !st.acting) { collectTimers(); fetchTravel(); }
-    }, pollMs);
-    _protIv = setInterval(fetchProt, pollMs * 2);
+    /* Both fetch timers now just call maybeBgFetch, which owns the due times.
+     * They are a BACKSTOP for a page that genuinely sits still — the main loop
+     * is what actually drives this under navigation. Kept short (and equal) so
+     * neither one can be the thing a fetch depends on: the old ones were, and
+     * that is precisely why they never fired. */
+    _timerFetchIv = setInterval(maybeBgFetch, Math.min(pollMs, 15000));
+    _protIv = null;   // protection is scheduled by maybeBgFetch at 2× the poll
     dlog(APP_TAG, `[PERF] timers: display ${dispMs/1000}s, background ${pollMs/1000}s`);
   }
 
@@ -7894,6 +8033,8 @@
       if (pp) pp.addEventListener('change', e => {
         cfg.bgPollSec = Math.max(30, Math.min(900, parseInt(e.target.value,10)||60));
         e.target.value = cfg.bgPollSec; GM_setValue('cbBgPollSec', cfg.bgPollSec);
+        // Shortening the gap should take effect now, not after the old one runs out.
+        try { resetBgDue(); } catch(_){}
         restartTimerIntervals(); setStatus(`⚙️ Background polls ${cfg.bgPollSec}s`);
       }); }
 
@@ -8758,6 +8899,30 @@
   async function doAutoTravel() {
     if (!st.autoTravel || st.inJail || st.acting || paused) return false;
 
+    /* DID THE LAST FLIGHT LAND WHERE IT WAS AIMED? (2000.259)
+     *
+     * Nothing used to check. The destination was chosen, the button clicked, and
+     * that was the end of it — so travelling to the wrong city looked exactly like
+     * travelling to the right one, and the only way to notice was to be watching
+     * the panel at the time. The intended city is now recorded at click time and
+     * compared against where we actually ended up. */
+    try {
+      const want = localStorage.getItem('cbTravelWanted');
+      if (want) {
+        const cur = getCurCity();
+        if (cur) {                                   // status bar has rendered
+          localStorage.removeItem('cbTravelWanted');
+          const a = cur.trim().toLowerCase(), b = want.trim().toLowerCase();
+          if (a !== b) {
+            console.warn(APP_TAG, `[TRAVEL] Aimed at "${want}" but ended up in "${cur}"`);
+            tgOnce('travel_wrong', 900, `⚠️ <b>Travel went wrong</b>\n${st.player||'?'} | aimed at <b>${esc(want)}</b>, landed in <b>${esc(cur)}</b>`);
+          } else {
+            dlog(APP_TAG, `[TRAVEL] Arrived in ${cur} as intended`);
+          }
+        }
+      }
+    } catch(_){}
+
     // Need hot city known
     if (!getHot()) { fetchHot(); return false; }
 
@@ -8802,23 +8967,83 @@
       const hotLower = hotCity.toLowerCase();
       console.log('[JB][TRAVEL] On travel page — looking for radio matching', hotCity);
 
-      // Find the radio button matching the hot city by label text
+      /* WHICH RADIO IS THIS CITY? (rewritten 2000.259)
+       *
+       * The old line read the label as:
+       *
+       *     r.parentElement?.textContent || r.closest('td,tr,label')?.textContent
+       *
+       * `parentElement.textContent` is the text of the WHOLE parent. Whenever the
+       * radios share a container — a flow-layout span or div, or a <tr> when the
+       * list renders horizontally — that string contains EVERY city name, so
+       * `label.includes(hotCity)` was true for the FIRST radio and the loop broke
+       * there. It would then travel to the first city on the page whatever the hot
+       * city was, every time. (The `tr` in that fallback selector is the giveaway:
+       * a <tr> in an ASP.NET RadioButtonList holds all of them.)
+       *
+       * This resolves the label PER RADIO instead, strongest link first, and never
+       * reads a container holding more than one radio. */
       const radios = [...document.querySelectorAll('input[type=radio][name="ctl00$main$citieslist"]')];
-      let cityRadio = null;
-      for (const r of radios) {
-        const label = (r.parentElement?.textContent || r.closest('td,tr,label')?.textContent || '').toLowerCase();
-        if (label.includes(hotLower)) { cityRadio = r; break; }
-      }
 
-      if (!cityRadio) {
-        console.log('[JB][TRAVEL] Could not find radio for hot city:', hotCity);
+      const labelOf = r => {
+        // 1. <label for="id"> — what ASP.NET actually emits, and unambiguous.
+        if (r.id) {
+          try {
+            const l = document.querySelector(`label[for="${CSS.escape(r.id)}"]`);
+            if (l && (l.textContent || '').trim()) return l.textContent.trim();
+          } catch(_) {}
+        }
+        // 2. A <label> wrapping this radio.
+        const wrap = r.closest('label');
+        if (wrap && (wrap.textContent || '').trim()) return wrap.textContent.trim();
+        // 3. The text that follows it, stopping at the next control.
+        let s = '';
+        for (let n = r.nextSibling; n; n = n.nextSibling) {
+          if (n.nodeType === 1 && /^(INPUT|BR|TABLE)$/.test(n.tagName)) break;
+          s += n.textContent || '';
+          if (s.trim()) break;
+        }
+        if (s.trim()) return s.trim();
+        /* 4. The containing cell — but ONLY if it holds this radio alone. This is
+         * the guard the old code lacked: a shared container names every city. */
+        const cell = r.closest('td,li,span,div');
+        if (cell && cell.querySelectorAll('input[type=radio]').length === 1)
+          return (cell.textContent || '').trim();
+        return '';
+      };
+
+      const cities = radios.map(r => ({ r, label: labelOf(r) }));
+      console.log('[JB][TRAVEL] Destinations on this page:',
+                  cities.map(c => `${c.label || '(no label)'}=${c.r.value}`).join(', '));
+
+      /* Exact first, then prefix, then substring. An exact match must win: with a
+       * plain substring test a hot city of "York" would take "New York", and the
+       * first row at that. */
+      const norm = s => String(s || '').trim().toLowerCase();
+      const pick = cities.filter(c => norm(c.label) === hotLower);
+      const near = pick.length ? pick
+                 : cities.filter(c => norm(c.label).startsWith(hotLower)).length
+                   ? cities.filter(c => norm(c.label).startsWith(hotLower))
+                   : cities.filter(c => c.label && norm(c.label).includes(hotLower));
+
+      if (near.length !== 1) {
+        /* Nothing matched, or several did. REFUSE — travelling to a guess is what
+         * this whole rewrite exists to stop, and a wrong flight costs the 20m
+         * cooldown as well as leaving you in the wrong city. */
+        console.warn(APP_TAG, near.length
+          ? `[TRAVEL] "${hotCity}" matched ${near.length} destinations (${near.map(c=>c.label).join(' / ')}) — refusing to guess`
+          : `[TRAVEL] No destination matches the hot city "${hotCity}" — not travelling`);
+        tgOnce('travel_nocity', 1800, `✈️ <b>Travel refused</b>\n${st.player||'?'} | couldn't identify <b>${esc(hotCity)}</b> in the destination list — not guessing`);
+        setStatus(`✈️ ${hotCity} not found in the list`);
         localStorage.removeItem(LS_TRAVEL_PENDING);
         return false;
       }
 
+      const cityRadio = near[0].r;
       cityRadio.checked = true;
       try { cityRadio.dispatchEvent(new Event('change', {bubbles:true})); } catch(_){}
-      console.log('[JB][TRAVEL] Selected city radio:', cityRadio.id, '(value:', cityRadio.value, ')');
+      // Log the RESOLVED LABEL, not just the id — without it a wrong pick is invisible.
+      console.log(`[JB][TRAVEL] Selected "${near[0].label}" (${cityRadio.id}, value ${cityRadio.value}) for hot city ${hotCity}`);
 
       /* JET ONLY (2000.255).
        *
@@ -8864,6 +9089,9 @@
            * one delayed flight; not claiming it costs the loop above. */
           localStorage.removeItem(LS_TRAVEL_PENDING);
           localStorage.setItem(LS_TRAVEL_ACTED, String(Date.now()));
+          // Where we MEANT to go — checked against where we land, at the top of
+          // the next doAutoTravel. Written here so it survives the postback.
+          localStorage.setItem('cbTravelWanted', near[0].label || hotCity);
           // Survives the postback, so checkStuck() doesn't call this a stall.
           localStorage.setItem('cbActionLockUntil', String(Date.now() + 8000));
           storeTravel({ cd: 20*60, canNormal: false, at: Date.now() });   // jet is always 20 min
@@ -11166,6 +11394,11 @@
 
     try { checkReadyAlerts(); } catch(_){}
     try { maybeSendXpReport(); } catch(_){}
+    /* The OC/DTM/travel/protection fetches. THIS is what actually keeps those
+     * timers current — the intervals in restartTimerIntervals are only a
+     * backstop, because a page rarely lives long enough for one to fire. See
+     * maybeBgFetch. Fire-and-forget: it must never delay an action. */
+    try { maybeBgFetch(); } catch(_){}
     try { doForumRefresh(); } catch(_){}   // fire-and-forget; never gates the loop
     try { maybeForceStatRefresh(); } catch(_){}
 
