@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.261
+// @version      2000.262
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -33,7 +33,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.261
+/*  Jarvis Bot 2000.262
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -120,7 +120,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.261';
+  const APP_VERSION = '2000.262';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -1196,6 +1196,16 @@
     url:     GM_getValue('cbDcUrl', ''),
     rankup:  GM_getValue('cbDcRankup', true),
     witness: GM_getValue('cbDcWitness', true),
+    /* Script/staff checks and soft bans. Defaults ON, unlike the other two —
+     * these are the BAN-RISK events, and the whole reason the critical-alert
+     * queue exists is that missing one cost a 12h soft ban. */
+    critical: GM_getValue('cbDcCritical', true),
+    /* Optional mention prefixed to a critical post — "<@123…>" for yourself,
+     * "<@&123…>" for a role, or @here / @everyone. This is the closest thing to
+     * the flashing light: an embed alone is silent, a mention actually pushes a
+     * notification to your phone. Blank by default because @everyone in a shared
+     * channel is somebody else's problem, not just yours. */
+    mention: GM_getValue('cbDcMention', ''),
     /* Post from THIS device. Jarvis runs on 3 PCs and a tablet against one
      * account, each with its own storage — so a rank-up is detected by every
      * device that happens to be running, and each would post the same embed.
@@ -1209,6 +1219,8 @@
     GM_setValue('cbDcUrl', dc.url);
     GM_setValue('cbDcRankup', dc.rankup);
     GM_setValue('cbDcWitness', dc.witness);
+    GM_setValue('cbDcCritical', dc.critical);
+    GM_setValue('cbDcMention', dc.mention);
     GM_setValue('cbDcThisDevice', dc.thisDevice);
   }
 
@@ -1324,11 +1336,19 @@
    * retry/backoff/429 machinery here was built the hard way. Items carry a `dest`
    * so one pump serves both; anything without one is Telegram, which keeps every
    * pre-existing queued item working across the upgrade. */
-  function sendDiscord(embed) {
+  function sendDiscord(embed, content) {
     if (!dcConfigured()) return;
     const q = _loadTgQ();
+    /* `content` is the plain line above the embed, used only to carry a mention.
+     * allowed_mentions is stated explicitly rather than relying on the webhook
+     * default, so a mention pings on purpose and never by accident. */
+    const payload = { embeds: [embed] };
+    if (content) {
+      payload.content = String(content).slice(0, 300);
+      payload.allowed_mentions = { parse: ['users', 'roles', 'everyone'] };
+    }
     q.push({ id: Date.now() + '_' + Math.random().toString(36).slice(2, 7),
-             dest: 'dc', payload: { embeds: [embed] }, attempts: 0, nextAt: 0 });
+             dest: 'dc', payload, attempts: 0, nextAt: 0 });
     if (q.length > 50) q.splice(0, q.length - 50);
     _saveTgQ(q);
     pumpTgQueue();
@@ -1398,7 +1418,74 @@
    * status bar as a from→to transition (theirs parses a mail blob), and we have
    * live XP totals to hang off it.
    */
-  const DC_COLOUR = { rankup: 0xF1C40F, witness: 0xC0392B };
+  const DC_COLOUR = { rankup: 0xF1C40F, witness: 0xC0392B, critical: 0xFF0000 };
+
+  /* === CRITICAL ALERTS → DISCORD (2000.262) ===
+   *
+   * The ban-risk events: an inbox script check, an on-page staff check, staff
+   * mail, and an anti-bot / soft-ban message. Telegram has chased these since
+   * 2000.175, when missing one cost a 12-hour soft ban; this is a second channel
+   * for the same thing.
+   *
+   * MADE AS LOUD AS DISCORD ACTUALLY ALLOWS. There is no animation in an embed —
+   * a webhook cannot flash anything — so "flashing lights" here means everything
+   * that genuinely competes for attention:
+   *   · a MENTION on the line above the embed, which is the only part that fires
+   *     a phone notification. This is the real attention-getter; the rest is
+   *     decoration. Off unless you set one, because @everyone in a channel other
+   *     people read is their problem too.
+   *   · pure red, sirens in the title, and a marquee row of alternating symbols
+   *     top and bottom, which is as close to blinking as a static embed gets.
+   *
+   * Hooked into queueCriticalAlert rather than each caller, because that is the
+   * one funnel every ban-risk event already passes through — so this cannot be
+   * forgotten when a new kind of check is added. It posts ONCE per event (the
+   * queue's own key dedup plus dcSendOnce); only Telegram does the repeating,
+   * since a channel other people read should not be hammered.
+   */
+  const DC_MARQUEE = '🚨🔴🚨🔴🚨🔴🚨🔴🚨🔴🚨🔴🚨🔴🚨';
+
+  // Telegram markup → something Discord renders. Same text, different dialect.
+  function dcFromTgText(msg) {
+    return String(msg || '')
+      .replace(/<pre>([\s\S]*?)<\/pre>/gi, (_m, x) => '```\n' + x.trim() + '\n```')
+      .replace(/<b>(.*?)<\/b>/gi, '**$1**')
+      .replace(/<i>(.*?)<\/i>/gi, '*$1*')
+      .replace(/<[^>]+>/g, '')
+      .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'").replace(/&amp;/g, '&')
+      .trim();
+  }
+
+  // Human name for the kind of check, taken from the alert key's prefix.
+  const DC_CRIT_KIND = {
+    sqlcheck:    'STAFF CHECK ON SCREEN',
+    scriptcheck: 'SCRIPT CHECK IN YOUR INBOX',
+    staffmail:   'MAIL FROM STAFF',
+    antibot:     'ANTI-BOT / SOFT BAN'
+  };
+
+  function discordCriticalAlert(key, msg) {
+    if (!dc.critical || !dcConfigured()) return;
+    const kind = DC_CRIT_KIND[String(key).split(':')[0]] || 'STAFF ALERT';
+    const body = dcFromTgText(msg);
+    const e = {
+      title: `🚨 ${kind} 🚨`,
+      description: `${DC_MARQUEE}\n\n${body}\n\n${DC_MARQUEE}`,
+      color: DC_COLOUR.critical,
+      author: { name: st.player || 'Unknown player' },
+      fields: [{
+        name: '⚠️ What to do',
+        value: 'Answer it **in the game**, by hand. Jarvis never answers a check for you — that is the one thing it must not automate.',
+        inline: false
+      }],
+      timestamp: new Date().toISOString(),
+      footer: { text: `Ignoring this risks a soft ban · ${APP_NAME} ${APP_VERSION}` }
+    };
+    // Keyed by the alert key, so one post per distinct check no matter how many
+    // times Telegram re-pings it.
+    dcSendOnce('dccrit', key, e, (dc.mention || '').trim());
+  }
 
   function dcBase(title, colour) {
     return {
@@ -1449,13 +1536,13 @@
   }
 
   // `key` identifies the EVENT. Returns true if it was actually queued.
-  function dcSendOnce(bucket, key, embed) {
+  function dcSendOnce(bucket, key, embed, content) {
     if (!dcConfigured()) return false;
     if (!dc.thisDevice) { dlog(APP_TAG, '[DC] This device is set not to post — skipping'); return false; }
     if (!tabs.isMaster)  { dlog(APP_TAG, '[DC] Not the master tab — skipping'); return false; }
     if (!seenOnce(bucket, key, 60)) { console.log(APP_TAG, `[DC] Already posted ${bucket}:${key} — not posting again`); return false; }
     if (dcRecentlySent(embed)) return false;
-    sendDiscord(embed);
+    sendDiscord(embed, content);
     return true;
   }
 
@@ -1509,13 +1596,20 @@
       fields: [
         { name: 'Rank-up alerts', value: dc.rankup ? '✅ on' : '⛔ off', inline: true },
         { name: 'Witness alerts', value: dc.witness ? '✅ on' : '⛔ off', inline: true },
+        { name: 'Script/staff checks', value: dc.critical ? '✅ on' : '⛔ off', inline: true },
+        { name: 'Ping on a check', value: dc.mention ? `\`${dc.mention}\`` : 'none set — the alert will be **silent**', inline: false },
         { name: 'Posting from this device', value: dc.thisDevice ? '✅ yes' : '⛔ no', inline: true }
       ],
       timestamp: new Date().toISOString(),
       footer: { text: `THIS IS A TEST · ${APP_NAME} ${APP_VERSION}` }
     };
-    sendDiscord(e);                          // not dcSendOnce: repeat tests are fine
-    alert('Test sent — check the channel.\n\nIt is clearly marked THIS IS A TEST.');
+    /* The mention is included deliberately. It is the one part that can be
+     * misconfigured silently, and a real script check is precisely the wrong
+     * moment to find that out — so the test proves the ping, not just the post. */
+    sendDiscord(e, (dc.mention || '').trim());   // not dcSendOnce: repeat tests are fine
+    alert('Test sent — check the channel.\n\nIt is clearly marked THIS IS A TEST.' +
+          (dc.mention ? '\n\nIt includes your ping, so you can confirm the notification works.'
+                      : '\n\nNo ping is set, so a real script check would post SILENTLY. Set one if you want your phone to buzz.'));
   }
 
   function startTgPump() {
@@ -1562,6 +1656,10 @@
       nextAt: Date.now() // first fires immediately on next pump
     });
     _saveCrit(q);
+    /* Mirror to Discord ONCE. Sits here rather than in each caller so it covers
+     * every ban-risk event by construction — including any added later. Below
+     * the `already pending` return above, so a re-queued check can't re-post. */
+    try { discordCriticalAlert(key, msg); } catch(e) { console.warn(APP_TAG, '[DC] critical alert', e); }
     pumpCriticalAlerts();
   }
 
@@ -7371,6 +7469,12 @@
             <div class="jb-grid jb-mb">
               <label class="jb-switch"><input type="checkbox" id="jb-dc-rankup" ${dc.rankup?'checked':''}> ⭐ Rank ups</label>
               <label class="jb-switch"><input type="checkbox" id="jb-dc-witness" ${dc.witness?'checked':''}> 👁️ Witness</label>
+              <label class="jb-switch" title="Script checks, staff mail and anti-bot messages — the ban-risk ones. Posted in red with sirens, once each."><input type="checkbox" id="jb-dc-critical" ${dc.critical?'checked':''}> 🚨 Script/staff checks</label>
+            </div>
+            <div class="jb-mb">
+              <label class="jb-label">Ping on a script check (optional)</label>
+              <input class="jb-input" id="jb-dc-mention" value="${esc(dc.mention)}" placeholder="&lt;@your-user-id&gt;  ·  @here  ·  @everyone">
+              <div class="jb-sub" style="font-size:9px;color:var(--jb-text-ter)">An embed on its own is <b>silent</b> — a mention is the only part that actually pushes a notification to your phone, so this is the "flashing light". Your own user ID (<code>&lt;@123456789&gt;</code>, from right-click → Copy User ID with Developer Mode on) pings only you. <b>@everyone pings the whole server</b> — don't use it in a channel other people read.</div>
             </div>
             <label class="jb-switch jb-mb" title="Jarvis runs on several devices against one account. Each one spots the same rank-up and would post its own copy. Leave this ON for one device and OFF for the rest."><input type="checkbox" id="jb-dc-device" ${dc.thisDevice?'checked':''}> 📮 Post from <b>this</b> device</label>
             <button class="jb-btn" id="jb-dc-test">Test Discord</button>
@@ -8447,6 +8551,13 @@
       if (r) r.addEventListener('change', e => { dc.rankup = e.target.checked; saveDc(); }); }
     { const w = _shadow.querySelector('#jb-dc-witness');
       if (w) w.addEventListener('change', e => { dc.witness = e.target.checked; saveDc(); }); }
+    { const c = _shadow.querySelector('#jb-dc-critical');
+      if (c) c.addEventListener('change', e => {
+        dc.critical = e.target.checked; saveDc();
+        setStatus(dc.critical ? '🚨 Script checks go to Discord' : '🚨 Script checks: Telegram only');
+      }); }
+    { const mn = _shadow.querySelector('#jb-dc-mention');
+      if (mn) mn.addEventListener('input', e => { dc.mention = e.target.value.trim(); saveDc(); }); }
     { const dv = _shadow.querySelector('#jb-dc-device');
       if (dv) dv.addEventListener('change', e => {
         dc.thisDevice = e.target.checked; saveDc();
