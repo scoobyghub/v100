@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.260
+// @version      2000.261
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -33,7 +33,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.260
+/*  Jarvis Bot 2000.261
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -120,7 +120,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.260';
+  const APP_VERSION = '2000.261';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -3630,7 +3630,7 @@
    * navigation costs one cycle rather than retrying on every tick. Same
    * reasoning as doForumRefresh rescheduling before it fires.
    */
-  const BG_DUE = { ocdtm: 'cbDueOcDtm', travel: 'cbDueTravel', prot: 'cbDueProt' };
+  const BG_DUE = { ocdtm: 'cbDueOcDtm', travel: 'cbDueTravel', prot: 'cbDueProt', hot: 'cbDueHot' };
   function bgDueAt(k) { return parseInt(GM_getValue(BG_DUE[k], 0) || 0, 10); }
   function bgSetDue(k, ms) { GM_setValue(BG_DUE[k], Date.now() + ms); }
 
@@ -3679,6 +3679,10 @@
     const now = Date.now();
     if (now >= bgDueAt('ocdtm'))  { bgSetDue('ocdtm',  bgGapFor('ocdtm', pollMs));  collectTimers(); return true; }
     if (now >= bgDueAt('travel')) { bgSetDue('travel', bgGapFor('travel', pollMs)); fetchTravel();   return true; }
+    /* The hot city. Re-read on a schedule rather than once a day, because a
+     * stale one sends you flying to the wrong city — and until 2000.261 nothing
+     * ever corrected it. Checked more eagerly while it is unknown. */
+    if (now >= bgDueAt('hot'))    { bgSetDue('hot', getHot() ? HOT_REFRESH_MS : pollMs); fetchHotBg(); return true; }
     // Protection moves by the hour, not the minute — half the rate is plenty.
     if (now >= bgDueAt('prot'))   { bgSetDue('prot',   pollMs * 2);                 fetchProt();     return true; }
     return false;
@@ -6568,21 +6572,72 @@
   /* === HOT CITY === */
 
   const LS_HOT = 'cbHotCity', LS_HOT_UNTIL = 'cbHotUntil', LS_HOT_PEND = 'cbHotPend';
+  const LS_HOT_AT = 'cbHotAt';   // when it was last actually read — see getHot()
 
+  /* Next Amsterdam midnight, WITHOUT a date round-trip (2000.261).
+   *
+   * This used to be `new Date(new Date().toLocaleString('en-US', {timeZone:…}))`
+   * — format a date to a string, then parse the string back. That parse is
+   * implementation-defined, and if it ever returns Invalid Date then getHours()
+   * is NaN, the arithmetic is NaN, and `Date.now()+NaN` gets stored as the
+   * literal string "NaN". Combined with the old getHot() (which only expired on
+   * `until > 0`), that pinned the hot city FOR EVER — one bad write and Jarvis
+   * would keep flying to a city that stopped being hot days ago.
+   *
+   * Reads the fields directly instead, the way gameDayStr() already does, and
+   * cannot return NaN under any branch. */
   function midnightCET() {
     try {
-      const cet = new Date(new Date().toLocaleString('en-US',{timeZone:'Europe/Berlin'}));
-      const ms = (24*3600*1000)-(cet.getHours()*3600+cet.getMinutes()*60+cet.getSeconds())*1000-cet.getMilliseconds();
-      return Date.now()+ms;
-    } catch(_) { return Date.now()+86400000; }
+      const parts = new Intl.DateTimeFormat('en-GB', {
+        timeZone: 'Europe/Amsterdam', hour12: false,
+        hour: '2-digit', minute: '2-digit', second: '2-digit'
+      }).formatToParts(new Date());
+      const g = t => parseInt((parts.find(x => x.type === t) || {}).value, 10);
+      let H = g('hour'); const M = g('minute'), S = g('second');
+      if (H === 24) H = 0;                               // some builds render midnight as 24
+      if (![H, M, S].every(Number.isFinite)) throw new Error('unparsed');
+      return Date.now() + ((24*3600 - (H*3600 + M*60 + S)) * 1000);
+    } catch(_) {
+      return Date.now() + 24*3600*1000;                  // still a real number
+    }
   }
 
-  function saveHot(city) { localStorage.setItem(LS_HOT, city); localStorage.setItem(LS_HOT_UNTIL, String(midnightCET())); }
+  function saveHot(city) {
+    localStorage.setItem(LS_HOT, city);
+    localStorage.setItem(LS_HOT_UNTIL, String(midnightCET()));
+    localStorage.setItem(LS_HOT_AT, String(Date.now()));
+  }
+
+  /* FAIL TOWARD REFRESHING, NEVER TOWARD A STALE CITY (2000.261).
+   *
+   * Observed live: the panel read "Hot: Amsterdam (in Sydney)" while Sydney was
+   * actually the hot city — and auto-travel was about to fly to Amsterdam. The
+   * destination pick was right all along; the STORED CITY was wrong.
+   *
+   * The old test was `if (until > 0 && Date.now() > until)`. A missing, zero or
+   * NaN expiry makes that false, so it returned the cached city — for ever. Any
+   * one bad write and there was no way back short of the manual Refresh button.
+   *
+   * Now anything that isn't a usable future timestamp counts as expired, plus a
+   * hard ceiling on age regardless of what the expiry claims. Being wrong about
+   * the hot city costs a 20-minute cooldown and leaves you in the wrong place;
+   * re-reading a page costs one GET. The asymmetry is not close. */
+  const HOT_MAX_AGE_MS = 26 * 60 * 60 * 1000;   // a day plus slack — a backstop, not the mechanism
 
   function getHot() {
-    const until = parseInt(localStorage.getItem(LS_HOT_UNTIL)||'0',10);
-    if (until > 0 && Date.now() > until) { localStorage.removeItem(LS_HOT); localStorage.removeItem(LS_HOT_UNTIL); return null; }
-    return localStorage.getItem(LS_HOT)||null;
+    const until = Number(localStorage.getItem(LS_HOT_UNTIL));
+    const at    = Number(localStorage.getItem(LS_HOT_AT));
+    const drop = why => {
+      if (localStorage.getItem(LS_HOT)) dlog(APP_TAG, `[HOT] Dropping cached hot city — ${why}`);
+      localStorage.removeItem(LS_HOT); localStorage.removeItem(LS_HOT_UNTIL); localStorage.removeItem(LS_HOT_AT);
+      return null;
+    };
+    if (!Number.isFinite(until) || until <= 0) return drop('no usable expiry stored');
+    if (Date.now() > until)                     return drop('past the stored expiry');
+    // A stored `at` is optional (older installs won't have one), but if it is
+    // there and absurdly old, don't trust the expiry either.
+    if (Number.isFinite(at) && at > 0 && (Date.now() - at) > HOT_MAX_AGE_MS) return drop('older than the max age');
+    return localStorage.getItem(LS_HOT) || null;
   }
 
   function scrapeHot(doc) {
@@ -6619,16 +6674,65 @@
     }
   }
 
+  /* === RE-READ THE HOT CITY IN THE BACKGROUND (2000.261) ===
+   *
+   * The hot city used to be read ONCE A DAY at best, and only by NAVIGATING to
+   * the statistics page. Two consequences, both bad:
+   *   · it went stale the moment the game rotated the city, and there was no
+   *     mechanism to notice — see getHot() for how it could stick permanently;
+   *   · re-reading it meant yanking Jarvis off whatever it was doing.
+   *
+   * scrapeHot() already takes a document, so it works just as well on a fetched
+   * one. Same request server-side, no navigation, and it can therefore run often
+   * enough that the stored city is never more than HOT_REFRESH_MS old.
+   */
+  const HOT_REFRESH_MS = 15 * 60 * 1000;
+  let _hotBusy = false;
+
+  async function fetchHotBg() {
+    if (isHalted() || _hotBusy) return false;
+    _hotBusy = true;
+    try {
+      const r = await fetch('/authenticated/statistics.aspx?_=' + Date.now(),
+                            { credentials:'same-origin', cache:'no-store' });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const doc = new DOMParser().parseFromString(await r.text(), 'text/html');
+      if (isLoginDoc(doc)) throw new Error('logged out');
+      const city = scrapeHot(doc);
+      if (!city) {
+        /* Keep whatever we had rather than blanking it — but say so, because a
+         * silently unparsed hot city is how we ended up flying to Amsterdam. */
+        console.warn(APP_TAG, '[HOT] Could not read the hot city from the statistics page — keeping the stored one');
+        return false;
+      }
+      const prev = (localStorage.getItem(LS_HOT) || '').trim();
+      saveHot(city);
+      if (prev && prev.toLowerCase() !== city.toLowerCase()) {
+        console.log(`${APP_TAG}[HOT] Hot city changed: ${prev} → ${city}`);
+        tgMsg('travel', `🔥 <b>Hot city changed</b>\n${st.player||'?'} | ${esc(prev)} → <b>${esc(city)}</b>`);
+      } else if (!prev) {
+        console.log(`${APP_TAG}[HOT] Hot city: ${city}`);
+      } else {
+        dlog(APP_TAG, `[HOT] Still ${city}`);
+      }
+      try { updateTimers(); } catch(_){}
+      return true;
+    } catch (e) {
+      console.warn(APP_TAG, '[HOT] Background read failed:', e && e.message ? e.message : e);
+      return false;
+    } finally { _hotBusy = false; }
+  }
+
+  /* Kept for the callers that just want "make sure we know the hot city". It no
+   * longer NAVIGATES — the background read does the same job without dragging
+   * Jarvis to the statistics page. */
   function fetchHot() {
-    if (isHalted()) return;   // navigates to the stats page
+    if (isHalted()) return;
     if (getHot()) return;
-    // Throttle: only redirect to the stats page at most once every 5 minutes,
-    // otherwise repeated calls cause a navigation storm (severe slowdown).
     const last = parseInt(localStorage.getItem('cbHotFetchAt')||'0',10);
-    if (Date.now() - last < 300000) return;
+    if (Date.now() - last < 60000) return;   // one attempt a minute is plenty
     localStorage.setItem('cbHotFetchAt', String(Date.now()));
-    localStorage.setItem(LS_HOT_PEND,'1');
-    window.location.href='/authenticated/statistics.aspx?'+Date.now();
+    fetchHotBg();
   }
 
   /* === OC TEAM CREATION === */
