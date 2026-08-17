@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.256
+// @version      2000.257
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -33,7 +33,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.256
+/*  Jarvis Bot 2000.257
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -120,7 +120,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.256';
+  const APP_VERSION = '2000.257';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -8739,6 +8739,11 @@
   const OCADS_PATH = '/authenticated/ocads.aspx';
   const LS_DTM_LIST_DONE = 'cbDtmListDone';
   const LS_TRAVEL_PENDING = 'cbTravelPending';
+  /* Last travel ATTEMPT, not last successful travel. Set synchronously before the
+   * click and read as a cooling-off period, so a flight the game refuses can't be
+   * retried on a loop — see doAutoTravel. */
+  const LS_TRAVEL_ACTED = 'cbTravelJustActed';
+  const TRAVEL_RETRY_MS = 30000;
 
   // Check if we're currently in the hot city
   function isInHot() {
@@ -8765,6 +8770,20 @@
     // Check travel timer is ready
     const travel = getTravel();
     if (!travel || !travel.ready) return false;
+
+    /* Cooling-off after an attempt (2000.257).
+     *
+     * The stored 20m cooldown below is written on the ASSUMPTION the flight was
+     * accepted, and fetchTravel corrects it from the real page a few seconds
+     * later. If the game actually refused, that correction hands back "ready" —
+     * and without this guard we would immediately try again, and again, for as
+     * long as the refusal persists. Rate-limit the retry rather than trusting the
+     * outcome we can't see from here. */
+    const actedAt = parseInt(localStorage.getItem(LS_TRAVEL_ACTED) || '0', 10);
+    if (actedAt && Date.now() - actedAt < TRAVEL_RETRY_MS) {
+      dlog(APP_TAG, `[TRAVEL] Tried ${Math.round((Date.now()-actedAt)/1000)}s ago — waiting before another attempt`);
+      return false;
+    }
 
     const pg = curPage();
 
@@ -8820,23 +8839,44 @@
 
         if (travelBtn && !travelBtn.disabled) {
           console.log('[JB][TRAVEL] Taking the private jet (20m cooldown)');
+
+          /* EVERY PIECE OF BOOKKEEPING HAPPENS BEFORE THE CLICK (2000.257).
+           *
+           * This is the fix for "it reloaded the travel page every second for
+           * about 15 seconds". The click is an ASP.NET postback: it reloads this
+           * page and DESTROYS every pending setTimeout with it. All of this used
+           * to sit in a setTimeout after the click, so none of it ever ran —
+           * cbTravelPending stayed '1' and the travel timer still read Ready, so
+           * the freshly-loaded page walked into this same branch and clicked the
+           * jet again. Each lap was a real travel POST to the game.
+           *
+           * It only ever stopped by luck: startTimers fires fetchTravel 4s after
+           * each page load, and eventually one survived long enough to write the
+           * real cooldown.
+           *
+           * Same failure and the same fix as handleDtmPage, which has carried the
+           * synchronous-before-the-click guard since the DTM buy loop.
+           *
+           * The 20m cooldown is written before we know the flight was accepted.
+           * That is the safe direction: fetchTravel re-reads the real page moments
+           * later and corrects it, and since 2000.255 an unparsed cooldown can no
+           * longer be mistaken for Ready. Claiming a cooldown we don't have costs
+           * one delayed flight; not claiming it costs the loop above. */
+          localStorage.removeItem(LS_TRAVEL_PENDING);
+          localStorage.setItem(LS_TRAVEL_ACTED, String(Date.now()));
+          // Survives the postback, so checkStuck() doesn't call this a stall.
+          localStorage.setItem('cbActionLockUntil', String(Date.now() + 8000));
+          storeTravel({ cd: 20*60, canNormal: false, at: Date.now() });   // jet is always 20 min
           st.acting = true; st.action = 'travel';
           GM_setValue('cbActStart', Date.now());
-          travelBtn.click();
+          saveSt();
+          tgMsg('travel', `🛩️ <b>Traveled</b>\n${st.player||'?'} → ${hotCity} | 20m cooldown`);
+          setStatus(`🛩️ Jet → ${hotCity}`);
 
-          setTimeout(() => {
-            localStorage.removeItem(LS_TRAVEL_PENDING);
-            st.acting = false; st.action = '';
-            GM_setValue('cbActStart', 0);
-            storeTravel({ cd: 20*60, canNormal: false, at: Date.now() });   // jet is always 20 min
-            saveSt();
-            tgMsg('travel', `🛩️ <b>Traveled</b>\n${st.player||'?'} → ${hotCity} | 20m cooldown`);
-            setStatus(`🛩️ Jet → ${hotCity}`);
-            // Navigate away after travel completes
-            setTimeout(() => {
-              window.location.href = '/authenticated/crimes.aspx?' + Date.now();
-            }, 1500);
-          }, 2000);
+          /* Last thing, and nothing may follow it. There is no navigate-away step
+           * any more: the postback IS the navigation, and the main loop picks the
+           * next action from the reloaded page. */
+          travelBtn.click();
         } else {
           /* No jet — say so rather than sitting silent, because from the outside
            * this looks identical to auto-travel simply not working. Throttled, as
