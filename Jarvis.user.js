@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.262
+// @version      2000.263
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -33,7 +33,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.262
+/*  Jarvis Bot 2000.263
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -120,7 +120,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.262';
+  const APP_VERSION = '2000.263';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -9219,11 +9219,25 @@
           if (s.trim()) break;
         }
         if (s.trim()) return s.trim();
-        /* 4. The containing cell — but ONLY if it holds this radio alone. This is
-         * the guard the old code lacked: a shared container names every city. */
-        const cell = r.closest('td,li,span,div');
-        if (cell && cell.querySelectorAll('input[type=radio]').length === 1)
-          return (cell.textContent || '').trim();
+        /* 4. CLIMB (2000.263).
+         *
+         * This is what made 2000.259 refuse to fly — "couldn't identify Toronto
+         * in the destination list". The radio commonly sits in its OWN cell with
+         * the city name in a SIBLING cell, so the innermost container holds one
+         * radio and no text at all. closest('td,li,span,div') found that empty
+         * cell, returned '', and every destination came back unlabelled — so
+         * nothing matched and it refused rather than guessing.
+         *
+         * Walk up instead, stopping the moment an ancestor would hold more than
+         * one radio: that ancestor names every city, which is the original 259
+         * bug this guard exists to prevent. Climbing keeps the guard and closes
+         * the blind spot. */
+        const GROUP = 'input[type=radio][name="ctl00$main$citieslist"]';
+        for (let n = r.parentElement, up = 0; n && up < 6; n = n.parentElement, up++) {
+          if (n.querySelectorAll(GROUP).length !== 1) break;   // shared — names several cities
+          const t = (n.textContent || '').replace(/s+/g, ' ').trim();
+          if (t) return t;
+        }
         return '';
       };
 
@@ -9245,10 +9259,15 @@
         /* Nothing matched, or several did. REFUSE — travelling to a guess is what
          * this whole rewrite exists to stop, and a wrong flight costs the 20m
          * cooldown as well as leaving you in the wrong city. */
+        /* Say WHICH failure this is. "No city matched" and "no labels could be
+         * read at all" look identical from outside but mean very different
+         * things — the second is a markup problem in labelOf(), and not saying
+         * so is why the 2000.259 refusal took days to pin down. */
+        const unlabelled = cities.filter(c => !c.label).length;
         console.warn(APP_TAG, near.length
           ? `[TRAVEL] "${hotCity}" matched ${near.length} destinations (${near.map(c=>c.label).join(' / ')}) — refusing to guess`
-          : `[TRAVEL] No destination matches the hot city "${hotCity}" — not travelling`);
-        tgOnce('travel_nocity', 1800, `✈️ <b>Travel refused</b>\n${st.player||'?'} | couldn't identify <b>${esc(hotCity)}</b> in the destination list — not guessing`);
+          : `[TRAVEL] No destination matches "${hotCity}"${unlabelled === cities.length ? ` — and NONE of the ${cities.length} destinations had a readable label, so this is a markup problem, not a missing city` : ``} — not travelling`);
+        tgOnce('travel_nocity', 1800, `✈️ <b>Travel refused</b>\n${st.player||'?'} | couldn't identify <b>${esc(hotCity)}</b> in the destination list — ${esc(unlabelled === cities.length ? 'no labels readable (page markup changed)' : 'no match')}`);
         setStatus(`✈️ ${hotCity} not found in the list`);
         localStorage.removeItem(LS_TRAVEL_PENDING);
         return false;
