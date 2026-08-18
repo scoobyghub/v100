@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.266
+// @version      2000.267
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -33,7 +33,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.266
+/*  Jarvis Bot 2000.267
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -120,7 +120,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.266';
+  const APP_VERSION = '2000.267';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -9192,8 +9192,12 @@
         const cur = getCurCity();
         if (cur) {                                   // status bar has rendered
           localStorage.removeItem('cbTravelWanted');
+          /* Tolerant both ways, exactly like isInHot(). A false "went wrong"
+           * after a flight that worked is worse than useless: it trains you to
+           * ignore the one alert that would matter if it were ever real. */
           const a = cur.trim().toLowerCase(), b = want.trim().toLowerCase();
-          if (a !== b) {
+          const arrived = a === b || a.includes(b) || b.includes(a);
+          if (!arrived) {
             console.warn(APP_TAG, `[TRAVEL] Aimed at "${want}" but ended up in "${cur}"`);
             tgOnce('travel_wrong', 900, `⚠️ <b>Travel went wrong</b>\n${st.player||'?'} | aimed at <b>${esc(want)}</b>, landed in <b>${esc(cur)}</b>`);
           } else {
@@ -9414,7 +9418,12 @@
           localStorage.setItem(LS_TRAVEL_ACTED, String(Date.now()));
           // Where we MEANT to go — checked against where we land, at the top of
           // the next doAutoTravel. Written here so it survives the postback.
-          localStorage.setItem('cbTravelWanted', near[0].label || hotCity);
+          /* The CITY, not the label (2000.267). This stored near[0].label —
+           * "Toronto - Canada - $58,170 / $232,680" — while the arrival check
+           * compares against getCurCity(), which is just "Toronto". They could
+           * never match, so the "travel went wrong" warning fired after every
+           * SUCCESSFUL flight. */
+          localStorage.setItem('cbTravelWanted', hotCity);
           // Survives the postback, so checkStuck() doesn't call this a stall.
           localStorage.setItem('cbActionLockUntil', String(Date.now() + 8000));
           storeTravel({ cd: 20*60, canNormal: false, at: Date.now() });   // jet is always 20 min
