@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.264
+// @version      2000.265
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -33,7 +33,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.264
+/*  Jarvis Bot 2000.265
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -120,7 +120,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.264';
+  const APP_VERSION = '2000.265';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -1206,11 +1206,19 @@
      * notification to your phone. Blank by default because @everyone in a shared
      * channel is somebody else's problem, not just yours. */
     mention: GM_getValue('cbDcMention', ''),
-    /* Post from THIS device. Jarvis runs on 3 PCs and a tablet against one
-     * account, each with its own storage — so a rank-up is detected by every
-     * device that happens to be running, and each would post the same embed.
-     * Nothing in a userscript can dedup across machines, so the honest fix is a
-     * per-device switch: leave it on for one, off for the rest. */
+    /* Post from THIS device.
+     *
+     * ⚠️ LEAVE THIS ON EVERYWHERE. The four installs are four DIFFERENT PLAYERS
+     * (3 PCs + a tablet, separate logins, separate storage) — not one account on
+     * four machines. So four rank-ups are four separate events by four accounts,
+     * each embed carrying its own st.player. There is nothing to dedup across
+     * machines and nothing to suppress.
+     *
+     * This switch is NOT a duplicate guard, and using it as one would silence
+     * three players outright. It exists only because "don't post from this
+     * account" is a reasonable thing to want on its own. The real duplicate
+     * guards — master tab, seenOnce by event, and the content hash — are all
+     * per-device and cover the cases that genuinely repeat. */
     thisDevice: GM_getValue('cbDcThisDevice', true)
   };
 
@@ -1510,7 +1518,9 @@
    *      if the page navigates in the ~100ms before a 200 is recorded, the item is
    *      retried and can land twice. → a short content-hash guard, which is the
    *      "duplicate-suppression guard" §8 has listed as optional since 177.
-   *   4. MULTIPLE DEVICES. Not solvable in-script — see dc.thisDevice.
+   *   4. MULTIPLE DEVICES — NOT a duplicate source. Each device is a different
+ *      PLAYER, so two devices posting means two players did the thing. Nothing
+ *      to dedup; see dc.thisDevice.
    *
    * The event key is what makes 2 work, so it must identify the EVENT, not the
    * message: a rank-up is keyed from→to, a witness by its mail id.
@@ -7476,9 +7486,9 @@
               <input class="jb-input" id="jb-dc-mention" value="${esc(dc.mention)}" placeholder="&lt;@your-user-id&gt;  ·  @here  ·  @everyone">
               <div class="jb-sub" style="font-size:9px;color:var(--jb-text-ter)">An embed on its own is <b>silent</b> — a mention is the only part that actually pushes a notification to your phone, so this is the "flashing light". Your own user ID (<code>&lt;@123456789&gt;</code>, from right-click → Copy User ID with Developer Mode on) pings only you. <b>@everyone pings the whole server</b> — don't use it in a channel other people read.</div>
             </div>
-            <label class="jb-switch jb-mb" title="Jarvis runs on several devices against one account. Each one spots the same rank-up and would post its own copy. Leave this ON for one device and OFF for the rest."><input type="checkbox" id="jb-dc-device" ${dc.thisDevice?'checked':''}> 📮 Post from <b>this</b> device</label>
+            <label class="jb-switch jb-mb" title="Leave this ON. Each device is a DIFFERENT player, so its posts are that player's own events — turning it off just silences that account. It is not a duplicate guard."><input type="checkbox" id="jb-dc-device" ${dc.thisDevice?'checked':''}> 📮 Post from <b>this</b> device</label>
             <button class="jb-btn" id="jb-dc-test">Test Discord</button>
-            <div class="jb-sub jb-mb" style="color:var(--jb-text-ter);font-size:9px;margin-top:6px"><b>Each event posts once.</b> Rank-ups are keyed by the rank change and witness statements by their mail, so neither can post twice however often it is re-detected, and only the master tab posts. The one thing the script cannot see is your <b>other devices</b> — they each have their own storage, so if two are running they would both post. Turn "post from this device" off everywhere except one.<br>Independent of Telegram; they share the retry queue, so a post interrupted by a page change is redelivered rather than lost.<br><b>The URL is stored on this device only</b> and is deliberately not built into the script: this repo is public and the script is served raw from GitHub, so a webhook in the source would be one anyone could post to.</div>
+            <div class="jb-sub jb-mb" style="color:var(--jb-text-ter);font-size:9px;margin-top:6px"><b>Each event posts once.</b> Rank-ups are keyed by the rank change and witness statements by their mail, so neither can post twice however often it is re-detected, and only the master tab posts. Your <b>other devices are different players</b>, so their posts are their own events, not copies of yours — <b>leave "post from this device" ON everywhere</b>. Switch it off only if you want that particular account to stop posting.<br>Independent of Telegram; they share the retry queue, so a post interrupted by a page change is redelivered rather than lost.<br><b>The URL is stored on this device only</b> and is deliberately not built into the script: this repo is public and the script is served raw from GitHub, so a webhook in the source would be one anyone could post to.</div>
             <hr class="jb-sep">
             <div class="jb-sect-title">Ready reminders</div>
             <div class="jb-sub jb-mb" style="color:var(--jb-text-ter);font-size:9px">The OC/DTM ready alert fires once. Miss it and a finished 2h cooldown can sit unused all evening with nothing to say so. These re-ping while it is <b>still</b> ready, and stop the moment you use it.</div>
