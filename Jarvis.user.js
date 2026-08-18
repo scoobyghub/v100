@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.268
+// @version      2000.269
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -33,7 +33,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.268
+/*  Jarvis Bot 2000.269
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -120,7 +120,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.268';
+  const APP_VERSION = '2000.269';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -4865,6 +4865,7 @@
   const SG_ALLIED_URL  = 'https://starvinggeeks.net/helper/allied.php';
   const SG_WATCHED_URL = 'https://starvinggeeks.net/helper/watched.php';
   const SG_TTL_MS = 5 * 60 * 1000;
+  const SG_RETRY_MS = 30 * 1000;   // a failed/interrupted attempt may retry this soon
 
   const sgCfg = { on: GM_getValue('cbSgOn', false) };
   function saveSgCfg() { GM_setValue('cbSgOn', sgCfg.on); }
@@ -4898,10 +4899,29 @@
   let _sgFetching = false;
   async function fetchSgLists(force) {
     if (!sgCfg.on || _sgFetching) return;
-    const last = GM_getValue('cbSgLastFetch', 0);
-    if (!force && Date.now() - last < SG_TTL_MS) return;
+    /* THE THROTTLE USED TO BLOCK ON AN ATTEMPT, NOT A SUCCESS (2000.269).
+     *
+     * This is why the colours only appeared after toggling the switch off and on.
+     * cbSgLastFetch was stamped BEFORE the awaits, and Jarvis navigates every
+     * couple of seconds — so the page died mid-fetch, the lists were never
+     * stored, and the stamp then blocked every retry for five minutes. Every
+     * subsequent page load skipped the fetch and had nothing to colour with.
+     * Toggling the switch called fetchSgLists(true), which bypasses the
+     * throttle — hence "it works if you turn it off and on again".
+     *
+     * Two clocks now: lastOk gates the 5-minute freshness, lastTry only stops a
+     * dead endpoint being hammered. And with NO list data at all the freshness
+     * gate does not apply — having nothing to colour with is not a state worth
+     * preserving for five minutes. */
+    const haveAny = (sgSafe.length + sgAllied.length + sgWatched.length) > 0;
+    const lastOk  = GM_getValue('cbSgLastOk', 0);
+    const lastTry = GM_getValue('cbSgLastTry', 0);
+    if (!force) {
+      if (haveAny && Date.now() - lastOk < SG_TTL_MS) return;   // fresh enough already
+      if (Date.now() - lastTry < SG_RETRY_MS) return;           // don't hammer a dead endpoint
+    }
     _sgFetching = true;
-    GM_setValue('cbSgLastFetch', Date.now());   // stamp first, so a failing endpoint isn't hammered
+    GM_setValue('cbSgLastTry', Date.now());
     const pull = async (url, key, label) => {
       try {
         const list = sgNorm(await sgGetJson(url));
@@ -4921,6 +4941,9 @@
     if (s) sgSafe = s;
     if (a) sgAllied = a;
     if (w) sgWatched = w;
+    // Only a real result refreshes the freshness clock.
+    if (s || a || w) GM_setValue('cbSgLastOk', Date.now());
+    else console.warn(APP_TAG, '[SG] All three list fetches failed — will retry shortly');
     _sgFetching = false;
     try { colourPlayerLinks(); } catch(_){}
   }
@@ -4942,8 +4965,11 @@
     (root || document).querySelectorAll('a[href*="profile.aspx?id="]').forEach(a => {
       const hit = sgLookup(a.textContent);
       if (!hit) return;
-      a.style.color = hit.colour;
-      a.style.fontWeight = 'bold';
+      /* !important: the game sets its own inline colours on these links (your
+       * own name in #AA0000, staff in #FF9900), so a plain assignment can be
+       * overwritten when the page re-renders a row. */
+      a.style.setProperty('color', hit.colour, 'important');
+      a.style.setProperty('font-weight', 'bold', 'important');
     });
   }
 
@@ -4961,6 +4987,12 @@
     _sgInited = true;
     fetchSgLists();
     colourPlayerLinks();
+    /* Paint again when the page has finished loading and once more shortly
+     * after. init() runs at DOMContentLoaded, so a single paint there can land
+     * before the last rows exist — and the observer below only sees childList
+     * changes in the light DOM, which a same-row restyle does not produce. */
+    window.addEventListener('load', () => { try { colourPlayerLinks(); } catch(_){} }, { once:true });
+    setTimeout(() => { try { colourPlayerLinks(); } catch(_){} }, 1200);
     // Re-colour links added by postbacks/AJAX.
     new MutationObserver(scheduleColourPaint).observe(document.body, { childList:true, subtree:true });
   }
