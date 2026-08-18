@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.269
+// @version      2000.270
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -33,7 +33,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.269
+/*  Jarvis Bot 2000.270
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -120,7 +120,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.269';
+  const APP_VERSION = '2000.270';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -5584,7 +5584,7 @@
       if (si && sb && !sb.disabled) {
         const cur = parseInt(row.querySelector('td:nth-child(3)').textContent.trim());
         si.value = boozeSellQty(cur);
-        snapshotXP('booze');
+        snapshotXP('booze', 'booze-sell');   // the one that actually earns
         sb.click(); incDailyCount('booze');
         localStorage.removeItem('cbBoozeBroke');   // sold = cash back
         st.lastBooze = now; markActed('booze', cfg.boozeInt); st.refresh = true; donePending('booze'); saveSt();
@@ -5599,7 +5599,7 @@
       const qty = boozeBuyQty();
       c.inp.value = qty;
       try { c.inp.dispatchEvent(new Event('input',{bubbles:true})); c.inp.dispatchEvent(new Event('change',{bubbles:true})); } catch(_){}
-      snapshotXP('booze'); c.btn.click(); incDailyCount('booze');
+      snapshotXP('booze', 'booze-buy'); c.btn.click(); incDailyCount('booze');   // earns nothing
       localStorage.removeItem('cbBoozeBroke');
       st.lastBooze = now; markActed('booze', cfg.boozeInt); st.refresh = true; donePending('booze'); saveSt();
       setTimeout(() => { st.acting = false; st.action = ''; GM_setValue('cbActStart',0); }, 400 + Math.floor(Math.random()*300));
@@ -10019,11 +10019,15 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
     try { localStorage.setItem(LS_XP_PENDING, JSON.stringify(p)); } catch(_) {}
   }
 
-  function snapshotXP(action) {
+  /* `note` is what shows in the "what this reading covered" mix; `action` is
+   * still what the XP gets attributed to. They differ for booze, where a BUY and
+   * a SELL both fire but only the sell earns — showing both as plain "booze×2"
+   * made a reading look like two earning events when it was one. */
+  function snapshotXP(action, note) {
     const snap = { action, t: Date.now() };
     GM_setValue('cbXpSnapshot', snap);
     GM_setValue('cbXpStreakSnap', snap);
-    _xpQueue(action);
+    _xpQueue(note || action);
   }
 
   /* QUIET snapshot — records that the action happened, but does NOT claim the
@@ -10350,7 +10354,11 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
 
     const mins = (Date.now() - xpState.sessionStart) / 60000;
     const rate = mins >= 2 ? ((xpState.sessionGain / mins) * 60).toFixed(1) : '…';
-    console.log(`${APP_TAG}[XP] +${gained}${source==='bar'?'≈':''} [${ACTION_ICON[action]||''}${action}] | session +${xpState.sessionGain} | total ${xp.toFixed(2)} | ${rate}/hr`);
+    /* The RAW pair, at full precision. "+0.08 covering 7 actions" is impossible
+     * to reason about without knowing what the two underlying readings were —
+     * whether the feed moves in fixed steps, or genuinely only one of those
+     * seven actions earned anything. Measure it, do not infer it. */
+    console.log(`${APP_TAG}[XP] +${gained}${source==='bar'?'≈':''} [${ACTION_ICON[action]||''}${action}] | raw ${prev} → ${xp} | covered ${covered.length}${covered.length ? ' (' + xpMixSummary(covered) + ')' : ''} | session +${xpState.sessionGain} | ${rate}/hr`);
   }
 
   function maybeFeedNoXpLimiter(gained) {
