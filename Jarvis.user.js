@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.263
+// @version      2000.264
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -33,7 +33,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.263
+/*  Jarvis Bot 2000.264
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -120,7 +120,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.263';
+  const APP_VERSION = '2000.264';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -9200,6 +9200,30 @@
        * reads a container holding more than one radio. */
       const radios = [...document.querySelectorAll('input[type=radio][name="ctl00$main$citieslist"]')];
 
+      /* NO DESTINATION LIST AT ALL (2000.264).
+       *
+       * This is what produced "couldn't identify Toronto in the destination
+       * list" on a build where travel otherwise worked. There was nothing to
+       * choose FROM: the page served no radios, because the game was not
+       * offering travel at that moment — our local countdown said Ready and the
+       * server disagreed.
+       *
+       * That is a TIMER problem reported as a MATCHING problem, and it is what
+       * sent 2000.259 and 2000.263 rummaging through the label resolver twice.
+       * Zero radios must never reach the matcher: with cities empty, "none
+       * matched" is trivially true and the old message blamed the city.
+       *
+       * Re-read the real cooldown so the local countdown resyncs, say plainly
+       * what happened, and don't raise the wrong alarm. */
+      if (!radios.length) {
+        console.warn(APP_TAG, '[TRAVEL] No destinations offered on the travel page — the game is not letting us fly yet, so the stored cooldown was optimistic. Re-reading it.');
+        setStatus('✈️ Not travelable yet — re-checking');
+        localStorage.removeItem(LS_TRAVEL_PENDING);
+        try { bgSetDue('travel', 0); } catch(_){}   // re-read on the next tick too
+        try { fetchTravel(); } catch(_){}
+        return false;
+      }
+
       const labelOf = r => {
         // 1. <label for="id"> — what ASP.NET actually emits, and unambiguous.
         if (r.id) {
@@ -9263,7 +9287,7 @@
          * read at all" look identical from outside but mean very different
          * things — the second is a markup problem in labelOf(), and not saying
          * so is why the 2000.259 refusal took days to pin down. */
-        const unlabelled = cities.filter(c => !c.label).length;
+        const unlabelled = cities.length ? cities.filter(c => !c.label).length : -1;
         console.warn(APP_TAG, near.length
           ? `[TRAVEL] "${hotCity}" matched ${near.length} destinations (${near.map(c=>c.label).join(' / ')}) — refusing to guess`
           : `[TRAVEL] No destination matches "${hotCity}"${unlabelled === cities.length ? ` — and NONE of the ${cities.length} destinations had a readable label, so this is a markup problem, not a missing city` : ``} — not travelling`);
