@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.265
+// @version      2000.266
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -33,7 +33,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.265
+/*  Jarvis Bot 2000.266
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -120,7 +120,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.265';
+  const APP_VERSION = '2000.266';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -1222,6 +1222,30 @@
     thisDevice: GM_getValue('cbDcThisDevice', true)
   };
 
+  /* ONE-TIME REPAIR OF A SETTING WE TOLD YOU TO SET WRONG (2000.266).
+   *
+   * 2000.252/253 shipped on the false premise that the four installs were one
+   * account on four machines, and instructed: "leave this ON for one device and
+   * OFF for the rest." Each device is a different PLAYER, so anyone who followed
+   * that muted three players entirely.
+   *
+   * 2000.265 corrected the wording — but wording does not un-flip a switch. The
+   * stored false is still false, and a muted player looks exactly like a webhook
+   * that has stopped working, which is what prompted this.
+   *
+   * So: turn it back on ONCE, say so loudly, and never touch it again. Anyone
+   * who genuinely wants this account silent can switch it off and it stays off,
+   * because the flag below is already set.
+   */
+  if (!GM_getValue('cbDcDeviceAdviceFixed', false)) {
+    GM_setValue('cbDcDeviceAdviceFixed', true);
+    if (dc.thisDevice === false) {
+      dc.thisDevice = true;
+      GM_setValue('cbDcThisDevice', true);
+      console.warn(APP_TAG, '[DC] "Post from this device" was OFF — almost certainly from the incorrect advice in 2000.252/253. Each device is a DIFFERENT player, so that setting silenced this account entirely. Turned back ON. Switch it off again in Settings if you really do want this account quiet.');
+    }
+  }
+
   function saveDc() {
     GM_setValue('cbDcEnabled', dc.enabled);
     GM_setValue('cbDcUrl', dc.url);
@@ -1330,11 +1354,27 @@
     _deferTgQ(id, Date.now() + Math.min(60000, 2000 * attempts));
   }
 
+  /* The queue is SHARED with Telegram, which sends far more traffic (28-odd
+   * message categories). The cap used to drop the oldest items outright, so a
+   * Discord post could be evicted by a burst of Telegram ones before it was ever
+   * sent. Telegram messages are the expendable ones — Discord carries rank-ups,
+   * witness statements and script checks, and there are only ever a handful. */
+  function _capTgQ(q, max) {
+    if (q.length <= max) return q;
+    while (q.length > max) {
+      const i = q.findIndex(it => it.dest !== 'dc');   // oldest Telegram item first
+      if (i === -1) break;                             // all Discord — keep them all
+      q.splice(i, 1);
+    }
+    if (q.length > max) q.splice(0, q.length - max);   // still over: they are all Discord
+    return q;
+  }
+
   function sendTg(msg) {
     if (!tg.enabled || !tg.token || !tg.chat) return;
     const q = _loadTgQ();
     q.push({ id: Date.now() + '_' + Math.random().toString(36).slice(2, 7), msg, attempts: 0, nextAt: 0 });
-    if (q.length > 50) q.splice(0, q.length - 50); // cap storage during a long outage
+    _capTgQ(q, 50);   // evicts Telegram before Discord — see _capTgQ
     _saveTgQ(q);
     pumpTgQueue();
   }
@@ -1357,7 +1397,7 @@
     }
     q.push({ id: Date.now() + '_' + Math.random().toString(36).slice(2, 7),
              dest: 'dc', payload, attempts: 0, nextAt: 0 });
-    if (q.length > 50) q.splice(0, q.length - 50);
+    _capTgQ(q, 50);
     _saveTgQ(q);
     pumpTgQueue();
   }
@@ -1548,8 +1588,11 @@
   // `key` identifies the EVENT. Returns true if it was actually queued.
   function dcSendOnce(bucket, key, embed, content) {
     if (!dcConfigured()) return false;
-    if (!dc.thisDevice) { dlog(APP_TAG, '[DC] This device is set not to post — skipping'); return false; }
-    if (!tabs.isMaster)  { dlog(APP_TAG, '[DC] Not the master tab — skipping'); return false; }
+    /* These two were dlog() — invisible unless verbose debug was on. A Discord
+     * post silently not happening is exactly the case you need to SEE, so they
+     * are plain logs now. */
+    if (!dc.thisDevice) { console.warn(APP_TAG, `[DC] NOT POSTING ${bucket}: this device is set not to post. Each device is a different player — this should normally be ON.`); return false; }
+    if (!tabs.isMaster)  { console.warn(APP_TAG, `[DC] NOT POSTING ${bucket}: this tab is not the master tab.`); return false; }
     if (!seenOnce(bucket, key, 60)) { console.log(APP_TAG, `[DC] Already posted ${bucket}:${key} — not posting again`); return false; }
     if (dcRecentlySent(embed)) return false;
     sendDiscord(embed, content);
@@ -3643,13 +3686,25 @@
       // the NAME changing (model-independent), which also marks the XP charts.
       try {
         if (bar.rank) {
-          if (rankState.lastName && bar.rank !== rankState.lastName) {
-            onRankUp(rankState.lastName, bar.rank);
-          }
           rankState.name = bar.rank;
-          rankState.lastName = bar.rank;
           GM_setValue('cbRankName', rankState.name);
-          GM_setValue('cbRankLastName', rankState.lastName);
+          /* THE TRANSITION IS THE MASTER TAB'S TO CONSUME (2000.266).
+           *
+           * updateTimers runs in EVERY tab, and this used to write
+           * cbRankLastName from any of them. A non-master tab would therefore
+           * see the change, store the new name — and then be refused by
+           * dcSendOnce for not being master. The master tab, re-reading that
+           * already-updated name, never saw a transition at all, so the rank-up
+           * was swallowed and nothing posted anywhere.
+           *
+           * Only the tab allowed to ANNOUNCE the change may record it. */
+          if (tabs.isMaster) {
+            if (rankState.lastName && bar.rank !== rankState.lastName) {
+              onRankUp(rankState.lastName, bar.rank);
+            }
+            rankState.lastName = bar.rank;
+            GM_setValue('cbRankLastName', rankState.lastName);
+          }
         }
         if (typeof bar.rankPct === 'number') {
           rankState.pct = bar.rankPct;
