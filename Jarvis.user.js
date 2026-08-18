@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.267
+// @version      2000.268
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -33,7 +33,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.267
+/*  Jarvis Bot 2000.268
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -120,7 +120,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.267';
+  const APP_VERSION = '2000.268';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -9367,8 +9367,14 @@
       }
 
       const cityRadio = near[0].r;
-      cityRadio.checked = true;
-      try { cityRadio.dispatchEvent(new Event('change', {bubbles:true})); } catch(_){}
+      /* click() rather than .checked = true (2000.268): it is the native path,
+       * so the browser clears the rest of the group and fires the events the
+       * page's own handlers may be listening for. Assignment does neither. */
+      try { cityRadio.click(); } catch(_){}
+      if (!cityRadio.checked) {
+        cityRadio.checked = true;
+        try { cityRadio.dispatchEvent(new Event('change', {bubbles:true})); } catch(_){}
+      }
       // Log the RESOLVED LABEL, not just the id — without it a wrong pick is invisible.
       console.log(`[JB][TRAVEL] Selected "${near[0].label}" (${cityRadio.id}, value ${cityRadio.value}) for hot city ${hotCity}`);
 
@@ -9389,8 +9395,37 @@
         const travelBtn = document.getElementById('ctl00_main_btnTravelPrivate') ||
                           [...document.querySelectorAll('input[type="submit"]')].find(b => /private\s*jet/i.test(b.value||''));
 
+        /* RE-CHECK THE SELECTION LIVE, IMMEDIATELY BEFORE FLYING (2000.268).
+         *
+         * Reported: aimed for Toronto, landed in Amsterdam. The destination is
+         * chosen and then 0.5-1s passes before Travel is pressed, and nothing
+         * confirmed the choice had stuck. If the page re-renders in that window,
+         * or the form simply retains an earlier selection, THAT city wins and we
+         * fly somewhere we never chose — Amsterdam being the previously cached
+         * hot city fits exactly.
+         *
+         * Same rule the DTM kick already follows: re-read the live state right
+         * before an irreversible act, never trust what was true a second ago.
+         * A refused flight costs nothing; a wrong one costs the 20-minute
+         * cooldown and leaves you in the wrong city. */
+        const liveSel = document.querySelector('input[type=radio][name="ctl00$main$citieslist"]:checked');
+        if (liveSel !== cityRadio) {
+          console.warn(APP_TAG, `[TRAVEL] Destination slipped before takeoff — expected ${cityRadio.id} (${hotCity}), the page has ${liveSel ? liveSel.id + ' value ' + liveSel.value : 'nothing'} selected. Re-selecting.`);
+          try { cityRadio.click(); } catch(_){}
+          if (!cityRadio.checked) cityRadio.checked = true;
+        }
+        const finalSel = document.querySelector('input[type=radio][name="ctl00$main$citieslist"]:checked');
+        if (finalSel !== cityRadio) {
+          console.error(APP_TAG, `[TRAVEL] REFUSING to fly — could not keep ${hotCity} selected (page has ${finalSel ? finalSel.id : 'nothing'}). Not guessing a destination.`);
+          tgOnce('travel_slip', 900, `✈️ <b>Travel aborted</b>
+${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page — refused rather than fly somewhere else`);
+          setStatus('✈️ Destination would not stay selected — aborted');
+          localStorage.removeItem(LS_TRAVEL_PENDING);
+          return;
+        }
+
         if (travelBtn && !travelBtn.disabled) {
-          console.log('[JB][TRAVEL] Taking the private jet (20m cooldown)');
+          console.log(`[JB][TRAVEL] Taking the private jet to ${hotCity} (20m cooldown), destination confirmed as ${cityRadio.id}`);
 
           /* EVERY PIECE OF BOOKKEEPING HAPPENS BEFORE THE CLICK (2000.257).
            *
