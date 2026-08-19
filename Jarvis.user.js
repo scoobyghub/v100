@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.271
+// @version      2000.272
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -33,7 +33,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.271
+/*  Jarvis Bot 2000.272
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -120,7 +120,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.271';
+  const APP_VERSION = '2000.272';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -9497,7 +9497,10 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
         }
 
         if (travelBtn && !travelBtn.disabled) {
-          console.log(`[JB][TRAVEL] Taking the private jet to ${hotCity} (20m cooldown), destination confirmed as ${cityRadio.id}`);
+          /* Log the VALUE and the LABEL, not just the element id. When a flight
+           * still lands in the wrong city, the only question that matters is
+           * what was actually posted — an id alone cannot answer it. */
+          console.log(`[JB][TRAVEL] Taking the private jet to ${hotCity} — posting ${cityRadio.id} value=${cityRadio.value} label="${near[0].label}" (20m cooldown)`);
 
           /* EVERY PIECE OF BOOKKEEPING HAPPENS BEFORE THE CLICK (2000.257).
            *
