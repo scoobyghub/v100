@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.270
+// @version      2000.271
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -33,7 +33,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.270
+/*  Jarvis Bot 2000.271
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -120,7 +120,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.270';
+  const APP_VERSION = '2000.271';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -6514,8 +6514,17 @@
     return m ? parseFloat(m[1].replace(/,/g, '')) : null;
   }
 
+  // Owned already? The buy link is absent once you have it — see doScrap.
+  function armVehDone() { return GM_getValue('cbArmVehDone', false); }
+
   function scrapDue() {
-    if (!cfg.scrapOn || st.inJail || st.acting || paused) return false;
+    /* The Armoured Vehicle protection is bought ON the scrap page, so this used
+     * to require cfg.scrapOn — meaning ticking "buy the protection" on its own
+     * did nothing whatsoever, because nothing ever navigated to the store. The
+     * two are presented as independent switches, so either must be able to get
+     * us there. Once the protection is owned it stops being a reason to go. */
+    const wantProt = cfg.scrapProt && !armVehDone();
+    if ((!cfg.scrapOn && !wantProt) || st.inJail || st.acting || paused) return false;
     const due = scrapNextDue();
     return !due || Date.now() >= due;
   }
@@ -6554,6 +6563,49 @@
       return false;
     }
 
+    /* THE PROTECTION IS DECIDED BEFORE THE RESERVE FLOOR (2000.271).
+     *
+     * This block used to sit BELOW the floor check, which returns "nothing to
+     * convert" and leaves — so any reserve set above your scrap balance made the
+     * Armoured Vehicle permanently unreachable. The floor exists to stop
+     * repeated FMJ conversion draining your scrap; a ONE-OFF 5-scrap protection
+     * purchase is not that. The reference script has no floor here at all and
+     * checks only that you can afford the 5.
+     *
+     * The buy link is absent once you own it, so its presence is the game itself
+     * telling us this is still available. */
+    const protLink = document.getElementById('ctl00_main_lbBuyArmVehProtection');
+    const fmjLink  = document.getElementById('ctl00_main_lbBuy1kFMJScrap');
+
+    if (!protLink && fmjLink && !armVehDone()) {
+      /* Store page rendered, FMJ link present, protection link gone — it is
+       * already owned. Record that so "protection only" stops bringing us back. */
+      GM_setValue('cbArmVehDone', true);
+      console.log(APP_TAG, '[SCRAP] Armoured Vehicle protection already owned — not checking again');
+    }
+
+    if (protLink && cfg.scrapProt) {
+      if (scrap < SCRAP_COST) {
+        console.log(APP_TAG, `[SCRAP] Armoured Vehicle needs ${SCRAP_COST} scrap, balance is ${scrap} — waiting`);
+        done(SCRAP_IDLE_MS, `♻️ Need ${SCRAP_COST} scrap for the vehicle`);
+        return false;
+      }
+      console.log(APP_TAG, `[SCRAP] Buying Armoured Vehicle protection (${SCRAP_COST} scrap, balance ${scrap})`);
+      tgMsg('crusher', `🛡️ <b>Armoured Vehicle</b>\n${st.player||'?'} | protection bought (${SCRAP_COST} scrap)`);
+      GM_setValue('cbArmVehDone', true);
+      setScrapNext(8000);
+      await humanWait([2200, 2600]);   // stay clear of the ~2s page limiter
+      scrapPostBack('ctl00$main$lbBuyArmVehProtection');
+      return true;
+    }
+
+    /* We only came here for the protection and it is dealt with — do not start
+     * converting scrap the user never asked to convert. */
+    if (!cfg.scrapOn) {
+      done(SCRAP_IDLE_MS, '♻️ Vehicle protection handled');
+      return false;
+    }
+
     const floor = Math.max(SCRAP_COST, Number(cfg.scrapFloor) || SCRAP_COST);
     if (scrap < floor || scrap < SCRAP_COST) {
       console.log(APP_TAG, `[SCRAP] ${scrap} scrap left (floor ${floor}) — nothing to convert`);
@@ -6561,19 +6613,7 @@
       return false;
     }
 
-    /* Armoured Vehicle protection costs 5 scrap and the link only exists while
-     * you don't own it, so grab it once before spending scrap on bullets. */
-    const protLink = document.getElementById('ctl00_main_lbBuyArmVehProtection');
-    if (protLink && cfg.scrapProt && scrap >= 5) {
-      console.log(APP_TAG, '[SCRAP] Buying Armoured Vehicle protection (5 scrap)');
-      tgMsg('crusher', `🛡️ <b>Armoured Vehicle</b>\n${st.player||'?'} | protection bought (5 scrap)`);
-      setScrapNext(8000);
-      await humanWait([2200, 2600]);   // stay clear of the ~2s page limiter
-      scrapPostBack('ctl00$main$lbBuyArmVehProtection');
-      return true;
-    }
-
-    const buyLink = document.getElementById('ctl00_main_lbBuy1kFMJScrap');
+    const buyLink = fmjLink;
     if (!buyLink) {
       console.warn(APP_TAG, '[SCRAP] Buy link not found — backing off 30m');
       done(30 * 60 * 1000, '♻️ Scrap buy link missing');
@@ -7510,13 +7550,13 @@
             <hr class="jb-sep">
             <div class="jb-sect-title">Scrap → FMJ</div>
             <label class="jb-switch jb-mb" title="Converts scrap into bullets at store.aspx?p=s — 5 scrap per 1000 FMJ. One purchase per page load to stay under the game's ~2s rate limit."><input type="checkbox" id="jb-scrap-on" ${cfg.scrapOn?'checked':''}> ♻️ Convert scrap to FMJ</label>
-            <label class="jb-switch jb-mb" title="Armoured Vehicle protection costs 5 scrap and the link only appears while you don't own it. Bought once, before any bullets."><input type="checkbox" id="jb-scrap-prot" ${cfg.scrapProt?'checked':''}> 🛡️ Buy Armoured Vehicle protection first</label>
+            <label class="jb-switch jb-mb" title="Armoured Vehicle protection costs 5 scrap. The link only appears while you don't own it, so it is bought once, before any bullets. This works on its own — the scrap-to-FMJ switch above does NOT have to be on."><input type="checkbox" id="jb-scrap-prot" ${cfg.scrapProt?'checked':''}> 🛡️ Buy Armoured Vehicle protection first</label>
             <div class="jb-row jb-mb">
               <label class="jb-label" style="white-space:nowrap">Keep at least:</label>
               <input class="jb-input jb-input-sm" type="number" id="jb-scrap-floor" value="${cfg.scrapFloor}" min="5" max="10000" step="5">
               <span class="jb-sub">scrap in reserve</span>
             </div>
-            <div class="jb-sub jb-mb" style="color:var(--jb-text-ter);font-size:9px">Below the reserve it stops and re-checks in 6 hours. Converted so far: <span id="jb-scrap-runs">${GM_getValue('cbScrapRuns',0)}</span>k FMJ.</div>
+            <div class="jb-sub jb-mb" style="color:var(--jb-text-ter);font-size:9px">Below the reserve it stops and re-checks in 6 hours. <b>The reserve does not block the Armoured Vehicle</b> — that is a one-off 5-scrap purchase and is made before the reserve is considered. Converted so far: <span id="jb-scrap-runs">${GM_getValue('cbScrapRuns',0)}</span>k FMJ.</div>
             </div>
             <div class="jb-pane" data-pane="alerts">
             <div class="jb-sect-title">Telegram</div>
