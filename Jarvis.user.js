@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.273
+// @version      2000.274
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -33,7 +33,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.273
+/*  Jarvis Bot 2000.274
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -120,7 +120,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.273';
+  const APP_VERSION = '2000.274';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -9237,6 +9237,10 @@
    * retried on a loop — see doAutoTravel. */
   const LS_TRAVEL_ACTED = 'cbTravelJustActed';
   const TRAVEL_RETRY_MS = 30000;
+  /* How long the status bar may still show the take-off city before we treat the
+   * flight as not having happened. It is a postback plus a page load, so this is
+   * generous on purpose — a false "travel went wrong" is worse than a late one. */
+  const TRAVEL_SETTLE_MS = 90000;
 
   // Check if we're currently in the hot city
   function isInHot() {
@@ -9251,53 +9255,57 @@
   async function doAutoTravel() {
     if (!st.autoTravel || st.inJail || st.acting || paused) return false;
 
-    /* DID THE LAST FLIGHT LAND WHERE IT WAS AIMED? (2000.259)
+    /* DID THE LAST FLIGHT LAND WHERE IT WAS AIMED? (2000.274)
      *
-     * Nothing used to check. The destination was chosen, the button clicked, and
-     * that was the end of it — so travelling to the wrong city looked exactly like
-     * travelling to the right one, and the only way to notice was to be watching
-     * the panel at the time. The intended city is now recorded at click time and
-     * compared against where we actually ended up. */
+     * THE ORIGIN IS THE MISSING PIECE. This compared the status bar against the
+     * intended city and called any difference a wrong landing — but the check
+     * runs on the postback response, whose status bar is still the PRE-FLIGHT
+     * render. So a perfectly good flight reported "aimed at New York, landed in
+     * Paris", where Paris was simply where you took off FROM.
+     *
+     * Knowing the origin makes the three cases separable:
+     *   · showing the destination  → arrived, done.
+     *   · still showing the origin → the page has not caught up. Say nothing and
+     *     look again next tick; only complain if it is STILL the origin after
+     *     TRAVEL_SETTLE_MS, which would mean the flight really did not happen.
+     *   · somewhere else entirely  → genuinely wrong, and worth an alert.
+     *
+     * 2000.273 switched auto-travel off after two "wrong" arrivals. That is
+     * removed: the premise was false, travel was working, and it would have
+     * disabled a working feature on the strength of this bug. */
     try {
       const want = localStorage.getItem('cbTravelWanted');
       if (want) {
         const cur = getCurCity();
         if (cur) {                                   // status bar has rendered
-          localStorage.removeItem('cbTravelWanted');
-          /* Tolerant both ways, exactly like isInHot(). A false "went wrong"
-           * after a flight that worked is worse than useless: it trains you to
-           * ignore the one alert that would matter if it were ever real. */
-          const a = cur.trim().toLowerCase(), b = want.trim().toLowerCase();
-          const arrived = a === b || a.includes(b) || b.includes(a);
-          if (!arrived) {
-            /* TWO WRONG ARRIVALS AND AUTO-TRAVEL STOPS (2000.273).
-             *
-             * It used to alert and carry straight on, so a destination that will
-             * not stick costs a 20-minute cooldown EVERY cycle, all day, and
-             * leaves you in a city you did not choose each time. The alert also
-             * throttles to one per 15 minutes, so the repeats were near-silent.
-             *
-             * Two in a row is not bad luck — something is genuinely wrong, and
-             * the honest response is to stop and say so rather than keep paying
-             * the cooldown. One is forgiven, because a hot-city change or a
-             * manual flight between the click and the check can explain a single
-             * mismatch. A correct arrival clears the count. */
-            const miss = (parseInt(localStorage.getItem('cbTravelMiss') || '0', 10) || 0) + 1;
-            localStorage.setItem('cbTravelMiss', String(miss));
-            console.warn(APP_TAG, `[TRAVEL] Aimed at "${want}" but ended up in "${cur}" (miss ${miss})`);
-            if (miss >= 2) {
-              localStorage.removeItem('cbTravelMiss');
-              st.autoTravel = false; saveSt(); repaintRibbon();
-              try { const cb = _shadow && _shadow.querySelector('#jb-auto-travel'); if (cb) cb.checked = false; } catch(_){}
-              console.error(APP_TAG, '[TRAVEL] Two wrong arrivals in a row — auto-travel switched OFF. Check the [JB][TRAVEL] lines above for which destination was posted.');
-              tgMsg('travel', `🛑 <b>Auto-travel OFF</b>\n${st.player||'?'} | landed wrong twice (aimed <b>${esc(want)}</b>, got <b>${esc(cur)}</b>) — stopped rather than keep burning the cooldown`);
-              setStatus('🛑 Auto-travel off — landed wrong twice');
+          const from = localStorage.getItem('cbTravelFrom') || '';
+          const at   = parseInt(localStorage.getItem('cbTravelWantedAt') || '0', 10) || 0;
+          /* Tolerant both ways, exactly like isInHot(). A false alarm on the
+           * happy path is worse than no alarm — it trains you to ignore the one
+           * message that would matter if it were ever real. */
+          const same = (x, y) => {
+            const p = String(x||'').trim().toLowerCase(), q = String(y||'').trim().toLowerCase();
+            return !!p && !!q && (p === q || p.includes(q) || q.includes(p));
+          };
+          const clear = () => { ['cbTravelWanted','cbTravelFrom','cbTravelWantedAt']
+                                  .forEach(k => localStorage.removeItem(k)); };
+
+          if (same(cur, want)) {
+            clear();
+            dlog(APP_TAG, `[TRAVEL] Arrived in ${cur} as intended`);
+          } else if (from && same(cur, from)) {
+            // Still reading the take-off city: the page simply has not caught up.
+            if (at && Date.now() - at > TRAVEL_SETTLE_MS) {
+              clear();
+              console.warn(APP_TAG, `[TRAVEL] Still in "${cur}" ${Math.round((Date.now()-at)/1000)}s after aiming at "${want}" — the flight does not appear to have happened`);
+              tgOnce('travel_stuck', 1800, `✈️ <b>Travel didn't happen</b>\n${st.player||'?'} | still in <b>${esc(cur)}</b>, was aiming for <b>${esc(want)}</b>`);
             } else {
-              tgOnce('travel_wrong', 900, `⚠️ <b>Travel went wrong</b>\n${st.player||'?'} | aimed at <b>${esc(want)}</b>, landed in <b>${esc(cur)}</b>`);
+              dlog(APP_TAG, `[TRAVEL] Status bar still shows ${cur} (take-off city) — waiting for it to catch up`);
             }
           } else {
-            localStorage.removeItem('cbTravelMiss');
-            dlog(APP_TAG, `[TRAVEL] Arrived in ${cur} as intended`);
+            clear();
+            console.warn(APP_TAG, `[TRAVEL] Aimed at "${want}" from "${from||'?'}" but the status bar reads "${cur}"`);
+            tgOnce('travel_wrong', 900, `⚠️ <b>Travel went wrong</b>\n${st.player||'?'} | aimed at <b>${esc(want)}</b>, ended up in <b>${esc(cur)}</b>`);
           }
         }
       }
@@ -9558,6 +9566,11 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
            * never match, so the "travel went wrong" warning fired after every
            * SUCCESSFUL flight. */
           localStorage.setItem('cbTravelWanted', hotCity);
+          /* And where we are RIGHT NOW. Without it, the arrival check cannot tell
+           * "the page has not refreshed yet" from "we landed somewhere wrong" —
+           * which is exactly how a good flight got reported as a bad one. */
+          localStorage.setItem('cbTravelFrom', getCurCity() || '');
+          localStorage.setItem('cbTravelWantedAt', String(Date.now()));
           // Survives the postback, so checkStuck() doesn't call this a stall.
           localStorage.setItem('cbActionLockUntil', String(Date.now() + 8000));
           storeTravel({ cd: 20*60, canNormal: false, at: Date.now() });   // jet is always 20 min
