@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.272
+// @version      2000.273
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -33,7 +33,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.272
+/*  Jarvis Bot 2000.273
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -120,7 +120,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.272';
+  const APP_VERSION = '2000.273';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -9270,9 +9270,33 @@
           const a = cur.trim().toLowerCase(), b = want.trim().toLowerCase();
           const arrived = a === b || a.includes(b) || b.includes(a);
           if (!arrived) {
-            console.warn(APP_TAG, `[TRAVEL] Aimed at "${want}" but ended up in "${cur}"`);
-            tgOnce('travel_wrong', 900, `⚠️ <b>Travel went wrong</b>\n${st.player||'?'} | aimed at <b>${esc(want)}</b>, landed in <b>${esc(cur)}</b>`);
+            /* TWO WRONG ARRIVALS AND AUTO-TRAVEL STOPS (2000.273).
+             *
+             * It used to alert and carry straight on, so a destination that will
+             * not stick costs a 20-minute cooldown EVERY cycle, all day, and
+             * leaves you in a city you did not choose each time. The alert also
+             * throttles to one per 15 minutes, so the repeats were near-silent.
+             *
+             * Two in a row is not bad luck — something is genuinely wrong, and
+             * the honest response is to stop and say so rather than keep paying
+             * the cooldown. One is forgiven, because a hot-city change or a
+             * manual flight between the click and the check can explain a single
+             * mismatch. A correct arrival clears the count. */
+            const miss = (parseInt(localStorage.getItem('cbTravelMiss') || '0', 10) || 0) + 1;
+            localStorage.setItem('cbTravelMiss', String(miss));
+            console.warn(APP_TAG, `[TRAVEL] Aimed at "${want}" but ended up in "${cur}" (miss ${miss})`);
+            if (miss >= 2) {
+              localStorage.removeItem('cbTravelMiss');
+              st.autoTravel = false; saveSt(); repaintRibbon();
+              try { const cb = _shadow && _shadow.querySelector('#jb-auto-travel'); if (cb) cb.checked = false; } catch(_){}
+              console.error(APP_TAG, '[TRAVEL] Two wrong arrivals in a row — auto-travel switched OFF. Check the [JB][TRAVEL] lines above for which destination was posted.');
+              tgMsg('travel', `🛑 <b>Auto-travel OFF</b>\n${st.player||'?'} | landed wrong twice (aimed <b>${esc(want)}</b>, got <b>${esc(cur)}</b>) — stopped rather than keep burning the cooldown`);
+              setStatus('🛑 Auto-travel off — landed wrong twice');
+            } else {
+              tgOnce('travel_wrong', 900, `⚠️ <b>Travel went wrong</b>\n${st.player||'?'} | aimed at <b>${esc(want)}</b>, landed in <b>${esc(cur)}</b>`);
+            }
           } else {
+            localStorage.removeItem('cbTravelMiss');
             dlog(APP_TAG, `[TRAVEL] Arrived in ${cur} as intended`);
           }
         }
