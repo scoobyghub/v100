@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.274
+// @version      2000.275
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -33,7 +33,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.274
+/*  Jarvis Bot 2000.275
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -120,7 +120,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.274';
+  const APP_VERSION = '2000.275';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -1348,7 +1348,9 @@
   }
   function _saveTgQ(q) { try { localStorage.setItem(LS_TGQ, JSON.stringify(q)); } catch(_){} }
   function _removeTgQ(id) { _saveTgQ(_loadTgQ().filter(i => i.id !== id)); }
-  function _deferTgQ(id, at) { const q = _loadTgQ(); const it = q.find(i => i.id === id); if (it) { it.nextAt = at; _saveTgQ(q); } }
+  /* Deferring also clears sentAt: we got a definite answer from the server, so
+   * this is a genuine retry, not an interrupted send. */
+  function _deferTgQ(id, at) { const q = _loadTgQ(); const it = q.find(i => i.id === id); if (it) { it.nextAt = at; it.sentAt = 0; _saveTgQ(q); } }
   function _backoffOrDropTgQ(id, attempts) {
     if (attempts >= 8) { _removeTgQ(id); console.error(APP_TAG, 'TG give up after', attempts, 'tries'); return; }
     _deferTgQ(id, Date.now() + Math.min(60000, 2000 * attempts));
@@ -1370,10 +1372,15 @@
     return q;
   }
 
-  function sendTg(msg) {
+  /* `critical` marks a message that must NEVER be lost — script checks, staff
+   * mail, anti-bot. Those keep the original at-least-once behaviour (a rare
+   * duplicate beats a missed ban warning). Everything else is at-most-once: see
+   * the sweep in pumpTgQueue. */
+  function sendTg(msg, critical) {
     if (!tg.enabled || !tg.token || !tg.chat) return;
     const q = _loadTgQ();
-    q.push({ id: Date.now() + '_' + Math.random().toString(36).slice(2, 7), msg, attempts: 0, nextAt: 0 });
+    q.push({ id: Date.now() + '_' + Math.random().toString(36).slice(2, 7), msg, attempts: 0, nextAt: 0,
+             crit: !!critical, sentAt: 0 });
     _capTgQ(q, 50);   // evicts Telegram before Discord — see _capTgQ
     _saveTgQ(q);
     pumpTgQueue();
@@ -1411,6 +1418,36 @@
     if (!tgOk && !dcOk) return;
     const q = _loadTgQ();
     if (!q.length) return;
+
+    /* === AT-MOST-ONCE FOR ORDINARY MESSAGES (2000.275) ===
+     *
+     * The duplicate you saw. An item is stamped sentAt when its request starts;
+     * a definite outcome (200, 429, error, timeout) either removes it or clears
+     * the stamp. So a stamp still present on a FRESH PAGE means the previous page
+     * began the send and died before recording the result — and Telegram had
+     * almost certainly already received it. Retrying is what produced two
+     * identical "Traveled" messages, and travel is the worst case because the
+     * send happens milliseconds before the flight navigates the page.
+     *
+     * Ordinary messages are therefore assumed delivered and dropped. CRITICAL
+     * ones are not: a duplicated script-check alert is a nuisance, a missed one
+     * cost a 12-hour soft ban, so those keep at-least-once and simply retry.
+     *
+     * _tgInFlight is per-page and empty on load, which is exactly what makes
+     * "started on a previous page" detectable at all. */
+    let swept = 0;
+    for (let i = q.length - 1; i >= 0; i--) {
+      const it = q[i];
+      if (!it.sentAt || _tgInFlight[it.id]) continue;
+      if (it.crit) { it.sentAt = 0; continue; }     // never assume for these
+      q.splice(i, 1); swept++;
+    }
+    if (swept) {
+      _saveTgQ(q);
+      console.log(APP_TAG, `TG ${swept} message(s) were mid-send when the page changed — assuming delivered rather than sending twice`);
+      if (!q.length) return;
+    }
+
     const now = Date.now();
     for (const item of q) {
       if (_tgInFlight[item.id]) continue;
@@ -1420,6 +1457,7 @@
       const label = isDc ? 'Discord' : 'TG';
       _tgInFlight[item.id] = true;
       item.attempts = (item.attempts || 0) + 1;
+      item.sentAt = Date.now();     // survives the page; see the sweep above
       _saveTgQ(q);
       GM_xmlhttpRequest({
         method:'POST',
@@ -1674,7 +1712,7 @@
   function sendTgRepeat(msg, count=5, gap=1500, label='alert') {
     const n = Math.max(1, Math.min(10, count));
     for (let i = 0; i < n; i++)
-      setTimeout(() => { console.log(APP_TAG, `${label} ${i+1}/${n}`); sendTg(msg); }, i * gap);
+      setTimeout(() => { console.log(APP_TAG, `${label} ${i+1}/${n}`); sendTg(msg, true); }, i * gap);
   }
 
   /* === CRITICAL ALERT QUEUE (reload-proof) ===
@@ -1729,7 +1767,7 @@
     const now = Date.now();
     for (const a of q) {
       if (a.remaining > 0 && now >= a.nextAt) {
-        sendTg(a.msg);
+        sendTg(a.msg, true);        // critical: never dropped
         a.remaining--;
         if (a.remaining > 0) {
           a.nextAt = now + a.gapMs;                 // continue the quick burst
@@ -2529,7 +2567,7 @@
     if (!tg.enabled || !tg.captcha) return false;
     if (isOnCaptcha()) {
       if (!_captchaSent) {
-        sendTg(`⚠️ <b>SCRIPT CHECK</b>\n${st.player||'?'} | ${fmtDate()}\nAutomation paused`);
+        sendTg(`⚠️ <b>SCRIPT CHECK</b>\n${st.player||'?'} | ${fmtDate()}\nAutomation paused`, true);
         _captchaSent = true;
       }
       return true;
