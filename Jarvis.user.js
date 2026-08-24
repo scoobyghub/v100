@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.275
+// @version      2000.276
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -33,7 +33,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.275
+/*  Jarvis Bot 2000.276
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -120,7 +120,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.275';
+  const APP_VERSION = '2000.276';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -759,7 +759,23 @@
     const UID = 'ctl00_main_txtUsername';
     const PID = 'ctl00_main_txtPassword';
     const BID = 'ctl00_main_btnLogin';
-    const TOK = 'textarea[name="g-recaptcha-response"], #g-recaptcha-response';
+    /* THE RESPONSE FIELD, WHOEVER PROVIDES IT (2000.276).
+     *
+     * This matched only reCAPTCHA's `g-recaptcha-response` textarea. The site now
+     * puts a Cloudflare challenge on some pages, and Turnstile writes its token
+     * to a differently-named HIDDEN INPUT — so getToken() returned '', and the
+     * submit condition below (which requires a token) never opened. The
+     * challenge was being solved and Login was simply never clicked.
+     *
+     * Matched by SHAPE rather than one exact name, so a provider change or a
+     * renamed field does not silently break it again. The exact names are logged
+     * once per page, which is the thing that was missing when this had to be
+     * diagnosed. */
+    const TOK = [
+      'textarea[name="g-recaptcha-response"]', '#g-recaptcha-response',
+      'input[name="cf-turnstile-response"]', 'textarea[name="h-captcha-response"]',
+      '[name*="turnstile" i]', '[name*="captcha-response" i]', '[name*="cf-chl" i]'
+    ].join(',');
     const ERR = '.TMNErrorFont';
     const LS_ATT = 'cbLoginAttempts';
     const LS_PAU = 'cbLoginPaused';
@@ -800,14 +816,35 @@
       }
     }
 
+    let _tokLogged = false;
+    // Every candidate response field on the page, de-duplicated.
+    function tokenFields() {
+      const seen = new Set(), out = [];
+      document.querySelectorAll(TOK).forEach(el => {
+        const k = el.name || el.id || String(out.length);
+        if (seen.has(k)) return;
+        seen.add(k); out.push(el);
+      });
+      return out;
+    }
     function getToken() {
-      const el = document.querySelector(TOK);
-      return el && typeof el.value === 'string' ? el.value.trim() : '';
+      const fields = tokenFields();
+      if (!_tokLogged) {
+        _tokLogged = true;
+        log(fields.length
+          ? 'captcha response field(s): ' + fields.map(e => `${e.name || e.id || '(unnamed)'} [${e.tagName.toLowerCase()}] = ${(e.value||'').trim() ? 'FILLED' : 'empty'}`).join(' · ')
+          : 'no captcha response field found on this page');
+      }
+      for (const el of fields) {
+        const v = (el.value || '').trim();
+        if (v) return v;
+      }
+      return '';
     }
 
     function captchaDone() {
-      const resp = document.querySelector('textarea[name="g-recaptcha-response"]');
-      if (resp && resp.value && resp.value.length > 0) return true;
+      // Any provider's token counts, not just reCAPTCHA's — see getToken().
+      if (getToken()) return true;
       const btn = document.getElementById(BID);
       const u = document.getElementById(UID);
       const p = document.getElementById(PID);
