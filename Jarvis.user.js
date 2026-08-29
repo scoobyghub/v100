@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.277
+// @version      2000.278
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -33,7 +33,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.277
+/*  Jarvis Bot 2000.278
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -120,7 +120,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.277';
+  const APP_VERSION = '2000.278';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -1163,6 +1163,16 @@
     holdHqOn:      GM_getValue('cbHoldHqOn', false),
     holdHqMins:    GM_getValue('cbHoldHqMins', 10),   // minutes per entry
     holdHqMax:     GM_getValue('cbHoldHqMax', 6),     // entries before auto-off (~1h)
+    /* Shot response (2000.278). Three separate switches on purpose:
+     *  - the ALERT is the safe part and defaults ON;
+     *  - the RETREAT acts on its own and spends credits healing, so it is opt-in;
+     *  - TRAVELLING to the HQ additionally buys a jail reset and a travel reset,
+     *    which is real money and strands you somewhere, so it is opt-in again.
+     * Hold HQ has always refused to travel for exactly that reason ("stranding
+     * you somewhere under fire is your call") — this keeps the same line. */
+    shotAlertOn:   GM_getValue('cbShotAlertOn', true),
+    shotRetreatOn: GM_getValue('cbShotRetreatOn', false),
+    shotTravelOn:  GM_getValue('cbShotTravelOn', false),
     /* Hourly forum refresh — camouflage. Ours FETCHES rather than navigates; see
      * doForumRefresh for why navigating would strand us. */
     forumRefreshOn: GM_getValue('cbForumRefreshOn', false),
@@ -1233,6 +1243,7 @@
     url:     GM_getValue('cbDcUrl', ''),
     rankup:  GM_getValue('cbDcRankup', true),
     witness: GM_getValue('cbDcWitness', true),
+    shot:    GM_getValue('cbDcShot', true),
     /* Script/staff checks and soft bans. Defaults ON, unlike the other two —
      * these are the BAN-RISK events, and the whole reason the critical-alert
      * queue exists is that missing one cost a 12h soft ban. */
@@ -1350,7 +1361,8 @@
     { key:'readyAgain',  label:'OC/DTM still ready',    def:true  },
     { key:'witness',     label:'Witness mail',          def:true  },
     { key:'modOnline',   label:'Staff/mod online',      def:true  },
-    { key:'holdHq',      label:'Hold HQ (panic)',       def:true  }
+    { key:'holdHq',      label:'Hold HQ (panic)',       def:true  },
+    { key:'shot',        label:'Shot at / attacked',    def:true  }
   ];
 
   const tgMsgOn = {};
@@ -1704,6 +1716,23 @@
     if (city) e.fields.push({ name: 'Where', value: city, inline: true });
     // Keyed by the mail id — one statement per mail, for ever.
     dcSendOnce('dcwit', String(mailId || `${killer}>${victim}`), e);
+  }
+
+  /* A shot is a red embed like the critical alerts, because it is the same class
+   * of thing: something happened TO you that you want to know about away from the
+   * keyboard. Keyed by the mail id, so one post per shot for ever. */
+  function discordShot(mailId, info) {
+    if (!dc.shot || !dcConfigured()) return;
+    const e = dcBase(info.survived ? '💥 Shot at' : '☠️ Killed', DC_COLOUR.witness);
+    e.description = `**${info.shooter}** fired ${info.rounds} ${info.ammo}.`;
+    e.fields = [
+      { name: 'Shooter',      value: String(info.shooter), inline: true },
+      { name: 'Outcome',      value: info.survived ? 'Survived' : '**Died**', inline: true },
+      { name: 'Health lost',  value: `${info.healthLost}%`, inline: true }
+    ];
+    const city = getCurCity();
+    if (city) e.fields.push({ name: 'Where', value: city, inline: true });
+    dcSendOnce('dcshot', String(mailId || `${info.shooter}:${info.healthLost}`), e);
   }
 
   /* The test deliberately bypasses the once-only dedup — you may well want to
@@ -4075,6 +4104,17 @@
    * The subject test is deliberately kept as loose as theirs — witness + murder
    * in either order — while the body extraction is exact.
    */
+
+  /* === SHOT AT (2000.278) ===
+   * Subject patterns taken from the reference script's own mail classifier, which
+   * matches either wording. Kept loose for the same reason as the invite patterns:
+   * a false match costs one wasted mail fetch, a missed one costs a retreat.
+   *
+   * The body is the useful part — it names the shooter, the ammunition and, most
+   * importantly, whether you SURVIVED and how much health went. A shot that cost
+   * no health needs no retreat. */
+  const SHOT_RE = /you[\s\S]{0,20}?got\s+shot|shot\s+you/i;
+  const SHOT_BODY_RE = /([A-Za-z0-9_\-]+)\s+has\s+just\s+shot\s+(\d+)\s+(.+?)\s+at\s+you\.\s*You\s+(survived|died)(?:\s+and\s+lost\s+(\d+)\s*%\s*health)?/i;
   const WITNESS_RE = /witness[\s\S]{0,40}?murder|murder[\s\S]{0,40}?witness/i;
   // Straight and curly apostrophe: the mail is matched after HTML→text, so the
   // entity has already decoded and either form can reach us.
@@ -4365,6 +4405,63 @@
               console.warn(`${APP_TAG}[WITNESS] mail ${mailId} matched the subject but not the body — subject: "${subject}" | body: ${wBody.substring(0,200)}`);
               const preview = wBody ? `\n<pre>${esc(wBody.substring(0,300))}</pre>` : '';
               tgMsg('witness', `👁️ <b>WITNESSED A MURDER</b>\n${st.player||'?'} | ${fmtDate()}\n${esc(subject)}${preview}`);
+            }
+          }
+        }
+
+        /* === SHOT AT (2000.278) ===
+         * Highest-id watermark, same as the witness and payout notifications and
+         * for the same reason: a first poll over an old mailbox must not fire a
+         * burst of stale alerts - and here it would be worse than noise, because
+         * it would retreat to the HQ and spend credits over a shot from last week.
+         * Falls through, so the mail still reaches the normal new-mail alert. */
+        if (cfg.shotAlertOn && SHOT_RE.test(rowTxt)) {
+          const seenS = GM_getValue('cbLastShotMailId', null);
+          const nId = parseInt(mailId, 10) || 0;
+          if (seenS === null) {
+            let maxId = 0;
+            for (const row of rows) {
+              const rl = [...row.querySelectorAll('a[href*="mailbox.aspx"]')].find(a => /[?&]id=\d+/i.test(a.getAttribute('href')||''));
+              if (rl) { const rid = parseInt(parseMailId(rl.getAttribute('href')||''),10)||0; if (rid > maxId) maxId = rid; }
+            }
+            GM_setValue('cbLastShotMailId', maxId);
+            console.log(`${APP_TAG}[SHOT] Watermark set at mail ${maxId} — alerts start from the next one`);
+          } else if (nId > Number(seenS || 0)) {
+            GM_setValue('cbLastShotMailId', nId);
+            let sBody = '';
+            try { sBody = await fetchMailBody(href) || ''; } catch(_){}
+            const sm = sBody.match(SHOT_BODY_RE);
+            if (sm) {
+              const info = {
+                shooter:    sm[1].trim(),
+                rounds:     sm[2],
+                ammo:       sm[3].trim(),
+                survived:   /survived/i.test(sm[4]),
+                healthLost: parseInt(sm[5] || '0', 10) || 0
+              };
+              console.log(`${APP_TAG}[SHOT] ${info.shooter} fired ${info.rounds} ${info.ammo} — ` +
+                          `${info.survived ? 'survived' : 'DIED'}, -${info.healthLost}% (mail ${mailId})`);
+              tgMsg('shot', `💥 <b>SHOT AT</b>\n${st.player||'?'} | ${fmtDate()}\n` +
+                `<b>${esc(info.shooter)}</b> fired ${esc(info.rounds)} ${esc(info.ammo)}\n` +
+                `${info.survived ? 'Survived' : '<b>DIED</b>'} — lost ${info.healthLost}% health`);
+              try { discordShot(mailId, info); } catch(e) { console.warn(APP_TAG, '[DC] shot', e); }
+
+              /* Respond only when it actually cost health. A shot that missed
+               * needs no response, and spending credits on one would be a fine
+               * way to be drained by somebody firing blanks at you. */
+              if (info.healthLost > 0) {
+                try { await doShotRetreat(info); } catch(e) { console.warn(APP_TAG, '[SHOT] retreat', e); }
+              } else {
+                console.log(`${APP_TAG}[SHOT] no health lost — no retreat`);
+              }
+            } else {
+              /* Body didn't parse. Still alert — being shot matters even without
+               * the details — but deliberately do NOT retreat: the whole decision
+               * rests on how much health went, and acting on an unknown would
+               * spend credits on a guess. Log it so the pattern can be corrected. */
+              console.warn(`${APP_TAG}[SHOT] mail ${mailId} matched the subject but not the body — subject: "${subject}" | body: ${sBody.substring(0,200)}`);
+              const preview = sBody ? `\n<pre>${esc(sBody.substring(0,300))}</pre>` : '';
+              tgMsg('shot', `💥 <b>SHOT AT</b>\n${st.player||'?'} | ${fmtDate()}\n${esc(subject)}${preview}\n<i>Details unreadable — no automatic response</i>`);
             }
           }
         }
@@ -6838,6 +6935,192 @@
     return true;
   }
 
+  /* === SHOT -> RETREAT TO HQ (2000.278) ===
+   * The automatic counterpart to the Hold HQ panic button: somebody has shot you
+   * and cost you health, so heal and get behind a door.
+   *
+   * ALL BACKGROUND FETCH/POST - it never navigates. Same reasoning as bgHeal
+   * (234): a page lives ~2.5s under automation, so a navigating sequence of five
+   * steps would be torn up halfway through and leave an action stranded.
+   *
+   * IT HEALS FIRST, unconditionally, before anything else is attempted. Healing
+   * has no preconditions and always helps, whereas every later step can
+   * legitimately refuse - no HQ city recorded, wrong city, travel switched off,
+   * damaged HQ. The reference script gets the same effect by calling its heal on
+   * five separate bail-out paths; doing it once up front cannot be missed when
+   * someone adds a sixth.
+   *
+   * THE DAMAGE CHECK IS THE LOAD-BEARING ONE, exactly as in doHoldHq: if the
+   * building is destroyed while you are inside it, YOU DIE. A retreat that kills
+   * you is worse than staying in the street, so a damaged HQ refuses to be
+   * entered - and because we healed first, refusing still leaves you better off
+   * than when we started.
+   */
+  const SHOT_CREDITS = '/authenticated/credits.aspx';
+  const SHOT_TRAVEL  = '/authenticated/travel.aspx';
+  let _shotActive = false;
+
+  async function shotGet(url) {
+    try {
+      const r = await fetch(url, { method:'GET', credentials:'same-origin', cache:'no-store' });
+      return r.ok ? await r.text() : null;
+    } catch(e) { console.warn(APP_TAG, '[SHOT] GET failed', url, e); return null; }
+  }
+  async function shotPost(url, params) {
+    try {
+      const r = await fetch(url, { method:'POST', credentials:'same-origin',
+        headers:{ 'Content-Type':'application/x-www-form-urlencoded' }, body: params.toString() });
+      return r.ok ? await r.text() : null;
+    } catch(e) { console.warn(APP_TAG, '[SHOT] POST failed', url, e); return null; }
+  }
+  function shotParams(k) {
+    const p = new URLSearchParams();
+    p.append('__VIEWSTATE', k.vs);
+    p.append('__EVENTVALIDATION', k.ev);
+    if (k.gen) p.append('__VIEWSTATEGENERATOR', k.gen);
+    return p;
+  }
+
+  /* Buys a jail reset and a travel reset, then flies. All three spend credits,
+   * which is the whole reason cfg.shotTravelOn is off by default.
+   * JET, never the commercial plane - 255 removed the 45-minute option on
+   * purpose, and re-introducing it here would bring it back at the one moment
+   * nobody is watching. */
+  async function shotTravelTo(hqCity) {
+    setStatus('\u{1F6E1}️ Shot - clearing cooldowns for ' + hqCity);
+    for (const [btn, what] of [['ctl00$main$btnBuyJailRelease', 'jail reset'],
+                               ['ctl00$main$btnResetTravel',   'travel reset']]) {
+      const h = await shotGet(SHOT_CREDITS);
+      const k = h && _healKeys(h);
+      if (!k) { console.warn(APP_TAG, '[SHOT] credits page unreadable - skipping the ' + what); continue; }
+      const p = shotParams(k); p.append(btn, 'Buy');
+      await shotPost(SHOT_CREDITS, p);
+      console.log(APP_TAG + '[SHOT] bought the ' + what);
+    }
+
+    const h = await shotGet(SHOT_TRAVEL);
+    const k = h && _healKeys(h);
+    if (!k) { console.warn(APP_TAG, '[SHOT] travel page unreadable - healed only'); return false; }
+
+    const radios = [...k.doc.querySelectorAll('input[type=radio][name="ctl00$main$citieslist"]')];
+    if (!radios.length) {
+      /* Same guard as 264: no destinations on the page means the game is not
+       * offering travel (a cooldown the reset did not clear), NOT a missing city.
+       * Saying "couldn't identify the city" here is what sent three releases
+       * hunting the wrong subsystem. */
+      console.warn(APP_TAG, '[SHOT] the game is offering no destinations - cannot reach the HQ, healed only');
+      return false;
+    }
+    const cities = radios.map(r => ({ r, label: travelLabelOf(r, k.doc) }));
+    const near = travelMatch(cities, hqCityKey(hqCity));
+    if (near.length !== 1) {
+      const unlabelled = cities.filter(c => !c.label).length;
+      console.warn(APP_TAG, '[SHOT] "' + hqCity + '" matched ' + near.length + ' of ' + cities.length + ' destinations' +
+        (unlabelled === cities.length ? ' - and NONE had a readable label, so this is a markup problem' : '') +
+        ' - refusing to guess, healed only');
+      return false;
+    }
+
+    const p = shotParams(k);
+    p.append('ctl00$main$citieslist', near[0].r.value);
+    p.append('ctl00$main$btnTravelPrivate', 'Private Jet');
+    console.log(APP_TAG + '[SHOT] flying to ' + near[0].label + ' (value ' + near[0].r.value + ')');
+    await shotPost(SHOT_TRAVEL, p);
+    return true;
+  }
+
+  /* Fetch the HQ page, verify it, and enter. Mirrors doHoldHq's checks because
+   * it is the same building and the same way to die. */
+  async function shotEnterHq(hqCity) {
+    const h = await shotGet(HQ_PATH);
+    const k = h && _healKeys(h);
+    if (!k) { console.warn(APP_TAG, '[SHOT] HQ page unreadable - healed only'); return false; }
+
+    const enterBtn = k.doc.getElementById('ctl00_main_btnenter');
+    const minsBox  = k.doc.getElementById('ctl00_main_txtmins');
+    if (!enterBtn || !minsBox) {
+      console.warn(APP_TAG, '[SHOT] no Enter-HQ control on the page - not in your network city, or no HQ set up. Healed only');
+      setStatus('\u{1F6E1}️ Shot - healed (cannot enter HQ)');
+      return false;
+    }
+
+    const dmg = parseInt((k.doc.getElementById('ctl00_main_lbldamage')?.textContent || '0').replace(/[^\d]/g, ''), 10) || 0;
+    if (dmg > 0) {
+      /* REFUSE. If the HQ is destroyed while you are inside, you die. */
+      console.warn(APP_TAG, '[SHOT] HQ is ' + dmg + '% damaged - NOT entering. Healed only');
+      setStatus('\u{1F6E1}️ Shot - healed, HQ damaged (' + dmg + '%)');
+      tgMsg('shot', '\u{1F6E1}️ <b>Shot response</b>\n' + (st.player || '?') +
+        ' | healed, but the HQ is <b>' + dmg + '% damaged</b> - refusing to enter it (you die if it is destroyed while you are inside)');
+      return false;
+    }
+
+    const mins = Math.max(1, Number(cfg.holdHqMins) || 10);
+    const p = shotParams(k);
+    p.append('__VIEWSTATEENCRYPTED', '');
+    p.append('ctl00$main$txtmins', String(mins));
+    p.append('ctl00$main$btnenter', 'Enter HQ');
+    await shotPost(HQ_PATH, p);
+
+    /* Record the stay the same way doHoldHq does, so the panel countdown, the
+     * safety cap and the break/ready logic all see one consistent state. */
+    localStorage.setItem(LS_HQ_COUNT, String(hqEnterCount() + 1));
+    localStorage.setItem(LS_HQ_NEXT,  String(Date.now() + mins * 60000));
+    try { updateHqUI(); } catch(_){}
+    console.log(APP_TAG + '[SHOT] secured inside the HQ for ' + mins + 'm');
+    setStatus('\u{1F6E1}️ Shot - hiding in the HQ, ' + mins + 'm');
+    return true;
+  }
+
+  async function doShotRetreat(info) {
+    if (!cfg.shotRetreatOn) return false;
+    if (isHalted()) return false;
+    if (_shotActive) { console.warn(APP_TAG, '[SHOT] retreat already running - ignoring duplicate'); return false; }
+    _shotActive = true;
+    const wasActing = st.acting;
+    st.acting = true;                 // keep the main loop off the page mid-sequence
+    try {
+      console.log(APP_TAG + '[SHOT] shot by ' + (info && info.shooter || '?') +
+                  ' (-' + (info && info.healthLost || '?') + '%) - responding');
+      setStatus('\u{1F6E1}️ Shot - healing');
+      await bgHeal(100);
+
+      const hqCity = localStorage.getItem(LS_HQ_CITY) || '';
+      if (!hqCity) {
+        console.warn(APP_TAG, '[SHOT] no HQ city recorded yet - open your Network HQ once so Jarvis learns it. Healed only');
+        setStatus('\u{1F6E1}️ Shot - healed (HQ city unknown)');
+        tgMsg('shot', '\u{1F6E1}️ <b>Shot response</b>\n' + (st.player || '?') +
+          ' | healed, but no HQ city is recorded yet - open your Network HQ once so Jarvis learns where it is');
+        return true;
+      }
+
+      const cur = hqCityKey(getCurCity());
+      if (cur && hqCityKey(hqCity) !== cur) {
+        if (!cfg.shotTravelOn) {
+          console.log(APP_TAG + '[SHOT] HQ is in ' + hqCity + ', you are in ' + getCurCity() + ' - travel is off, healed only');
+          setStatus('\u{1F6E1}️ Shot - healed, HQ is in ' + hqCity);
+          tgMsg('shot', '\u{1F6E1}️ <b>Shot response</b>\n' + (st.player || '?') +
+            ' | healed. HQ is in <b>' + esc(hqCity) + '</b>, you are in <b>' + esc(getCurCity() || '?') +
+            '</b> - travel there to hide (auto-travel on a shot is off)');
+          return true;
+        }
+        if (!(await shotTravelTo(hqCity))) {
+          setStatus('\u{1F6E1}️ Shot - healed, could not reach the HQ');
+          tgMsg('shot', '\u{1F6E1}️ <b>Shot response</b>\n' + (st.player || '?') +
+            ' | healed, but could not reach <b>' + esc(hqCity) + '</b> - see the console');
+          return true;
+        }
+      }
+
+      return await shotEnterHq(hqCity);
+    } catch (e) {
+      console.warn(APP_TAG, '[SHOT] retreat error', e);
+      return false;
+    } finally {
+      _shotActive = false;
+      st.acting = wasActing;
+    }
+  }
+
   /* === HOURLY FORUM REFRESH (camouflage) ===
    * A real player's session touches the forum now and then. This does the same
    * on a jittered ~hourly schedule.
@@ -7590,6 +7873,13 @@
               <button class="jb-btn jb-btn-outline" id="jb-heal-now" style="padding:2px 8px;font-size:10px">Heal now</button>
               <span class="jb-sub" id="jb-heal-status">Buys repeatedly until Target %, or credits run out.</span>
             </div>
+            <hr class="jb-sep">
+            <div class="jb-sect-title">Shot response</div>
+            <label class="jb-switch jb-mb" title="Alert on the game's &quot;you got shot&quot; mail, naming the shooter, the ammunition and the health lost."><input type="checkbox" id="jb-shot-alert" ${cfg.shotAlertOn?'checked':''}> 💥 Alert when you're shot</label>
+            <label class="jb-switch jb-mb" title="On a shot that COST HEALTH: heal to 100%, then hide inside your network HQ. All background requests — it never navigates. Never enters a damaged HQ: if it's destroyed while you're inside, you die."><input type="checkbox" id="jb-shot-retreat" ${cfg.shotRetreatOn?'checked':''}> 🛡️ Heal &amp; retreat to HQ</label>
+            <label class="jb-switch jb-mb" title="If the HQ is in another city, buy a jail reset and a travel reset and fly there by private jet. This SPENDS CREDITS every time, which is why it is separate from the retreat itself."><input type="checkbox" id="jb-shot-travel" ${cfg.shotTravelOn?'checked':''}> ✈️ Travel to the HQ (spends credits)</label>
+            <div class="jb-sub jb-mb">Healing always happens first — every later step can refuse (no HQ city known, wrong city, damaged HQ), so the part that always helps never sits behind them. A shot that cost no health gets no response.</div>
+
             <hr class="jb-sep">
             <div class="jb-sect-title">Garage</div>
             <div class="jb-row">
@@ -8603,6 +8893,11 @@
         cfg.bgHealOn = e.target.checked; GM_setValue('cbBgHealOn', cfg.bgHealOn);
         setStatus(cfg.bgHealOn ? '💊 Background heal on' : '💊 Heal by navigation');
       }); }
+    // Shot response (278). Three independent switches; see the Assets pane.
+    { const b=(id,key,gm)=>{ const el=_shadow.querySelector(id); if(el) el.onchange=e=>{ cfg[key]=e.target.checked; GM_setValue(gm,cfg[key]); }; };
+      b('#jb-shot-alert','shotAlertOn','cbShotAlertOn');
+      b('#jb-shot-retreat','shotRetreatOn','cbShotRetreatOn');
+      b('#jb-shot-travel','shotTravelOn','cbShotTravelOn'); }
     { const hn = _shadow.querySelector('#jb-heal-now');
       if (hn) hn.addEventListener('click', async () => {
         const s = _shadow.querySelector('#jb-heal-status');
@@ -9327,6 +9622,63 @@
   }
 
   // Auto-travel to hot city via the travel page
+  /* === SHARED DESTINATION RESOLUTION (2000.278) ===
+   * Lifted out of doAutoTravel unchanged so the shot retreat can use the same
+   * rules on a FETCHED page. The only edit is that the <label for> lookup takes
+   * an explicit root instead of assuming `document`.
+   *
+   * It is shared rather than copied deliberately. A second copy of a city matcher
+   * is exactly the drift that produced the duplicate isInHot() removed in 250 —
+   * and this particular matcher has its own scar tissue (259 → 263 → 264 → 267),
+   * none of which should have to be rediscovered on a second code path.
+   */
+  function travelLabelOf(r, root) {
+    const R = root || document;
+    // 1. <label for="id"> — what ASP.NET actually emits, and unambiguous.
+    if (r.id) {
+      try {
+        const l = R.querySelector(`label[for="${CSS.escape(r.id)}"]`);
+        if (l && (l.textContent || '').trim()) return l.textContent.trim();
+      } catch(_) {}
+    }
+    // 2. A <label> wrapping this radio.
+    const wrap = r.closest('label');
+    if (wrap && (wrap.textContent || '').trim()) return wrap.textContent.trim();
+    // 3. The text that follows it, stopping at the next control.
+    let s = '';
+    for (let n = r.nextSibling; n; n = n.nextSibling) {
+      if (n.nodeType === 1 && /^(INPUT|BR|TABLE)$/.test(n.tagName)) break;
+      s += n.textContent || '';
+      if (s.trim()) break;
+    }
+    if (s.trim()) return s.trim();
+    /* 4. CLIMB (2000.263). The radio commonly sits in its OWN cell with the city
+     * name in a SIBLING cell, so the innermost container holds one radio and no
+     * text — which is why 259 refused to fly at all. Walk up, stopping the moment
+     * an ancestor would hold more than one radio: that ancestor names every city,
+     * which is the original 259 bug this guard exists to prevent. */
+    const GROUP = 'input[type=radio][name="ctl00$main$citieslist"]';
+    for (let n = r.parentElement, up = 0; n && up < 6; n = n.parentElement, up++) {
+      if (n.querySelectorAll(GROUP).length !== 1) break;   // shared — names several cities
+      const t = (n.textContent || '').replace(/s+/g, ' ').trim();
+      if (t) return t;
+    }
+    return '';
+  }
+
+  /* Exact first, then prefix, then substring. An exact match must win: with a
+   * plain substring test a want of "York" would take "New York", first row at
+   * that. Returns every candidate — the CALLER decides what to do when the count
+   * isn't exactly one, because auto-travel and the shot retreat refuse
+   * differently. */
+  function travelMatch(cities, wantLower) {
+    const norm = s => String(s || '').trim().toLowerCase();
+    const exact = cities.filter(c => norm(c.label) === wantLower);
+    if (exact.length) return exact;
+    const pre = cities.filter(c => norm(c.label).startsWith(wantLower));
+    if (pre.length) return pre;
+    return cities.filter(c => c.label && norm(c.label).includes(wantLower));
+  }
   async function doAutoTravel() {
     if (!st.autoTravel || st.inJail || st.acting || paused) return false;
 
@@ -9472,46 +9824,7 @@
         return false;
       }
 
-      const labelOf = r => {
-        // 1. <label for="id"> — what ASP.NET actually emits, and unambiguous.
-        if (r.id) {
-          try {
-            const l = document.querySelector(`label[for="${CSS.escape(r.id)}"]`);
-            if (l && (l.textContent || '').trim()) return l.textContent.trim();
-          } catch(_) {}
-        }
-        // 2. A <label> wrapping this radio.
-        const wrap = r.closest('label');
-        if (wrap && (wrap.textContent || '').trim()) return wrap.textContent.trim();
-        // 3. The text that follows it, stopping at the next control.
-        let s = '';
-        for (let n = r.nextSibling; n; n = n.nextSibling) {
-          if (n.nodeType === 1 && /^(INPUT|BR|TABLE)$/.test(n.tagName)) break;
-          s += n.textContent || '';
-          if (s.trim()) break;
-        }
-        if (s.trim()) return s.trim();
-        /* 4. CLIMB (2000.263).
-         *
-         * This is what made 2000.259 refuse to fly — "couldn't identify Toronto
-         * in the destination list". The radio commonly sits in its OWN cell with
-         * the city name in a SIBLING cell, so the innermost container holds one
-         * radio and no text at all. closest('td,li,span,div') found that empty
-         * cell, returned '', and every destination came back unlabelled — so
-         * nothing matched and it refused rather than guessing.
-         *
-         * Walk up instead, stopping the moment an ancestor would hold more than
-         * one radio: that ancestor names every city, which is the original 259
-         * bug this guard exists to prevent. Climbing keeps the guard and closes
-         * the blind spot. */
-        const GROUP = 'input[type=radio][name="ctl00$main$citieslist"]';
-        for (let n = r.parentElement, up = 0; n && up < 6; n = n.parentElement, up++) {
-          if (n.querySelectorAll(GROUP).length !== 1) break;   // shared — names several cities
-          const t = (n.textContent || '').replace(/s+/g, ' ').trim();
-          if (t) return t;
-        }
-        return '';
-      };
+      const labelOf = r => travelLabelOf(r, document);   // shared — see travelLabelOf
 
       const cities = radios.map(r => ({ r, label: labelOf(r) }));
       console.log('[JB][TRAVEL] Destinations on this page:',
@@ -9520,12 +9833,7 @@
       /* Exact first, then prefix, then substring. An exact match must win: with a
        * plain substring test a hot city of "York" would take "New York", and the
        * first row at that. */
-      const norm = s => String(s || '').trim().toLowerCase();
-      const pick = cities.filter(c => norm(c.label) === hotLower);
-      const near = pick.length ? pick
-                 : cities.filter(c => norm(c.label).startsWith(hotLower)).length
-                   ? cities.filter(c => norm(c.label).startsWith(hotLower))
-                   : cities.filter(c => c.label && norm(c.label).includes(hotLower));
+      const near = travelMatch(cities, hotLower);   // shared — see travelMatch
 
       if (near.length !== 1) {
         /* Nothing matched, or several did. REFUSE — travelling to a guess is what
