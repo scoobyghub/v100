@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.278
+// @version      2000.279
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -33,7 +33,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.278
+/*  Jarvis Bot 2000.279
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -120,7 +120,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.278';
+  const APP_VERSION = '2000.279';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -1603,15 +1603,15 @@
   function discordCriticalAlert(key, msg) {
     if (!dc.critical || !dcConfigured()) return;
     const kind = DC_CRIT_KIND[String(key).split(':')[0]] || 'STAFF ALERT';
-    const body = dcFromTgText(msg);
+    const body = dcFromTgText(msg).slice(0, 500);
     const e = {
-      title: `🚨 ${kind} 🚨`,
-      description: `${DC_MARQUEE}\n\n${body}\n\n${DC_MARQUEE}`,
+      title: `🚨 ${kind}`,
+      description: body || 'A ban-risk alert was received.',
       color: DC_COLOUR.critical,
       author: { name: st.player || 'Unknown player' },
       fields: [{
-        name: '⚠️ What to do',
-        value: 'Answer it **in the game**, by hand. Jarvis never answers a check for you — that is the one thing it must not automate.',
+        name: 'What to do',
+        value: 'Answer it **in the game**. Jarvis never answers a check for you.',
         inline: false
       }],
       timestamp: new Date().toISOString(),
@@ -5132,6 +5132,37 @@
     return null;
   }
 
+  function getSgState() {
+    if (!sgCfg.on) return { state:'off', label:'OFF', colour:'var(--jb-text-ter)' };
+    const now = Date.now();
+    const lastOk = Number(GM_getValue('cbSgLastOk', 0)) || 0;
+    const lastTry = Number(GM_getValue('cbSgLastTry', 0)) || 0;
+    const haveAny = (sgSafe.length + sgAllied.length + sgWatched.length) > 0;
+    if (!haveAny) {
+      if (!lastTry || (now - lastTry) > SG_RETRY_MS) {
+        return { state:'waiting', label:'waiting', colour:'var(--jb-warning)' };
+      }
+      return { state:'stale', label:'fetching', colour:'var(--jb-warning)' };
+    }
+    if ((now - lastOk) > SG_TTL_MS) {
+      const ageMin = Math.max(0, Math.round((now - lastOk) / 60000));
+      return { state:'stale', label:`stale ${ageMin}m`, colour:'var(--jb-warning)' };
+    }
+    return { state:'fresh', label:'fresh', colour:'var(--jb-success)' };
+  }
+
+  function renderSgStatusUI() {
+    const el = _shadow && _shadow.querySelector('#jb-sg-status');
+    if (!el) return;
+    const s = getSgState();
+    el.textContent = `${s.label}`;
+    el.style.color = s.colour;
+    el.style.fontWeight = '600';
+    el.title = s.state === 'fresh' ? 'Starvinggeeks lists are fresh' :
+      s.state === 'stale' ? 'Starvinggeeks lists are stale — gating will fail open, not block' :
+      s.state === 'waiting' ? 'Waiting for the first SG list fetch' : 'SG lists are off';
+  }
+
   function colourPlayerLinks(root) {
     if (!sgCfg.on) return;
     (root || document).querySelectorAll('a[href*="profile.aspx?id="]').forEach(a => {
@@ -7485,7 +7516,14 @@
         background: var(--jb-header-bg); color: var(--jb-header-text);
         padding: 6px 10px; display: flex; justify-content: space-between; align-items: center;
         font-size: 12px; font-weight: 600; cursor: default; border-radius: 2px 2px 0 0;
-        user-select: none;
+        user-select: none; gap: 8px;
+      }
+      .jb-header-title {
+        display: flex; align-items: center; gap: 6px; min-width: 0;
+      }
+      .jb-update-btn {
+        padding: 2px 7px; font-size: 9px; font-weight: 700; letter-spacing: .02em;
+        text-transform: uppercase; white-space: nowrap; min-width: 66px;
       }
       .jb-modal-head {
         background: var(--jb-header-bg); color: var(--jb-header-text);
@@ -7632,6 +7670,7 @@
       .jb-sub { font-size: 10px; color: var(--jb-text-ter); }
       .jb-row { display: flex; gap: 6px; align-items: center; margin-bottom: 4px; }
       .jb-flex { display: flex; gap: 6px; align-items: center; }
+      .jb-status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; background: var(--jb-text-ter); box-shadow: 0 0 6px currentColor; }
       .jb-mb { margin-bottom: 6px; }
       label.jb-label { font-size: 11px; color: var(--jb-text-sec); font-weight: 500; }
     `;
@@ -7641,7 +7680,10 @@
     root.className = 'jb-root';
     root.innerHTML = `
       <div class="jb-header" id="jb-drag">
-        <span>${APP_NAME} ${APP_VERSION}</span>
+        <div class="jb-header-title">
+          <span>${APP_NAME} ${APP_VERSION}</span>
+          <button class="jb-hbtn jb-update-btn" id="jb-update-btn" title="Check for Jarvis update">Check</button>
+        </div>
         <div class="jb-header-btns">
           <button class="jb-hbtn" id="jb-theme-btn" title="Theme">◑</button>
           <button class="jb-hbtn" id="jb-lock-btn" title="Lock">🔒</button>
@@ -7667,8 +7709,12 @@
             <div class="jb-sect-title">Status</div>
             <div class="jb-grid" style="grid-template-columns: 1fr 1fr;">
               <div class="jb-flex"><span class="jb-timer-label">Player:</span> <span id="jb-player-badge">${esc(st.player||'—')}</span></div>
-              <div class="jb-flex">
+              <div class="jb-flex"><span class="jb-timer-label">Mod:</span><span id="jb-mod-light" title="Staff watch state" style="display:inline-flex;align-items:center;gap:5px"><span class="jb-status-dot" id="jb-mod-light-dot" style="color:var(--jb-text-ter)"></span><span id="jb-mod-light-text" style="font-size:9px;letter-spacing:0.02em">off</span></span></div>
+              <div class="jb-flex" style="grid-column:1 / -1">
                 <label class="jb-switch"><input type="checkbox" id="jb-all-toggle"> <span style="font-weight:600" id="jb-all-label">ALL</span></label>
+              </div>
+              <div class="jb-flex" style="grid-column:1 / -1">
+                <label class="jb-switch" title="Stop attempting jail busts while staff are online. Jail runs every few seconds by default, so it is by far the noisiest thing Jarvis does — nothing else is suppressed."><input type="checkbox" id="jb-mod-nojail" ${cfg.noJailOnMod?'checked':''}> ⛓️ No jail while staff are online</label>
               </div>
             </div>
           </div>
@@ -7729,7 +7775,7 @@
               <div class="jb-switch" title="Master switch for Online Watch — off means neither group can fire. Enable/disable Group 1 and Group 2 individually inside the Watch window."><input type="checkbox" id="jb-ow-on"> <span id="jb-ow-link" style="cursor:pointer;text-decoration:underline;color:var(--jb-accent)">🟢 Watch</span></div>
               <label class="jb-switch" title="Property drop watch"><input type="checkbox" id="jb-prop-on"> 🏠 Props</label>
               <label class="jb-switch" title="Player hover tooltip (reload to apply)"><input type="checkbox" id="jb-hover-on"> 🔍 Hover</label>
-              <label class="jb-switch" title="Colour player links from your Starvinggeeks lists — watched (orange), safe (green), allied (blue). Read-only: three GETs, nothing is ever sent."><input type="checkbox" id="jb-sg-on"> 🎨 SG lists</label>
+              <label class="jb-switch" title="Colour player links from your Starvinggeeks lists — watched (orange), safe (green), allied (blue). Read-only: three GETs, nothing is ever sent."><input type="checkbox" id="jb-sg-on"> 🎨 SG lists <span id="jb-sg-status" style="font-size:9px;letter-spacing:0.02em">—</span></label>
               <label class="jb-switch"><input type="checkbox" id="jb-notify-ready"> 🔔 Alerts</label>
               <label class="jb-switch"><input type="checkbox" id="jb-auto-travel" ${st.autoTravel?'checked':''}> ✈️ Auto Travel</label>
               <label class="jb-switch" title="ADVERTISE yourself on the DTM list (ocads.aspx) when a DTM is ready, so others can invite you"><input type="checkbox" id="jb-auto-dtmlist" ${st.autoDtmList?'checked':''}> 📋 DTM List</label>
@@ -8065,7 +8111,6 @@
               <input class="jb-input jb-input-sm" type="number" id="jb-mod-poll" value="${cfg.modPollSec}" min="30" max="600" step="30">
               <span class="jb-sub">s</span>
             </div>
-            <label class="jb-switch jb-mb" title="Stop attempting jail busts while staff are online. Jail runs every few seconds by default, so it is by far the noisiest thing Jarvis does — nothing else is suppressed."><input type="checkbox" id="jb-mod-nojail" ${cfg.noJailOnMod?'checked':''}> ⛓️ No jail while staff are online</label>
             <label class="jb-switch jb-mb" title="The blunt option: when staff come online, stop everything for a random 1-2 hours."><input type="checkbox" id="jb-mod-break" ${cfg.modBreakOn?'checked':''}> 🛑 Take a break when staff come online</label>
             <div class="jb-row">
               <label class="jb-label">Break:</label>
@@ -8584,7 +8629,11 @@
         scb.addEventListener('change', e => {
           sgCfg.on = e.target.checked; saveSgCfg();
           if (sgCfg.on) { try { initSgLists(); fetchSgLists(true); } catch(_){} setStatus('🎨 SG lists on'); }
-          else setStatus('🎨 SG lists off — reload to clear colours');
+          else {
+            try { renderSgStatusUI(); } catch(_){ }
+            setStatus('🎨 SG lists off — reload to clear colours');
+          }
+          try { renderSgStatusUI(); } catch(_){ }
         }); } }
 
     { const hcb = _shadow.querySelector('#jb-hover-on');
@@ -8657,6 +8706,90 @@
         applyTheme(e.target.value);
         setStatus('🎨 ' + (THEME_LIST.find(t => t[0] === e.target.value)?.[1] || e.target.value));
       }); }
+
+    const UPDATE_META_URL = 'https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.meta.js';
+    function versionParts(v) {
+      return String(v || '0').split('.').map(n => parseInt(n, 10) || 0);
+    }
+    function compareVersions(a, b) {
+      const av = versionParts(a), bv = versionParts(b);
+      const max = Math.max(av.length, bv.length);
+      for (let i = 0; i < max; i++) {
+        const diff = (av[i] || 0) - (bv[i] || 0);
+        if (diff !== 0) return diff;
+      }
+      return 0;
+    }
+    let updateState = { checking: false, known: false, newer: false, remote: '' };
+    function paintUpdateBtn() {
+      const btn = _shadow.querySelector('#jb-update-btn');
+      if (!btn) return;
+      btn.disabled = updateState.checking;
+      btn.style.opacity = updateState.checking ? '0.7' : '1';
+      if (updateState.checking) {
+        btn.textContent = 'Checking';
+        btn.title = 'Checking for a newer Jarvis version';
+        btn.style.background = 'rgba(255,255,255,.18)';
+        return;
+      }
+      if (updateState.newer) {
+        btn.textContent = 'Update';
+        btn.title = `Update available: ${APP_VERSION} → ${updateState.remote}. Click to reload and apply.`;
+        btn.style.background = 'var(--jb-success)';
+        return;
+      }
+      if (updateState.known) {
+        btn.textContent = 'Up to date';
+        btn.title = `You are on the latest version (${APP_VERSION})`;
+        btn.style.background = 'rgba(255,255,255,.15)';
+        return;
+      }
+      btn.textContent = 'Check';
+      btn.title = 'Check for a Jarvis update';
+      btn.style.background = 'rgba(255,255,255,.15)';
+    }
+    function checkScriptUpdate() {
+      updateState = { ...updateState, checking: true };
+      paintUpdateBtn();
+      GM_xmlhttpRequest({
+        method: 'GET',
+        url: UPDATE_META_URL,
+        timeout: 8000,
+        onload(res) {
+          try {
+            const m = String(res.responseText || '').match(/@version\s+([0-9.]+)/i);
+            const remote = m ? m[1] : '';
+            const newer = !!remote && compareVersions(remote, APP_VERSION) > 0;
+            updateState = { checking: false, known: !!remote, newer, remote };
+            if (remote && newer) console.log(`[JB][UPDATE] Update available ${APP_VERSION} -> ${remote}`);
+            else if (remote) console.log(`[JB][UPDATE] Up to date (${remote})`);
+          } catch (_) {
+            updateState = { checking: false, known: false, newer: false, remote: '' };
+          }
+          paintUpdateBtn();
+        },
+        onerror() {
+          updateState = { checking: false, known: false, newer: false, remote: '' };
+          paintUpdateBtn();
+        },
+        ontimeout() {
+          updateState = { checking: false, known: false, newer: false, remote: '' };
+          paintUpdateBtn();
+        }
+      });
+    }
+    const updateBtn = _shadow.querySelector('#jb-update-btn');
+    if (updateBtn) {
+      updateBtn.addEventListener('click', () => {
+        if (updateState.newer) {
+          setStatus(`↻ Reloading to apply ${updateState.remote}`);
+          setTimeout(() => location.reload(), 250);
+          return;
+        }
+        checkScriptUpdate();
+      });
+      checkScriptUpdate();
+    }
 
     // Text size — applied as a class on .jb-root (see the jb-lg / jb-xl rules).
     function applyUiSize(sz) {
@@ -9252,8 +9385,41 @@
     _shadow.querySelector('#jb-reset-all').addEventListener('click', () => {
       if (confirm('Reset ALL settings?')) {
         localStorage.removeItem('cbMaster'); localStorage.removeItem('cbHeartbeat');
-        const keys = ['cbAutoCrime','cbAutoGta','cbAutoJail','cbAutoBooze','cbLastCrime','cbLastGta','cbLastJail','cbLastBooze','cbSelCrimes','cbSelGtas','cbPlayer','cbInJail','cbAction','cbPending','cbAutoOC','cbAutoDTM','cbAutoHealth','cbAutoGarage','cbAutoCrusher','cbCrusherOwned','cbLastGarage','cbLastHealth','cbLastJailCk','cbBuyHealth','cbMinimized','cbRefresh','cbTheme','cbNotifyReady','cbWhitelist','cbWlNames','cbCarCats','cbCreateOC','cbOcTrans','cbOcWeapon','cbOcExplo','cbOcSched','cbOcType','cbOcRepeat','cbOcLeft'];
-        keys.forEach(k => GM_setValue(k, undefined));
+
+        const keys = [
+          'cbAutoCrime','cbAutoGta','cbAutoJail','cbAutoBooze','cbLastCrime','cbLastGta','cbLastJail','cbLastBooze',
+          'cbSelCrimes','cbSelGtas','cbPlayer','cbInJail','cbAction','cbPending','cbAutoOC','cbAutoDTM',
+          'cbAutoHealth','cbAutoGarage','cbAutoCrusher','cbCrusherOwned','cbLastGarage','cbLastHealth','cbLastJailCk',
+          'cbBuyHealth','cbMinimized','cbRefresh','cbTheme','cbNotifyReady','cbWhitelist','cbWlNames','cbCarCats',
+          'cbCreateOC','cbOcTrans','cbOcWeapon','cbOcExplo','cbOcSched','cbOcType','cbOcRepeat','cbOcLeft'
+        ];
+
+        // Write explicit safe defaults rather than `undefined`. GM storage can be
+        // left in a broken state by undefined writes, which is exactly the kind of
+        // persistent corruption that requires reinstalling the script. Deleting the
+        // key and letting the code fall back to the runtime defaults is safe.
+        keys.forEach(k => {
+          try { GM_deleteValue(k); } catch(_) {}
+        });
+
+        // Also clear the state object and rebuild it from defaults on next load.
+        try {
+          st = {
+            crime: false, gta: false, jail: false, booze: false,
+            health: false, garage: false, crusher: true, crusherOwned: null,
+            lastCrime: 0, lastGta: 0, lastJail: 0, lastBooze: 0, lastHealth: 0, lastGarage: 0,
+            crimes: [1,3,5], gtas: [5], player: '', inJail: false,
+            jailReleaseUntil: 0, collapsed: { crime: false, gta: false, booze: false },
+            minimized: false, acting: false, lastJailCk: 0, action: '', refresh: false,
+            pending: '', buyHealth: false, autoOC: false, autoDTM: false,
+            notifyReady: true, whitelist: false, wlNames: [], blNames: [], carCats: {},
+            createOC: false, ocTrans: '', ocWeapon: '', ocExplo: '', ocSched: '',
+            ocType: 'Casino', ocRepeat: 'once', ocLeft: 0, autoTravel: false, autoDtmList: false,
+            halted: false
+          };
+          saveSt();
+        } catch(_) {}
+
         alert('Reset complete — refreshing');
         setTimeout(() => window.location.reload(), 500);
       }
@@ -9312,6 +9478,43 @@
         }
       } catch(_){}
     }, 5000);
+
+    try {
+      const dot = _shadow.querySelector('#jb-mod-light-dot');
+      const txt = _shadow.querySelector('#jb-mod-light-text');
+      const wrap = _shadow.querySelector('#jb-mod-light');
+      if (wrap && dot && txt) {
+        if (!cfg.modWatchOn) {
+          dot.style.color = 'var(--jb-text-ter)';
+          dot.style.background = 'var(--jb-text-ter)';
+          txt.textContent = 'off';
+          wrap.title = 'Staff watch is off';
+        } else {
+          const s = modState();
+          if (!s) {
+            dot.style.color = 'var(--jb-text-ter)';
+            dot.style.background = 'var(--jb-text-ter)';
+            txt.textContent = 'n/a';
+            wrap.title = 'Staff watch has not checked yet';
+          } else if (Date.now() - (s.at || 0) > MOD_STALE_MS) {
+            dot.style.color = 'var(--jb-warning)';
+            dot.style.background = 'var(--jb-warning)';
+            txt.textContent = 'stale';
+            wrap.title = 'Staff check is stale — jail suppression is not active';
+          } else if (modsOnline().length) {
+            dot.style.color = 'var(--jb-danger)';
+            dot.style.background = 'var(--jb-danger)';
+            txt.textContent = 'online';
+            wrap.title = 'Staff is online — jail suppression is active';
+          } else {
+            dot.style.color = 'var(--jb-success)';
+            dot.style.background = 'var(--jb-success)';
+            txt.textContent = 'clear';
+            wrap.title = 'No staff online';
+          }
+        }
+      }
+    } catch(_){ }
 
     // Whitelist modal
     function openModal2(id) { const m = _shadow.querySelector(id); const bg = _shadow.querySelector('#jb-backdrop'); if(m){m.classList.add('open');} if(bg)bg.style.display='block'; }
