@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.284
+// @version      2000.285
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -23,6 +23,7 @@
 // @match        *://*.tmn2010.net/*
 // @grant        GM_setValue
 // @grant        GM_getValue
+// @grant        GM_deleteValue
 // @grant        GM_addStyle
 // @grant        GM_xmlhttpRequest
 // @connect      api.telegram.org
@@ -33,7 +34,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.284
+/*  Jarvis Bot 2000.285
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -120,7 +121,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.284';
+  const APP_VERSION = '2000.285';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -2127,15 +2128,15 @@
   function actionDueSoon(withinMs = 4000) {
     const now = Date.now();
     const checks = [
-      [st.crime,  st.lastCrime,  cfg.crimeInt],
-      [st.gta,    st.lastGta,    cfg.gtaInt],
-      [st.booze,  st.lastBooze,  cfg.boozeInt],
-      [st.jail,   st.lastJail,   cfg.jailInt]
+      ['crime', st.crime,  st.lastCrime,  cfg.crimeInt],
+      ['gta',   st.gta,    st.lastGta,    cfg.gtaInt],
+      ['booze', st.booze,  st.lastBooze,  cfg.boozeInt],
+      ['jail',  st.jail,   st.lastJail,   cfg.jailInt]
     ];
-    for (const [on, last, intSec] of checks) {
+    for (const [act, on, last, intSec] of checks) {
       if (!on) continue;
-      const remaining = (intSec * 1000) - (now - last);
-      if (remaining <= withinMs) return true; // due now or within the window
+      // The persisted delay, not the raw interval — see cooldownDelayMs.
+      if (cooldownRemainingMs(act, last, intSec) <= withinMs) return true;
     }
     return false;
   }
@@ -5452,13 +5453,14 @@
     const within = sec * 1000, now = Date.now();
 
     const checks = [
-      [st.crime, st.lastCrime, cfg.crimeInt],
-      [st.gta,   st.lastGta,   cfg.gtaInt],
-      [st.booze, st.lastBooze, cfg.boozeInt]
+      ['crime', st.crime, st.lastCrime, cfg.crimeInt],
+      ['gta',   st.gta,   st.lastGta,   cfg.gtaInt],
+      ['booze', st.booze, st.lastBooze, cfg.boozeInt]
     ];
-    for (const [on, last, intSec] of checks) {
+    for (const [act, on, last, intSec] of checks) {
       if (!on) continue;
-      if ((intSec * 1000) - (now - last) <= within) return true;
+      // Real due time, not the raw interval — see cooldownDelayMs.
+      if (cooldownRemainingMs(act, last, intSec) <= within) return true;
     }
 
     if (st.autoTravel && getHot() && !isInHot()) {
@@ -5568,28 +5570,98 @@
     return floor + Math.max(0, extra);
   }
 
-  // Pick the delay for the current cadence mode.
-  function nextCooldownMs(intervalSec) {
+  /* JAIL IS NOT SUBJECT TO THE CAMOUFLAGE CURVE (2000.285).
+   *
+   * humanCooldownMs adds 3s-20min ON TOP of the interval. That is right for a
+   * crime on a 125s timer. It is nonsense for jail, whose interval is THREE
+   * SECONDS by default: the tail is up to 400x the setting, so "every 3 seconds"
+   * actually meant a ~2 MINUTE average and, one time in twenty, an 8-20 minute
+   * gap. Until 2000.283 the At-PC switch was the escape hatch; removing it left
+   * jail permanently on the slow curve, which is when it began feeling broken.
+   *
+   * The reference busts on a 1-3s loop (JAIL_COOLDOWN_MIN/MAX = 1/3, with a 7s
+   * penalty after a failure) and applies no long tail at all. Jail's camouflage
+   * was never its spacing — it is the mod-presence suppression and the daily
+   * cap, and both still apply untouched. So jail gets its interval plus a small
+   * jitter, and the number in Settings means what it says.
+   *
+   * ONE LINE TO REVERT: empty FAST_ACTIONS.
+   */
+  const FAST_ACTIONS = new Set(['jail']);
+
+  /* ONE-TIME: bin the delay rolled under the old curve.
+   *
+   * cbDly_jail is only ever re-rolled by markActed(), i.e. after the action next
+   * FIRES. So a device updating to 285 mid-wait would sit out one last delay of
+   * up to twenty minutes before any of this took effect — and would look exactly
+   * as broken as it did before the fix, which is the worst possible first
+   * impression of a repair. Zero makes cooldownDelayMs() roll a fresh one on the
+   * next read. */
+  if (!GM_getValue('cbFastJailMigrated', false)) {
+    GM_setValue('cbFastJailMigrated', true);
+    FAST_ACTIONS.forEach(a => GM_setValue('cbDly_' + a, 0));
+    console.log(APP_TAG, '[CADENCE] Cleared the pending jail delay so the new cadence applies now');
+  }
+
+  // Pick the delay for this action. `action` is optional; without it you get the
+  // camouflage curve, which is the safe default for anything added later.
+  function nextCooldownMs(intervalSec, action) {
+    if (action && FAST_ACTIONS.has(action)) {
+      return Math.max(0, intervalSec * 1000) + 500 + Math.random() * 4000;
+    }
     return humanCooldownMs(intervalSec);
+  }
+
+  /* === ONE SOURCE OF TRUTH FOR WHEN AN ACTION IS DUE (2000.285) ===
+   *
+   * The delay actually in force is the PERSISTED randomised one in cbDly_<action>,
+   * re-rolled only by markActed(). Five other places instead computed the wait
+   * from the RAW interval: mainLoop's crimeRdy/gtaRdy/boozeRdy/jailRdy gates, its
+   * crime-vs-GTA tie-break, its status countdown, actionDueSoon() and
+   * jailShouldHoldOff(). So the loop believed an action was due long before the
+   * action itself agreed — and with jail at 3s the two views were MINUTES apart.
+   *
+   * Four symptoms, all of that one fault:
+   *   · jailRdy went true 3s after a bust, so mainLoop navigated to jail.aspx —
+   *     and doJailbreak() then refused, because ITS gate was still counting. A
+   *     page load every couple of seconds on the noisiest page in the game, with
+   *     no bust to show for it.
+   *   · the panel read J:0s while the real wait was minutes.
+   *   · setStatus() lives in the else branch, so a permanently-ready jail meant
+   *     the status line stopped updating at all.
+   *   · scrap and garage sit BELOW jail in the chain, and scrap additionally
+   *     requires !jailRdy — so a jail that was always ready but never firing
+   *     starved both of them completely.
+   *
+   * Everything reads cooldownDelayMs() now, so the loop and the action cannot
+   * disagree again.
+   */
+  function cooldownDelayMs(action, intervalSec) {
+    let dly = GM_getValue('cbDly_' + action, 0);
+    if (!dly) { dly = nextCooldownMs(intervalSec, action); GM_setValue('cbDly_' + action, dly); }
+    return dly;
+  }
+
+  // Milliseconds until this action is due; 0 means now.
+  function cooldownRemainingMs(action, lastTs, intervalSec) {
+    return Math.max(0, (lastTs + cooldownDelayMs(action, intervalSec)) - Date.now());
   }
 
   // True once the action's chosen (persisted) delay has elapsed since lastTs.
   // The delay is stable between fires — only markActed() re-rolls it.
   function cooldownElapsed(action, lastTs, intervalSec) {
-    let dly = GM_getValue('cbDly_' + action, 0);
-    if (!dly) { dly = nextCooldownMs(intervalSec); GM_setValue('cbDly_' + action, dly); }
-    return (Date.now() - lastTs) >= dly;
+    return cooldownRemainingMs(action, lastTs, intervalSec) <= 0;
   }
 
   // Roll and persist the delay until the NEXT action of this type. Call right after firing.
   function markActed(action, intervalSec) {
-    GM_setValue('cbDly_' + action, nextCooldownMs(intervalSec));
+    GM_setValue('cbDly_' + action, nextCooldownMs(intervalSec, action));
   }
 
   // Re-roll all pending action delays so a new cadence is applied immediately.
   function rerollCadence() {
     [['crime',cfg.crimeInt],['gta',cfg.gtaInt],['booze',cfg.boozeInt],['jail',cfg.jailInt]]
-      .forEach(([a, iv]) => GM_setValue('cbDly_' + a, nextCooldownMs(iv)));
+      .forEach(([a, iv]) => GM_setValue('cbDly_' + a, nextCooldownMs(iv, a)));
   }
 
   /* === SMART ACTION PICKING ===
@@ -12479,10 +12551,13 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
         const garageOd = st.garage && (now - st.lastGarage >= cfg.garageInt*1000);
         if (garageOd && pg === 'garage') doGarage();
 
-        const crimeRdy = st.crime && (now - st.lastCrime >= cfg.crimeInt*1000) && !dailyLimitReached('crime');
-        const gtaRdy   = st.gta   && (now - st.lastGta >= cfg.gtaInt*1000)     && !dailyLimitReached('gta');
-        const boozeRdy = st.booze && (now - st.lastBooze >= cfg.boozeInt*1000) && !dailyLimitReached('booze');
-        const jailRdy  = st.jail  && (now - st.lastJail >= cfg.jailInt*1000);
+        /* These test the SAME persisted delay the actions themselves test — see
+         * cooldownDelayMs. Testing the raw interval here is what made jail look
+         * permanently ready while doJailbreak quietly refused. */
+        const crimeRdy = st.crime && cooldownElapsed('crime', st.lastCrime, cfg.crimeInt) && !dailyLimitReached('crime');
+        const gtaRdy   = st.gta   && cooldownElapsed('gta',   st.lastGta,   cfg.gtaInt)   && !dailyLimitReached('gta');
+        const boozeRdy = st.booze && cooldownElapsed('booze', st.lastBooze, cfg.boozeInt) && !dailyLimitReached('booze');
+        const jailRdy  = st.jail  && cooldownElapsed('jail',  st.lastJail,  cfg.jailInt);
         const garageRdy= st.garage && (now - st.lastGarage >= cfg.garageInt*1000);
 
         /* Scrap sits at the BOTTOM of the priority list deliberately. It has no
@@ -12493,7 +12568,9 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
         }
 
         if (crimeRdy && gtaRdy) {
-          const ct = st.lastCrime+cfg.crimeInt*1000, gt = st.lastGta+cfg.gtaInt*1000;
+          // Whichever came due FIRST goes first — real due times, not raw intervals.
+          const ct = st.lastCrime + cooldownDelayMs('crime', cfg.crimeInt);
+          const gt = st.lastGta   + cooldownDelayMs('gta',   cfg.gtaInt);
           if (ct <= gt) { if(pg==='crimes') doCrime(); else safeNav('/authenticated/crimes.aspx?'+Date.now()); }
           else { if(pg==='gta') doGta(); else safeNav('/authenticated/crimes.aspx?p=g&'+Date.now()); }
         } else if (crimeRdy) { if(pg==='crimes') doCrime(); else safeNav('/authenticated/crimes.aspx?'+Date.now()); }
@@ -12502,10 +12579,12 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
         else if (jailRdy && !jailShouldHoldOff() && !modJailBlocked()) { if(pg==='jail') doJailbreak(); else safeNav('/authenticated/jail.aspx?'+Date.now()); }
         else if (garageRdy) { if(pg==='garage') doGarage(); else safeNav('/authenticated/playerproperty.aspx?p=g&'+Date.now()); }
         else {
-          const cr = Math.max(0, Math.ceil((cfg.crimeInt*1000-(now-st.lastCrime))/1000));
-          const gr = Math.max(0, Math.ceil((cfg.gtaInt*1000-(now-st.lastGta))/1000));
-          const br = Math.max(0, Math.ceil((cfg.boozeInt*1000-(now-st.lastBooze))/1000));
-          const jr = Math.max(0, Math.ceil((cfg.jailInt*1000-(now-st.lastJail))/1000));
+          // The REAL wait, from the persisted delay. This used to show the raw
+          // interval, so the panel read J:0s while the true gap was minutes.
+          const cr = Math.ceil(cooldownRemainingMs('crime', st.lastCrime, cfg.crimeInt)/1000);
+          const gr = Math.ceil(cooldownRemainingMs('gta',   st.lastGta,   cfg.gtaInt)/1000);
+          const br = Math.ceil(cooldownRemainingMs('booze', st.lastBooze, cfg.boozeInt)/1000);
+          const jr = Math.ceil(cooldownRemainingMs('jail',  st.lastJail,  cfg.jailInt)/1000);
           const gar= Math.max(0, Math.ceil((cfg.garageInt*1000-(now-st.lastGarage))/60000));
           /* ⏸J = jail ready but yielding to an action due shortly.
            * ⏸M = jail ready but held because staff are online. Distinct marks,
