@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.287
+// @version      2000.288
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -34,7 +34,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.287
+/*  Jarvis Bot 2000.288
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -121,7 +121,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.287';
+  const APP_VERSION = '2000.288';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -1275,7 +1275,9 @@
     /* Seconds between XP readings. The game's own page polls every 15s, and our
      * refresh fires the identical request, so anything near 15-20s matches what a
      * browser left open does by itself. See xpPollMs(). */
-    xpPollSec:     GM_getValue('cbXpPollSec', 20),
+    /* BACKSTOP ONLY since 2000.288 — the XP feed is normally read AROUND each
+     * earning action, not on this clock. See xpPreReadDueFor(). */
+    xpPollSec:     GM_getValue('cbXpPollSec', 300),
     /* Ready reminders: OC/DTM goes ready and then sits there unused because you
      * didn't see the one alert. Re-ping every N minutes while it's STILL ready,
      * capped, and disarming the moment the timer goes back on cooldown. 0 = off. */
@@ -1352,7 +1354,7 @@
     lastMsgCheck:GM_getValue('cbLastMsgCheck', 0),
     // Seconds between background inbox polls. This is the ONLY thing that finds
     // new mail while Jarvis is sitting idle — see mailIntervalMs() for why.
-    msgCheckInt: GM_getValue('cbMsgCheckInt', 30)
+    msgCheckInt: GM_getValue('cbMsgCheckInt', 120)
   };
 
   /* === DISCORD WEBHOOK ===
@@ -1455,6 +1457,23 @@
   if (!GM_getValue('cbMsgCheckIntMigrated', false)) {
     GM_setValue('cbMsgCheckIntMigrated', true);
     if (Number(tg.msgCheckInt) === 60) { tg.msgCheckInt = 30; GM_setValue('cbMsgCheckInt', 30); }
+  }
+
+  /* 30s -> 120s, matching the reference's MAIL_CHECK_INTERVAL (2000.288).
+   *
+   * 234 moved this 60 -> 30 and WROTE the value, so changing the default alone
+   * would do nothing on an existing install — hence a second one-time move.
+   *
+   * 30s was defensible when the page could sit still for minutes. It no longer
+   * does: jail fires every ~5.5s, and checkNewMsgs() reads the envelope
+   * indicator on EVERY page load, so new mail is spotted within seconds by that
+   * route regardless of this figure. This poll is the idle-only safety net, and
+   * 120s is what the reference has always used for it. Anyone who runs with jail
+   * off can put it back in Settings -> Alerts.
+   */
+  if (!GM_getValue('cbMsgCheckInt120', false)) {
+    GM_setValue('cbMsgCheckInt120', true);
+    if (Number(tg.msgCheckInt) === 30) { tg.msgCheckInt = 120; GM_setValue('cbMsgCheckInt', 120); }
   }
 
   // Per-message Telegram toggles. Each sendTg now carries a key; if its toggle is
@@ -8514,9 +8533,9 @@
             <label class="jb-switch jb-mb"><input type="checkbox" id="jb-stats-on" ${stats.on?'checked':''}> Stats Collection</label>
             <label class="jb-switch jb-mb" title="Backstop for when the game's exact XP feed goes quiet: derives XP from the status-bar rank %, which is server-rendered on every page load. It STANDS DOWN whenever an exact reading has arrived in the last 10 minutes — it is rounded to the rank's step (0.3 XP at Global Dominator), so it must never compete with the real figures."><input type="checkbox" id="jb-xpbar-on" ${GM_getValue('cbXpBarOn',true)!==false?'checked':''}> 📊 Status-bar XP fallback</label>
             <div class="jb-row" title="How often to read your XP. The game's own page polls every 15 seconds while it sits open, and Jarvis fires the identical request — so 15-20s matches what an ordinary open browser does by itself.">
-              <label class="jb-label" style="white-space:nowrap">XP read every (s):</label>
-              <input class="jb-input jb-input-sm" type="number" id="jb-xp-poll" value="${cfg.xpPollSec}" min="10" max="300" step="5">
-              <span class="jb-sub">10–300 · default 20</span>
+              <label class="jb-label" style="white-space:nowrap">XP backstop (s):</label>
+              <input class="jb-input jb-input-sm" type="number" id="jb-xp-poll" value="${cfg.xpPollSec}" min="10" max="1800" step="10">
+              <span class="jb-sub">10–1800 · default 300</span>
             </div>
             <div class="jb-sub jb-mb" style="color:var(--jb-text-ter);font-size:9px">Every action inside one gap shares a single reading and is credited to whichever fired last (shown as <b>⊕</b> in the charts). Reading more often is what makes per-action XP accurate. This was 60–180s until 2000.245 — <b>slower than the game's own page</b>, which cost accuracy for camouflage it never actually bought. ±25% jitter is applied so it isn't a metronome.</div>
             <label class="jb-switch jb-mb"><input type="checkbox" id="jb-noxp-on" ${cfg.noXpLimiterOn?'checked':''}> 📉 No-XP daily limiter</label>
@@ -9294,10 +9313,10 @@
       }); }
     { const xp = _shadow.querySelector('#jb-xp-poll');
       if (xp) xp.addEventListener('change', e => {
-        cfg.xpPollSec = Math.max(10, Math.min(300, parseInt(e.target.value,10)||20));
+        cfg.xpPollSec = Math.max(10, Math.min(1800, parseInt(e.target.value,10)||300));
         e.target.value = cfg.xpPollSec; GM_setValue('cbXpPollSec', cfg.xpPollSec);
         GM_setValue('cbLastStatRefresh', 0);   // take effect now, not after the old gap
-        setStatus(`📊 XP read every ~${cfg.xpPollSec}s`);
+        setStatus(`📊 XP backstop ~${cfg.xpPollSec}s`);
       }); }
     { const ns = _shadow.querySelector('#jb-noxp-stale');
       if (ns) ns.addEventListener('change', e => {
@@ -10689,8 +10708,53 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
    * user should own.
    */
   function xpPollMs() {
-    const base = Math.max(10, Math.min(300, Number(cfg.xpPollSec) || 20)) * 1000;
+    const base = Math.max(10, Math.min(1800, Number(cfg.xpPollSec) || 300)) * 1000;
     return base * (0.75 + Math.random() * 0.5);   // ±25%
+  }
+
+  /* === READ XP AROUND EACH ACTION, NOT ON A METRONOME (2000.288) ===
+   *
+   * A reading is a DELTA between two readings, so what matters is not how often
+   * we read but WHERE the boundaries fall. A fixed 20s clock put them in
+   * arbitrary places and cost 180 requests an hour; the reference sits at
+   * 60-180s (STAT_REFRESH_MIN/MAX_MS) and ours was six times heavier for no
+   * gain that survives inspection — 2000.245 justified 20s as matching the
+   * game's own 15s page timer, but our pages live about five seconds, so that
+   * timer never fires for us. We were generating traffic an ordinary browser
+   * would not produce at all.
+   *
+   * Bracketing each earning action instead gives BOTH fewer requests and better
+   * attribution:
+   *   · a PRE-read shortly before the action closes off the preceding stretch —
+   *     which contains nothing but jail busts, and we know how many from
+   *     cbXpPending. That is a large clean jail sample, which is what
+   *     jailAvgXp() needs and what the 247 payout split is built on.
+   *   · the POST-read (the existing snapshot bypass) brackets the action itself,
+   *     covering it and at most one bust.
+   * ~38 pre + ~38 post + a slow backstop, against 180 before.
+   *
+   * JAIL IS DELIBERATELY NOT BRACKETED. It fires every ~5.5s, so reading around
+   * it would simply be the metronome again under another name — and jail is the
+   * residual by design (2000.246), which is exactly what the pre-read measures.
+   *
+   * The marker is keyed on the action's lastTs, so it fires ONCE per cooldown
+   * cycle rather than on every tick of the lead-in window.
+   */
+  const XP_PRE_READ_LEAD_MS = 12000;
+
+  function xpPreReadDueFor() {
+    const rows = [
+      ['crime', st.crime, st.lastCrime, cfg.crimeInt],
+      ['gta',   st.gta,   st.lastGta,   cfg.gtaInt],
+      ['booze', st.booze, st.lastBooze, cfg.boozeInt]
+    ];
+    for (const [act, on, last, intSec] of rows) {
+      if (!on || dailyLimitReached(act)) continue;
+      if (cooldownRemainingMs(act, last, intSec) > XP_PRE_READ_LEAD_MS) continue;
+      if (GM_getValue('cbXpPre_' + act, 0) === last) continue;   // already done this cycle
+      return { act, last };
+    }
+    return null;
   }
   // A read fired too soon after an action returns the PRE-action value, which
   // lands as a false "+0" and (with the limiter on) feeds the no-XP streak. The
@@ -10735,8 +10799,12 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
     // or a lingering one triggers a refresh every single tick.
     const snapFresh = snapT && age >= XP_SNAP_MIN_AGE_MS && age < 60000 && snapT !== bypassedFor;
 
+    // An earning action is about to fire: close off the stretch behind it, which
+    // is pure jail. See xpPreReadDueFor.
+    const pre = snapFresh ? null : xpPreReadDueFor();
+
     const last = GM_getValue('cbLastStatRefresh', 0);
-    if (!snapFresh && Date.now() - last < xpPollMs()) return false;
+    if (!snapFresh && !pre && Date.now() - last < xpPollMs()) return false;
 
     /* Only count an attempt that actually HAPPENED.
      *
@@ -10753,9 +10821,11 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
     if (!ok) { dlog(APP_TAG, '[XP] Stat refresh unavailable on this page — will retry'); return false; }
 
     if (snapFresh) GM_setValue('cbXpRefreshBypassedFor', snapT);
+    if (pre) GM_setValue('cbXpPre_' + pre.act, pre.last);
     GM_setValue('cbLastStatRefresh', Date.now());
-    if (snapFresh) console.log(`${APP_TAG}[XP] Stat refresh (${snap.action} +${Math.round(age/1000)}s)`);
-    else dlog(APP_TAG, '[XP] Stat refresh (routine)');
+    if (snapFresh) console.log(`${APP_TAG}[XP] Stat refresh (after ${snap.action}, +${Math.round(age/1000)}s)`);
+    else if (pre) dlog(APP_TAG, `[XP] Stat refresh (before ${pre.act})`);
+    else dlog(APP_TAG, '[XP] Stat refresh (backstop)');
     return ok;
   }
 
