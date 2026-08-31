@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.282
+// @version      2000.283
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -33,7 +33,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.282
+/*  Jarvis Bot 2000.283
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -120,7 +120,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.282';
+  const APP_VERSION = '2000.283';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -1102,9 +1102,6 @@
     // Smart crime picking: take the most VALUABLE crime still succeeding at or
     // above this percentage. See pickCrime for why raw "highest %" is wrong.
     smartMinPct:  GM_getValue('cbSmartMinPct', 85),
-    // Cadence mode: true = Away (max camouflage, slow, right-skewed long tail);
-    // false = At-PC (fast, fires shortly after cooldown for high throughput).
-    awayMode:        GM_getValue('cbAwayMode', true),
     /* Performance tuning — the only costs that had no switch of their own.
      * Everything else expensive (hover, SG lists, props, silent audio, worker
      * ticker) already has its own toggle. For a low-RAM device where the tab
@@ -5548,16 +5545,9 @@
     return floor + Math.max(0, extra);
   }
 
-  // At-PC / high-throughput mode ("how it was", minus the bugs): fire shortly after
-  // the cooldown with small jitter — never early, computed once (not per-tick).
-  function fastCooldownMs(intervalSec) {
-    const floor = Math.max(0, intervalSec * 1000);
-    return floor + 500 + Math.random() * 4000; // 0.5–4.5s after ready
-  }
-
-  // Pick the delay for the current cadence mode (toggled by the Away switch).
+  // Pick the delay for the current cadence mode.
   function nextCooldownMs(intervalSec) {
-    return cfg.awayMode ? humanCooldownMs(intervalSec) : fastCooldownMs(intervalSec);
+    return humanCooldownMs(intervalSec);
   }
 
   // True once the action's chosen (persisted) delay has elapsed since lastTs.
@@ -5573,9 +5563,7 @@
     GM_setValue('cbDly_' + action, nextCooldownMs(intervalSec));
   }
 
-  // Re-roll all pending action delays under the current mode — used when the Away
-  // switch flips, so toggling to At-PC takes effect immediately instead of waiting
-  // out a long camouflage delay that was already rolled (and vice-versa).
+  // Re-roll all pending action delays so a new cadence is applied immediately.
   function rerollCadence() {
     [['crime',cfg.crimeInt],['gta',cfg.gtaInt],['booze',cfg.boozeInt],['jail',cfg.jailInt]]
       .forEach(([a, iv]) => GM_setValue('cbDly_' + a, nextCooldownMs(iv)));
@@ -7548,14 +7536,7 @@
         background: var(--jb-header-bg); color: var(--jb-header-text);
         padding: 6px 10px; display: flex; justify-content: space-between; align-items: center;
         font-size: 12px; font-weight: 600; cursor: default; border-radius: 2px 2px 0 0;
-        user-select: none; gap: 8px;
-      }
-      .jb-header-title {
-        display: flex; align-items: center; gap: 6px; min-width: 0;
-      }
-      .jb-update-btn {
-        padding: 2px 7px; font-size: 9px; font-weight: 700; letter-spacing: .02em;
-        text-transform: uppercase; white-space: nowrap; min-width: 66px;
+        user-select: none;
       }
       .jb-modal-head {
         background: var(--jb-header-bg); color: var(--jb-header-text);
@@ -7712,10 +7693,7 @@
     root.className = 'jb-root';
     root.innerHTML = `
       <div class="jb-header" id="jb-drag">
-        <div class="jb-header-title">
-          <span>${APP_NAME} ${APP_VERSION}</span>
-          <button class="jb-hbtn jb-update-btn" id="jb-update-btn" title="Check for Jarvis update">Check</button>
-        </div>
+        <span>${APP_NAME} ${APP_VERSION}</span>
         <div class="jb-header-btns">
           <button class="jb-hbtn" id="jb-theme-btn" title="Theme">◑</button>
           <button class="jb-hbtn" id="jb-lock-btn" title="Lock">🔒</button>
@@ -7799,11 +7777,10 @@
 
           <div class="jb-sect">
             <div class="jb-grid">
-              <label class="jb-switch" title="ON = Away: max camouflage, slow human cadence. OFF = At PC: fast, high throughput."><input type="checkbox" id="jb-away-mode" ${cfg.awayMode?'checked':''}> 🕵️ <span id="jb-away-label">${cfg.awayMode?'Away (camo)':'At PC (fast)'}</span></label>
-              <label class="jb-switch"><input type="checkbox" id="jb-crusher"> Crusher</label>
+              <div class="jb-switch" title="Crusher for owned cars"><input type="checkbox" id="jb-crusher"> Crusher</div>
+              <div class="jb-switch" title="START a DTM yourself and invite a partner. Click the text to set the partner, schedule and repeat."><input type="checkbox" id="jb-create-dtm"> <span id="jb-dtm-link" style="cursor:pointer;text-decoration:underline;color:var(--jb-accent)">Create DTM</span></div>
               <div class="jb-switch"><input type="checkbox" id="jb-wl-on"> <span id="jb-wl-link" style="cursor:pointer;text-decoration:underline;color:var(--jb-accent)">Whitelist</span></div>
               <div class="jb-switch"><input type="checkbox" id="jb-create-oc"> <span id="jb-oc-link" style="cursor:pointer;text-decoration:underline;color:var(--jb-accent)">Create OC</span></div>
-              <div class="jb-switch" title="START a DTM yourself and invite a partner. Click the text to set the partner, schedule and repeat."><input type="checkbox" id="jb-create-dtm"> <span id="jb-dtm-link" style="cursor:pointer;text-decoration:underline;color:var(--jb-accent)">Create DTM</span></div>
               <div class="jb-switch" title="Master switch for Online Watch — off means neither group can fire. Enable/disable Group 1 and Group 2 individually inside the Watch window."><input type="checkbox" id="jb-ow-on"> <span id="jb-ow-link" style="cursor:pointer;text-decoration:underline;color:var(--jb-accent)">🟢 Watch</span></div>
               <label class="jb-switch" title="Property drop watch"><input type="checkbox" id="jb-prop-on"> 🏠 Props</label>
               <label class="jb-switch" title="Player hover tooltip (reload to apply)"><input type="checkbox" id="jb-hover-on"> 🔍 Hover</label>
@@ -8628,18 +8605,6 @@
                 : 'ALL ON — nothing saved, tick what you want');
     });
 
-    // Cadence mode switch (Away = camouflage / At PC = fast). Re-rolls pending
-    // delays on flip so the new mode takes effect immediately.
-    const awayCb = _shadow.querySelector('#jb-away-mode');
-    if (awayCb) awayCb.addEventListener('change', e => {
-      cfg.awayMode = e.target.checked;
-      GM_setValue('cbAwayMode', cfg.awayMode);
-      rerollCadence();
-      const lbl = _shadow.querySelector('#jb-away-label');
-      if (lbl) lbl.textContent = cfg.awayMode ? 'Away (camo)' : 'At PC (fast)';
-      setStatus(cfg.awayMode ? 'Away mode — max camouflage' : 'At-PC mode — fast');
-    });
-
     // Other checkboxes
     _shadow.querySelector('#jb-crusher').checked = st.crusher;
     if (st.crusherOwned === false) { _shadow.querySelector('#jb-crusher').disabled = true; }
@@ -8738,90 +8703,6 @@
         applyTheme(e.target.value);
         setStatus('🎨 ' + (THEME_LIST.find(t => t[0] === e.target.value)?.[1] || e.target.value));
       }); }
-
-    const UPDATE_META_URL = 'https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.meta.js';
-    function versionParts(v) {
-      return String(v || '0').split('.').map(n => parseInt(n, 10) || 0);
-    }
-    function compareVersions(a, b) {
-      const av = versionParts(a), bv = versionParts(b);
-      const max = Math.max(av.length, bv.length);
-      for (let i = 0; i < max; i++) {
-        const diff = (av[i] || 0) - (bv[i] || 0);
-        if (diff !== 0) return diff;
-      }
-      return 0;
-    }
-    let updateState = { checking: false, known: false, newer: false, remote: '' };
-    function paintUpdateBtn() {
-      const btn = _shadow.querySelector('#jb-update-btn');
-      if (!btn) return;
-      btn.disabled = updateState.checking;
-      btn.style.opacity = updateState.checking ? '0.7' : '1';
-      if (updateState.checking) {
-        btn.textContent = 'Checking';
-        btn.title = 'Checking for a newer Jarvis version';
-        btn.style.background = 'rgba(255,255,255,.18)';
-        return;
-      }
-      if (updateState.newer) {
-        btn.textContent = 'Update';
-        btn.title = `Update available: ${APP_VERSION} → ${updateState.remote}. Click to reload and apply.`;
-        btn.style.background = 'var(--jb-success)';
-        return;
-      }
-      if (updateState.known) {
-        btn.textContent = 'Up to date';
-        btn.title = `You are on the latest version (${APP_VERSION})`;
-        btn.style.background = 'rgba(255,255,255,.15)';
-        return;
-      }
-      btn.textContent = 'Check';
-      btn.title = 'Check for a Jarvis update';
-      btn.style.background = 'rgba(255,255,255,.15)';
-    }
-    function checkScriptUpdate() {
-      updateState = { ...updateState, checking: true };
-      paintUpdateBtn();
-      GM_xmlhttpRequest({
-        method: 'GET',
-        url: UPDATE_META_URL,
-        timeout: 8000,
-        onload(res) {
-          try {
-            const m = String(res.responseText || '').match(/@version\s+([0-9.]+)/i);
-            const remote = m ? m[1] : '';
-            const newer = !!remote && compareVersions(remote, APP_VERSION) > 0;
-            updateState = { checking: false, known: !!remote, newer, remote };
-            if (remote && newer) console.log(`[JB][UPDATE] Update available ${APP_VERSION} -> ${remote}`);
-            else if (remote) console.log(`[JB][UPDATE] Up to date (${remote})`);
-          } catch (_) {
-            updateState = { checking: false, known: false, newer: false, remote: '' };
-          }
-          paintUpdateBtn();
-        },
-        onerror() {
-          updateState = { checking: false, known: false, newer: false, remote: '' };
-          paintUpdateBtn();
-        },
-        ontimeout() {
-          updateState = { checking: false, known: false, newer: false, remote: '' };
-          paintUpdateBtn();
-        }
-      });
-    }
-    const updateBtn = _shadow.querySelector('#jb-update-btn');
-    if (updateBtn) {
-      updateBtn.addEventListener('click', () => {
-        if (updateState.newer) {
-          setStatus(`↻ Reloading to apply ${updateState.remote}`);
-          setTimeout(() => location.reload(), 250);
-          return;
-        }
-        checkScriptUpdate();
-      });
-      checkScriptUpdate();
-    }
 
     // Text size — applied as a class on .jb-root (see the jb-lg / jb-xl rules).
     function applyUiSize(sz) {
