@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.288
+// @version      2000.289
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -34,7 +34,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.288
+/*  Jarvis Bot 2000.289
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -121,7 +121,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.288';
+  const APP_VERSION = '2000.289';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -1215,7 +1215,9 @@
     gtaInt:      GM_getValue('cbGtaInt', 245),
     jailInt:     GM_getValue('cbJailInt', 3),
     jailDailyLimit: GM_getValue('cbJailDailyLimit', 2000),
-    jailCheckInt:GM_getValue('cbJailCheckInt', 5),
+    /* FALLBACK ONLY since 2000.289 — normally we wait out the sentence the page
+     * states. This is the gap used near release, or if it did not parse. */
+    jailCheckInt:GM_getValue('cbJailCheckInt', 15),
     // Randomised pause after leaving jail before automation resumes — a human
     // doesn't carry straight on the instant the cell door opens. Seconds.
     jailDelayOn:  GM_getValue('cbJailDelayOn', false),
@@ -5695,6 +5697,8 @@
       const txt = document.body.textContent.toLowerCase();
       if (txt.includes('you are in jail') || txt.includes('you have been jailed')) inJail = true;
     }
+    if (inJail) noteJailSentence(document.body.textContent || '');
+    else clearJailSentence();
     const was = st.inJail;
     st.inJail = inJail;
     if (!was && inJail) {
@@ -5707,14 +5711,67 @@
     saveSt();
   }
 
+  /* === THE GAME TELLS YOU THE SENTENCE, SO STOP ASKING (2000.289) ===
+   *
+   * The jail page states it outright:
+   *   "You are in jail! You will stay in for 3 more minutes and 12 more seconds"
+   *
+   * cfg.jailCheckInt defaulted to FIVE SECONDS and was not even exposed in
+   * Settings, so being jailed meant reloading jail.aspx to ask a question the
+   * page had already answered — 720 page loads an hour, and a ten-minute
+   * sentence cost 120 of them. It now costs about two.
+   *
+   * The wording comes from the reference's matcher (4.20.265), not a guess — but
+   * NOT its regex, which is subtly wrong. Theirs is:
+   *     (\d+) more (\w+)(?:\s+and\s+(\d+)\s+(\w+))?
+   * On "3 more minutes and 12 more seconds" the second group captures 12 and the
+   * word **more** as the unit, which matches none of second/minute/hour and
+   * contributes ZERO — so the reference silently drops the seconds. `more` is
+   * optional in both halves here, and the parser is unit-tested against both
+   * phrasings.
+   *
+   * If it ever fails to parse we simply fall back to the fixed interval, so a
+   * reworded page costs latency and nothing else.
+   */
+  const JAIL_TIME_RE = /You will stay in for (\d+)\s+(?:more\s+)?(\w+)(?:\s+and\s+(\d+)\s+(?:more\s+)?(\w+))?/i;
+  const JAIL_WAIT_MARGIN_MS = 8000;   // start looking again this long before release
+
+  function parseJailRemainingSec(text) {
+    const m = String(text || '').match(JAIL_TIME_RE);
+    if (!m) return null;
+    const unit = (u, v) => /second/i.test(u) ? v : /minute/i.test(u) ? v * 60 : /hour/i.test(u) ? v * 3600 : 0;
+    let s = unit(m[2], parseInt(m[1], 10) || 0);
+    if (m[3] && m[4]) s += unit(m[4], parseInt(m[3], 10) || 0);
+    return s > 0 ? s : null;
+  }
+
+  function noteJailSentence(text) {
+    const s = parseJailRemainingSec(text);
+    if (s == null) return false;
+    GM_setValue('cbJailUntil', Date.now() + s * 1000);
+    dlog(APP_TAG, `[JAIL] Sentence reads ${s}s — waiting it out rather than polling`);
+    return true;
+  }
+
+  // Release timestamp if we know it and it is still ahead of us, else 0.
+  function jailReleaseAt() {
+    const u = parseInt(GM_getValue('cbJailUntil', 0) || 0, 10);
+    return (u && u > Date.now()) ? u : 0;
+  }
+
+  function clearJailSentence() { GM_setValue('cbJailUntil', 0); }
+
   function checkJailAny() {
     if (curPage() === 'jail') return processJail();
-    const txt = document.body.textContent.toLowerCase();
+    const raw = document.body.textContent || '';
+    const txt = raw.toLowerCase();
     if (txt.includes('you are in jail') || txt.includes('you have been jailed')) {
+      noteJailSentence(raw);   // the page states how long — record it
       const was = st.inJail; st.inJail = true;
       if (!was) { if (st.action && !st.pending) st.pending = st.action; st.acting = false; st.action = ''; st.refresh = true; GM_setValue('cbActStart',0); saveSt(); setTimeout(() => { window.location.href = '/authenticated/jail.aspx?'+Date.now(); }, 1000); }
       return true;
     }
+    if (st.inJail) clearJailSentence();   // out, on a page that would have said otherwise
     return st.inJail;
   }
 
@@ -10400,6 +10457,7 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
           /* Last thing, and nothing may follow it. There is no navigate-away step
            * any more: the postback IS the navigation, and the main loop picks the
            * next action from the reloaded page. */
+          snapshotXP('travel');   // flying earns XP — see XP_ACTIONS
           travelBtn.click();
         } else {
           /* No jet — say so rather than sitting silent, because from the outside
@@ -10512,7 +10570,10 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
    * a row — the game's daily cap, detected rather than hard-coded.
    */
 
-  const XP_ACTIONS = ['crime','gta','booze','jail','garage','oc','dtm'];
+  /* `travel` added in 2000.289 — flying earns XP and nothing ever tagged it, so
+   * every arrival landed in `other` or was credited to whichever action fired
+   * last. Precisely the fault 2000.242 found with `oc`. */
+  const XP_ACTIONS = ['crime','gta','booze','jail','garage','oc','dtm','travel'];
   /* Recent-gains history. Raised from 40 to 250 in 2000.242 — the list is the
    * most useful thing on the charts for spotting what an action is actually
    * worth, and 40 entries is under an hour of play. Each entry is ~120 bytes, so
@@ -10548,7 +10609,7 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
   };
   XP_ACTIONS.forEach(a => { if (typeof xpState.perAction[a] !== 'number') xpState.perAction[a] = 0; });
 
-  const ACTION_ICON = { crime:'👜', gta:'🏎️', booze:'🍺', jail:'⛓️', garage:'🏪', oc:'🎯', dtm:'💊', other:'⚡' };
+  const ACTION_ICON = { crime:'👜', gta:'🏎️', booze:'🍺', jail:'⛓️', garage:'🏪', oc:'🎯', dtm:'💊', travel:'✈️', other:'⚡' };
 
   /* === RANK TABLE (per-rank XP requirements) ===
    * perRankReq[i] = XP needed WITHIN rank-step i to advance to the next rank.
@@ -10753,6 +10814,18 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
       if (cooldownRemainingMs(act, last, intSec) > XP_PRE_READ_LEAD_MS) continue;
       if (GM_getValue('cbXpPre_' + act, 0) === last) continue;   // already done this cycle
       return { act, last };
+    }
+    /* Travel earns too, but its readiness is a fetched cooldown rather than one
+     * of our own timers — and it only ACTS when there is somewhere to go, so it
+     * is gated exactly as jailShouldHoldOff gates it. Keyed on the stored due
+     * time so it fires once per flight, not once per tick while sitting ready in
+     * the wrong city. */
+    if (st.autoTravel && getHot() && !isInHot()) {
+      const tv = getTravel();
+      if (tv && (tv.ready || tv.remaining * 1000 <= XP_PRE_READ_LEAD_MS)) {
+        const key = Math.floor(Date.now() / 60000);   // at most one per minute
+        if (GM_getValue('cbXpPre_travel', 0) !== key) return { act: 'travel', last: key };
+      }
     }
     return null;
   }
@@ -12807,11 +12880,20 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
       }
 
       if (st.inJail) {
-        if (now - st.lastJailCk > cfg.jailCheckInt*1000) {
+        const pend = localStorage.getItem(LS_PEND_DTM) ? ' (DTM pending)' : localStorage.getItem(LS_PEND_OC) ? ' (OC pending)' : '';
+        const until = jailReleaseAt();
+        const remMs = until ? until - now : 0;
+        /* We know when we get out, so sit still until then — see JAIL_TIME_RE.
+         * Only when the release is close (or the sentence never parsed) do we
+         * go back to asking, and then at cfg.jailCheckInt, which is a FALLBACK
+         * now rather than the normal path. */
+        if (remMs > JAIL_WAIT_MARGIN_MS) {
+          const mins = Math.floor(remMs / 60000), secs = Math.ceil((remMs % 60000) / 1000);
+          setStatus(`IN JAIL — out in ${mins ? mins + 'm ' : ''}${secs}s${st.pending ? ` (resume ${st.pending})` : ''}${pend}`);
+        } else if (now - st.lastJailCk > cfg.jailCheckInt*1000) {
           st.lastJailCk = now; saveSt();
           safeNav('/authenticated/jail.aspx?'+Date.now());
         } else {
-          const pend = localStorage.getItem(LS_PEND_DTM) ? ' (DTM pending)' : localStorage.getItem(LS_PEND_OC) ? ' (OC pending)' : '';
           setStatus(`IN JAIL${st.pending?` (resume ${st.pending})`:''} ${pend}`);
         }
       } else {
