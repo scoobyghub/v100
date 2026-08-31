@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.283
+// @version      2000.284
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -33,7 +33,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.283
+/*  Jarvis Bot 2000.284
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -120,7 +120,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.283';
+  const APP_VERSION = '2000.284';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -5033,8 +5033,25 @@
   const SG_SAFE_URL    = 'https://starvinggeeks.net/helper/safe.php';
   const SG_ALLIED_URL  = 'https://starvinggeeks.net/helper/allied.php';
   const SG_WATCHED_URL = 'https://starvinggeeks.net/helper/watched.php';
-  const SG_TTL_MS = 30 * 60 * 1000;   // match the SG list freshness window the reference uses
-  const SG_RETRY_MS = 30 * 1000;      // retry a dead endpoint after half a minute
+  /* FIVE MINUTES — what the reference ACTUALLY uses (2000.284).
+   *
+   * 2000.282 raised this to 30 minutes and justified it as matching the
+   * reference's freshness window. It did the opposite: the reference has
+   * SAFE_LIST_REFRESH_MS = 5 * 60 * 1000, unchanged across both copies on disk
+   * (4.20.252 and 4.20.259), so the change moved us SIX TIMES further away from
+   * it while claiming to match. Five minutes is also what Jarvis had before 282.
+   *
+   * The cost of a stale list is not cosmetic. The allied/safe invite gate is an
+   * ALLOW-list that REFUSES on a miss, so a half-hour window means somebody you
+   * have just added can have their OC/DTM invite turned down for half an hour —
+   * and §4 already records that such a refusal looks identical to a fault.
+   */
+  const SG_TTL_MS = 5 * 60 * 1000;
+  /* Retry gate after a FAILED attempt. The reference has no equivalent — it
+   * stamps only on success, so a dead endpoint is retried on every page load,
+   * which under bot navigation is roughly every 2.5 seconds. Keep this: it is
+   * the thing that stops a broken endpoint turning into a request flood. */
+  const SG_RETRY_MS = 30 * 1000;
 
   const sgCfg = { on: GM_getValue('cbSgOn', false) };
   function saveSgCfg() { GM_setValue('cbSgOn', sgCfg.on); }
@@ -5134,11 +5151,17 @@
         return null;
       }
     };
-    const [s, a, w] = await Promise.all([
-      pull(SG_SAFE_URL,    'cbSgSafe',    'safe'),
-      pull(SG_ALLIED_URL,  'cbSgAllied',  'allied'),
-      pull(SG_WATCHED_URL, 'cbSgWatched', 'watched')
-    ]);
+    /* SEQUENTIAL, NOT A PARALLEL BURST (2000.284). Three simultaneous GETs is
+     * the shape a naive rate limiter objects to, and the concurrency buys
+     * nothing — this runs once every five minutes and nothing waits on it. The
+     * reference fetches them in this same order, one after another.
+     *
+     * Each still fails INDEPENDENTLY, which the reference does not do: there,
+     * allied and watched sit inside the safe-list try block, so if safe.php is
+     * down those two never update at all. */
+    const s = await pull(SG_SAFE_URL,    'cbSgSafe',    'safe');
+    const a = await pull(SG_ALLIED_URL,  'cbSgAllied',  'allied');
+    const w = await pull(SG_WATCHED_URL, 'cbSgWatched', 'watched');
     if (s) sgSafe = s;
     if (a) sgAllied = a;
     if (w) sgWatched = w;
