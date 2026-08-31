@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.279
+// @version      2000.280
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -33,7 +33,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.279
+/*  Jarvis Bot 2000.280
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -120,7 +120,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.279';
+  const APP_VERSION = '2000.280';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -7710,10 +7710,10 @@
             <div class="jb-grid" style="grid-template-columns: 1fr 1fr;">
               <div class="jb-flex"><span class="jb-timer-label">Player:</span> <span id="jb-player-badge">${esc(st.player||'—')}</span></div>
               <div class="jb-flex"><span class="jb-timer-label">Mod:</span><span id="jb-mod-light" title="Staff watch state" style="display:inline-flex;align-items:center;gap:5px"><span class="jb-status-dot" id="jb-mod-light-dot" style="color:var(--jb-text-ter)"></span><span id="jb-mod-light-text" style="font-size:9px;letter-spacing:0.02em">off</span></span></div>
-              <div class="jb-flex" style="grid-column:1 / -1">
+              <div class="jb-flex">
                 <label class="jb-switch"><input type="checkbox" id="jb-all-toggle"> <span style="font-weight:600" id="jb-all-label">ALL</span></label>
               </div>
-              <div class="jb-flex" style="grid-column:1 / -1">
+              <div class="jb-flex" style="justify-content:flex-end; min-width:0;">
                 <label class="jb-switch" title="Stop attempting jail busts while staff are online. Jail runs every few seconds by default, so it is by far the noisiest thing Jarvis does — nothing else is suppressed."><input type="checkbox" id="jb-mod-nojail" ${cfg.noJailOnMod?'checked':''}> ⛓️ No jail while staff are online</label>
               </div>
             </div>
