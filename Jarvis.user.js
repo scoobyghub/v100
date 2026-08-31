@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.291
+// @version      2000.292
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -34,7 +34,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.291
+/*  Jarvis Bot 2000.292
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -121,7 +121,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.291';
+  const APP_VERSION = '2000.292';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -8152,7 +8152,7 @@
             <div class="jb-sect-title">Status</div>
             <div class="jb-grid" style="grid-template-columns: 1fr 1fr;">
               <div class="jb-flex"><span class="jb-timer-label">Player:</span> <span id="jb-player-badge">${esc(st.player||'—')}</span></div>
-              <div class="jb-flex"><span class="jb-timer-label">Mod:</span><span id="jb-mod-light" title="Staff watch state" style="display:inline-flex;align-items:center;gap:5px"><span class="jb-status-dot" id="jb-mod-light-dot" style="color:var(--jb-text-ter)"></span><span id="jb-mod-light-text" style="font-size:9px;letter-spacing:0.02em">off</span></span></div>
+              <div class="jb-flex"><span class="jb-timer-label">Mod:</span><span id="jb-mod-light" title="Staff watch" style="display:inline-flex;align-items:center"><span class="jb-status-dot" id="jb-mod-light-dot" style="color:var(--jb-text-ter)"></span></span></div>
               <div class="jb-flex">
                 <label class="jb-switch"><input type="checkbox" id="jb-all-toggle"> <span style="font-weight:600" id="jb-all-label">ALL</span></label>
               </div>
@@ -9837,40 +9837,39 @@
       } catch(_){}
     }, 5000);
 
+    /* MOD LIGHT: RED = staff online, GREEN = staff offline (2000.292).
+     *
+     * Was five states with a text label; it is an at-a-glance watcher, so it is
+     * a bare dot now.
+     *
+     * GREY IS KEPT, and is not a third state so much as the absence of a claim:
+     * the watch is off, has never run, or the last reading is older than
+     * MOD_STALE_MS. Green there would be a lie — §4's whole fail-open design
+     * means a stale reading suppresses NOTHING, so painting it 'staff offline'
+     * would be exactly the false reassurance on the happy path that 267 records
+     * as worse than no signal at all. The tooltip says which. */
     try {
-      const dot = _shadow.querySelector('#jb-mod-light-dot');
-      const txt = _shadow.querySelector('#jb-mod-light-text');
+      const dot  = _shadow.querySelector('#jb-mod-light-dot');
       const wrap = _shadow.querySelector('#jb-mod-light');
-      if (wrap && dot && txt) {
-        if (!cfg.modWatchOn) {
-          dot.style.color = 'var(--jb-text-ter)';
-          dot.style.background = 'var(--jb-text-ter)';
-          txt.textContent = 'off';
-          wrap.title = 'Staff watch is off';
+      if (wrap && dot) {
+        const s = cfg.modWatchOn ? modState() : null;
+        const usable = s && (Date.now() - (s.at || 0)) <= MOD_STALE_MS;
+        let colour, tip;
+        if (!usable) {
+          colour = 'var(--jb-text-ter)';
+          tip = !cfg.modWatchOn ? 'Staff watch is OFF — switch it on below'
+              : !s              ? 'Staff watch has not checked yet'
+                                : 'Last staff check is stale — nothing is being suppressed';
+        } else if (modsOnline().length) {
+          colour = 'var(--jb-danger)';
+          tip = 'STAFF ONLINE: ' + modsOnline().join(', ');
         } else {
-          const s = modState();
-          if (!s) {
-            dot.style.color = 'var(--jb-text-ter)';
-            dot.style.background = 'var(--jb-text-ter)';
-            txt.textContent = 'n/a';
-            wrap.title = 'Staff watch has not checked yet';
-          } else if (Date.now() - (s.at || 0) > MOD_STALE_MS) {
-            dot.style.color = 'var(--jb-warning)';
-            dot.style.background = 'var(--jb-warning)';
-            txt.textContent = 'stale';
-            wrap.title = 'Staff check is stale — jail suppression is not active';
-          } else if (modsOnline().length) {
-            dot.style.color = 'var(--jb-danger)';
-            dot.style.background = 'var(--jb-danger)';
-            txt.textContent = 'online';
-            wrap.title = 'Staff is online — jail suppression is active';
-          } else {
-            dot.style.color = 'var(--jb-success)';
-            dot.style.background = 'var(--jb-success)';
-            txt.textContent = 'clear';
-            wrap.title = 'No staff online';
-          }
+          colour = 'var(--jb-success)';
+          tip = 'Staff offline — all clear';
         }
+        dot.style.color = colour;
+        dot.style.background = colour;
+        wrap.title = tip;
       }
     } catch(_){ }
 
