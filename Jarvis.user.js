@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.292
+// @version      2000.293
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -34,7 +34,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.292
+/*  Jarvis Bot 2000.293
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -121,7 +121,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.292';
+  const APP_VERSION = '2000.293';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -8218,7 +8218,7 @@
               <label class="jb-switch" title="Property drop watch"><input type="checkbox" id="jb-prop-on"> 🏠 Props</label>
               <label class="jb-switch" title="Player hover tooltip (reload to apply)"><input type="checkbox" id="jb-hover-on"> 🔍 Hover</label>
               <label class="jb-switch" title="Colour player links from your Starvinggeeks lists — watched (orange), safe (green), allied (blue). Read-only: three GETs, nothing is ever sent."><input type="checkbox" id="jb-sg-on"> 🎨 SG lists <span id="jb-sg-status" style="font-size:9px;letter-spacing:0.02em">—</span></label>
-              <label class="jb-switch"><input type="checkbox" id="jb-notify-ready"> 🔔 Alerts</label>
+              <label class="jb-switch" title="Telegram ping when an OC or DTM comes off cooldown, plus the repeat reminders while it is still sitting there unused. This is ONLY the OC/DTM ready pings — every other alert lives in Settings → Alerts, and script checks are never gated by it."><input type="checkbox" id="jb-notify-ready"> 🔔 OC/DTM alerts</label>
               <label class="jb-switch"><input type="checkbox" id="jb-auto-travel" ${st.autoTravel?'checked':''}> ✈️ Auto Travel</label>
               <label class="jb-switch" title="ADVERTISE yourself on the DTM list (ocads.aspx) when a DTM is ready, so others can invite you"><input type="checkbox" id="jb-auto-dtmlist" ${st.autoDtmList?'checked':''}> 📋 DTM List</label>
               <label class="jb-switch" title="PANIC: hide inside your network HQ so you can't be shot. Pauses everything else, re-enters until the cap, then switches itself off. Never enters a damaged HQ — if it's destroyed while you're inside, you die."><input type="checkbox" id="jb-holdhq-on" ${cfg.holdHqOn?'checked':''}> 🏠 Hold HQ</label>
