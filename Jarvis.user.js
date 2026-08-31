@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.290
+// @version      2000.291
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -34,7 +34,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.290
+/*  Jarvis Bot 2000.291
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -121,7 +121,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.290';
+  const APP_VERSION = '2000.291';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -3438,7 +3438,23 @@
       const f = await getPlayersDoc(false);
       const names = parseModsFromDoc(f.doc);
       const prev = modState();
-      const was = (prev && Array.isArray(prev.names)) ? prev.names : [];
+      /* A PRIOR READING OLDER THAN MOD_STALE_MS IS NOT KNOWLEDGE (2000.291).
+       *
+       * The alert fires on names that are new since the last scan. But a tab can
+       * be asleep, throttled or discarded for hours, and `prev` then still holds
+       * whoever was online back then — so on resume the SAME mod still being on
+       * produced an empty `fresh` list and total silence, even though from your
+       * side it is news. That is a plausible reason for two devices reporting a
+       * mod and two staying quiet.
+       *
+       * modsOnline() already refuses to act on a reading this old, for exactly
+       * this reason. This makes the alert path agree with it: too old to suppress
+       * jail is too old to suppress an alert.
+       *
+       * The 'staff offline' branch below reads the same `was`, which is right —
+       * with no recent reading we cannot claim they have LEFT either. */
+      const prevFresh = prev && (Date.now() - (prev.at || 0)) <= MOD_STALE_MS;
+      const was = (prevFresh && Array.isArray(prev.names)) ? prev.names : [];
       localStorage.setItem('cbModOnline', JSON.stringify({ names, at: Date.now(), ok: true }));
 
       // Alert + break only on the transition, so a mod sitting online all evening
