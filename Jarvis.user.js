@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.289
+// @version      2000.290
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -34,7 +34,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.289
+/*  Jarvis Bot 2000.290
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -121,7 +121,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.289';
+  const APP_VERSION = '2000.290';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -5734,7 +5734,37 @@
    * reworded page costs latency and nothing else.
    */
   const JAIL_TIME_RE = /You will stay in for (\d+)\s+(?:more\s+)?(\w+)(?:\s+and\s+(\d+)\s+(?:more\s+)?(\w+))?/i;
-  const JAIL_WAIT_MARGIN_MS = 8000;   // start looking again this long before release
+  /* === THE SENTENCE IS A CEILING, NOT AN APPOINTMENT (2000.290) ===
+   *
+   * 2000.289 sat still until 8s before the stated release. That was wrong on a
+   * fact of the game: **another player can break you out at any moment**, and
+   * with every bot on the server busting jail continuously that is common, not
+   * rare — we do it 654 times an hour to other people. So the stated time is the
+   * WORST case; the real release can land anywhere inside it, and sitting out a
+   * sentence somebody already ended is dead time that costs real actions.
+   *
+   * The other half of the same fact: **the sentence scales with rank**, roughly
+   * 5 seconds at the bottom to about 2m30s at the top. So no single interval is
+   * right — a flat 5s is 30 pointless checks on a long sentence, and a flat 30s
+   * is absurd on a 5-second one.
+   *
+   * So: poll PROPORTIONALLY. About a fifth of whatever is left, floored at
+   * cfg.jailCheckInt and capped at JAIL_POLL_MAX_MS. A 2m30s sentence costs
+   * ~10 checks instead of 30 and notices an early release within ~20s; a 5s one
+   * is checked once or twice. Nothing is ever skipped entirely.
+   */
+  const JAIL_POLL_MAX_MS = 20000;
+
+  function jailPollMs() {
+    const floor = Math.max(3, Number(cfg.jailCheckInt) || 15) * 1000;
+    const until = jailReleaseAt();
+    if (!until) return floor;                       // sentence unknown — fixed gap
+    const rem = Math.max(0, until - Date.now());
+    /* Never wait PAST the expected release either: at low rank a sentence can be
+     * about five seconds, and a 15s floor would leave us sitting in an empty cell
+     * for ten of them. The +1s lands just the far side of it. */
+    return Math.min(JAIL_POLL_MAX_MS, Math.max(floor, rem / 5), rem + 1000);
+  }
 
   function parseJailRemainingSec(text) {
     const m = String(text || '').match(JAIL_TIME_RE);
@@ -5759,7 +5789,19 @@
     return (u && u > Date.now()) ? u : 0;
   }
 
-  function clearJailSentence() { GM_setValue('cbJailUntil', 0); }
+  function clearJailSentence() { GM_setValue('cbJailUntil', 0); GM_setValue('cbJailNextCk', 0); }
+
+  /* THE GAP IS DECIDED AT CHECK TIME, NOT RE-DERIVED EVERY TICK.
+   *
+   * jailPollMs() reads the CURRENT remaining time, so testing `now - lastCheck >
+   * jailPollMs()` re-answers the question with different inputs each tick — and
+   * the moment the sentence runs out the gap snaps back to the floor. On a
+   * five-second sentence that meant: check at 0 with a 6s gap, then at t=6s the
+   * remaining time is zero, the gap becomes the 15s floor, 6 < 15, so no check —
+   * and we sat in an already-open cell until t=15s. Storing the next check
+   * instead freezes the decision with the inputs it was made on. */
+  function jailNextCheckAt() { return parseInt(GM_getValue('cbJailNextCk', 0) || 0, 10); }
+  function setJailNextCheck(ts) { GM_setValue('cbJailNextCk', ts); }
 
   function checkJailAny() {
     if (curPage() === 'jail') return processJail();
@@ -8272,6 +8314,12 @@
               <input class="jb-input jb-input-sm" type="number" id="jb-jail-limit" value="${cfg.jailDailyLimit}" min="50" max="4000" step="50">
               <span class="jb-sub">(50–4000)</span>
             </div>
+            <div class="jb-row" title="How often to look while you are locked up. This is the FLOOR: Jarvis reads the stated sentence and checks about every fifth of what is left, so a long sentence is checked less often than a short one. It never stops checking, because another player can break you out at any moment.">
+              <label class="jb-label" style="white-space:nowrap">Check while jailed (s):</label>
+              <input class="jb-input jb-input-sm" type="number" id="jb-jail-check" value="${cfg.jailCheckInt}" min="3" max="120" step="1">
+              <span class="jb-sub">floor · max 20s</span>
+            </div>
+            <div class="jb-sub jb-mb" style="color:var(--jb-text-ter);font-size:9px">Sentences get longer with rank — roughly 5s at the bottom to about 2m30s at the top — so a single fixed number is wrong at one end or the other. Lower this to notice a break-out sooner at the cost of more page loads.</div>
             <div class="jb-row" title="Don't start a jail bust when a crime, GTA, booze or auto-travel is due within this many seconds — a failed bust jails you and blocks that action. Slide to 0 to disable.">
               <label class="jb-label" style="white-space:nowrap">Yield to actions:</label>
               <input type="range" id="jb-jailyield" min="0" max="90" step="5" value="${cfg.jailYieldSec}" style="flex:1;accent-color:var(--jb-accent)">
@@ -9196,6 +9244,12 @@
       const sEl = _shadow.querySelector('#jb-jail-count-settings');
       if (sEl) sEl.textContent = `${getJailCount()}/${cfg.jailDailyLimit}`;
     });
+    { const jc = _shadow.querySelector('#jb-jail-check');
+      if (jc) jc.addEventListener('change', e => {
+        cfg.jailCheckInt = Math.max(3, Math.min(120, parseInt(e.target.value,10)||15));
+        e.target.value = cfg.jailCheckInt; GM_setValue('cbJailCheckInt', cfg.jailCheckInt);
+        st.lastJailCk = 0; saveSt();   // apply now rather than after the old gap
+      }); }
     { const y = _shadow.querySelector('#jb-jailyield');
       if (y) y.addEventListener('input', e => {
         cfg.jailYieldSec = Math.max(0, Math.min(90, parseInt(e.target.value,10)||0));
@@ -12883,18 +12937,18 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
         const pend = localStorage.getItem(LS_PEND_DTM) ? ' (DTM pending)' : localStorage.getItem(LS_PEND_OC) ? ' (OC pending)' : '';
         const until = jailReleaseAt();
         const remMs = until ? until - now : 0;
-        /* We know when we get out, so sit still until then — see JAIL_TIME_RE.
-         * Only when the release is close (or the sentence never parsed) do we
-         * go back to asking, and then at cfg.jailCheckInt, which is a FALLBACK
-         * now rather than the normal path. */
-        if (remMs > JAIL_WAIT_MARGIN_MS) {
-          const mins = Math.floor(remMs / 60000), secs = Math.ceil((remMs % 60000) / 1000);
-          setStatus(`IN JAIL — out in ${mins ? mins + 'm ' : ''}${secs}s${st.pending ? ` (resume ${st.pending})` : ''}${pend}`);
-        } else if (now - st.lastJailCk > cfg.jailCheckInt*1000) {
+        /* Always keep checking — see jailPollMs. The stated time only sets HOW
+         * OFTEN, never whether: somebody can break you out at any moment. */
+        if (now >= jailNextCheckAt()) {
+          setJailNextCheck(now + jailPollMs());   // fixed now, on today's numbers
           st.lastJailCk = now; saveSt();
           safeNav('/authenticated/jail.aspx?'+Date.now());
         } else {
-          setStatus(`IN JAIL${st.pending?` (resume ${st.pending})`:''} ${pend}`);
+          // '≤' because the sentence is the worst case — a break-out ends it sooner.
+          const left = remMs > 0
+            ? ` — ≤${Math.floor(remMs/60000) ? Math.floor(remMs/60000) + 'm ' : ''}${Math.ceil((remMs % 60000)/1000)}s`
+            : '';
+          setStatus(`IN JAIL${left}${st.pending?` (resume ${st.pending})`:''} ${pend}`);
         }
       } else {
         if (st.pending) {
