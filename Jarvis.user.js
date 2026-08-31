@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.281
+// @version      2000.282
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -33,7 +33,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.281
+/*  Jarvis Bot 2000.282
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -120,7 +120,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.281';
+  const APP_VERSION = '2000.282';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -5036,15 +5036,47 @@
   const SG_SAFE_URL    = 'https://starvinggeeks.net/helper/safe.php';
   const SG_ALLIED_URL  = 'https://starvinggeeks.net/helper/allied.php';
   const SG_WATCHED_URL = 'https://starvinggeeks.net/helper/watched.php';
-  const SG_TTL_MS = 5 * 60 * 1000;
-  const SG_RETRY_MS = 30 * 1000;   // a failed/interrupted attempt may retry this soon
+  const SG_TTL_MS = 30 * 60 * 1000;   // match the SG list freshness window the reference uses
+  const SG_RETRY_MS = 30 * 1000;      // retry a dead endpoint after half a minute
 
   const sgCfg = { on: GM_getValue('cbSgOn', false) };
   function saveSgCfg() { GM_setValue('cbSgOn', sgCfg.on); }
 
-  let sgSafe    = GM_getValue('cbSgSafe', []) || [];
-  let sgAllied  = GM_getValue('cbSgAllied', []) || [];
-  let sgWatched = GM_getValue('cbSgWatched', []) || [];
+  function sgReadList(key, fallback = []) {
+    try {
+      const raw = localStorage.getItem(key);
+      if (!raw) return Array.isArray(fallback) ? fallback.slice() : [];
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed : (Array.isArray(fallback) ? fallback.slice() : []);
+    } catch (e) {
+      return Array.isArray(fallback) ? fallback.slice() : [];
+    }
+  }
+
+  function sgWriteList(key, list) {
+    try {
+      localStorage.setItem(key, JSON.stringify(Array.isArray(list) ? list : []));
+    } catch (e) {}
+  }
+
+  function sgReadStamp(key, fallback = 0) {
+    try {
+      const raw = localStorage.getItem(key);
+      if (raw == null || raw === '') return fallback;
+      const n = Number(raw);
+      return Number.isFinite(n) ? n : fallback;
+    } catch (e) {
+      return fallback;
+    }
+  }
+
+  function sgWriteStamp(key, value) {
+    try { localStorage.setItem(key, String(value)); } catch (e) {}
+  }
+
+  let sgSafe    = sgReadList('cbSgSafe', []);
+  let sgAllied  = sgReadList('cbSgAllied', []);
+  let sgWatched = sgReadList('cbSgWatched', []);
 
   function sgGetJson(url) {
     return new Promise((res, rej) => {
@@ -5086,18 +5118,18 @@
      * gate does not apply — having nothing to colour with is not a state worth
      * preserving for five minutes. */
     const haveAny = (sgSafe.length + sgAllied.length + sgWatched.length) > 0;
-    const lastOk  = GM_getValue('cbSgLastOk', 0);
-    const lastTry = GM_getValue('cbSgLastTry', 0);
+    const lastOk  = sgReadStamp('cbSgLastOk', 0);
+    const lastTry = sgReadStamp('cbSgLastTry', 0);
     if (!force) {
       if (haveAny && Date.now() - lastOk < SG_TTL_MS) return;   // fresh enough already
       if (Date.now() - lastTry < SG_RETRY_MS) return;           // don't hammer a dead endpoint
     }
     _sgFetching = true;
-    GM_setValue('cbSgLastTry', Date.now());
+    sgWriteStamp('cbSgLastTry', Date.now());
     const pull = async (url, key, label) => {
       try {
         const list = sgNorm(await sgGetJson(url));
-        GM_setValue(key, list);
+        sgWriteList(key, list);
         console.log(`${APP_TAG}[SG] ${label}: ${list.length} names`);
         return list;
       } catch (e) {
@@ -5114,7 +5146,7 @@
     if (a) sgAllied = a;
     if (w) sgWatched = w;
     // Only a real result refreshes the freshness clock.
-    if (s || a || w) GM_setValue('cbSgLastOk', Date.now());
+    if (s || a || w) sgWriteStamp('cbSgLastOk', Date.now());
     else console.warn(APP_TAG, '[SG] All three list fetches failed — will retry shortly');
     _sgFetching = false;
     try { colourPlayerLinks(); } catch(_){}
@@ -5135,8 +5167,8 @@
   function getSgState() {
     if (!sgCfg.on) return { state:'off', label:'OFF', colour:'var(--jb-text-ter)' };
     const now = Date.now();
-    const lastOk = Number(GM_getValue('cbSgLastOk', 0)) || 0;
-    const lastTry = Number(GM_getValue('cbSgLastTry', 0)) || 0;
+    const lastOk = sgReadStamp('cbSgLastOk', 0);
+    const lastTry = sgReadStamp('cbSgLastTry', 0);
     const haveAny = (sgSafe.length + sgAllied.length + sgWatched.length) > 0;
     if (!haveAny) {
       if (!lastTry || (now - lastTry) > SG_RETRY_MS) {
