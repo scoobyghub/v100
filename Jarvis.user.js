@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.285
+// @version      2000.286
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -34,7 +34,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.285
+/*  Jarvis Bot 2000.286
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -121,7 +121,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.285';
+  const APP_VERSION = '2000.286';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -2877,6 +2877,37 @@
       .finally(() => clearTimeout(tm));
   }
 
+  /* === ONE players.aspx FETCH, SHARED (2000.286) ===
+   *
+   * The online watch and the mod watch both poll this page every 60s on their
+   * own timers, so it was fetched TWICE A MINUTE for one document. modScan also
+   * never reused the page already in front of it, which owScan has always done.
+   *
+   * The cache is a plain per-page variable, which is exactly the right lifetime:
+   * a page lives seconds here, so it can never go stale across a navigation.
+   *
+   * `allowLive` matters and is NOT a convenience flag. The mod watch identifies
+   * staff by the game's inline `color: #FF9900` on the profile link — and the SG
+   * list colouring overwrites that very attribute with !important on the LIVE
+   * document. So a staff member who is also on an SG list would be invisible to
+   * a scan of the live page. The online watch only reads names and hrefs, which
+   * the colouring does not touch, so it may use the live page; the mod watch
+   * must always parse a freshly fetched copy. */
+  let _playersDoc = null, _playersAt = 0;
+  const PLAYERS_CACHE_MS = 30000;
+
+  async function getPlayersDoc(allowLive) {
+    if (allowLive && /players\.aspx/i.test(window.location.pathname)) {
+      return { doc: document, url: 'current page' };
+    }
+    if (_playersDoc && (Date.now() - _playersAt) <= PLAYERS_CACHE_MS) {
+      return { doc: _playersDoc, url: 'cached' };
+    }
+    const f = await fetchOwPage();
+    _playersDoc = f.doc; _playersAt = Date.now();
+    return f;
+  }
+
   async function fetchOwPage() {
     let lastErr = null;
     for (const p of OW_PAGES) {
@@ -2914,12 +2945,10 @@
     return map;
   }
 
-  function curOwPlayers() {
-    try {
-      if (!/players\.aspx/i.test(window.location.pathname)) return null;
-      return parseOwPlayers(document);
-    } catch(_) { return null; }
-  }
+  /* curOwPlayers() was removed in 2000.286 — getPlayersDoc(true) does the same
+   * job, and leaving a second copy of 'read the live players page' lying about
+   * is precisely the trap the duplicate isInHot() turned out to be in 250:
+   * harmless while nothing calls it, wrong the moment somebody does. */
 
   function owBrowserNotify(title, body, url) {
     if (!ow.notify || !canNotify()) return;
@@ -3011,8 +3040,10 @@
     }
     owBusy = true;
     try {
-      let map = curOwPlayers(), src = 'current page';
-      if (!map) { const f = await fetchOwPage(); map = parseOwPlayers(f.doc); src = f.url; }
+      // allowLive: the watch reads names and hrefs only, which SG colouring
+      // does not alter — see getPlayersDoc.
+      const f = await getPlayersDoc(true);
+      const map = parseOwPlayers(f.doc), src = f.url;
       for (const entry of ow.list) {
         const id = owId(entry), nm = owName(entry);
         const hit = map.get(normName(nm));
@@ -3245,7 +3276,9 @@
     if (!cfg.modWatchOn || !tabs.isMaster || _modBusy) return;
     _modBusy = true;
     try {
-      const f = await fetchOwPage();
+      // NOT allowLive — SG colouring overwrites the #FF9900 staff highlight on
+      // the live page, which would hide any moderator who is also on a list.
+      const f = await getPlayersDoc(false);
       const names = parseModsFromDoc(f.doc);
       const prev = modState();
       const was = (prev && Array.isArray(prev.names)) ? prev.names : [];
@@ -3919,6 +3952,25 @@
    */
   const BG_QUIET_CAP = 10 * 60 * 1000;
 
+  /* Protection is a countdown we ALREADY HOLD (LS_PROT_END), exactly like the
+   * OC/DTM/travel timers — so re-reading it every two minutes told us what
+   * getProt() computes for free, at 30 requests an hour. Same treatment as
+   * bgGapFor: land just after it expires, capped so a change we did not cause
+   * still gets noticed. The cap is longer than BG_QUIET_CAP because protection
+   * moves by the DAY, and the 12h/6h warnings are checked locally against the
+   * stored end time, not against a fetch. */
+  const PROT_QUIET_CAP = 30 * 60 * 1000;
+
+  function bgGapForProt(minMs) {
+    try {
+      if (localStorage.getItem(LS_PROT_ST) !== 'active') return Math.max(minMs, PROT_QUIET_CAP);
+      const end = parseInt(localStorage.getItem(LS_PROT_END) || '0', 10);
+      const rem = end - Date.now();
+      if (rem > 0) return Math.min(PROT_QUIET_CAP, Math.max(minMs, rem + 5000 + Math.floor(Math.random() * 10000)));
+    } catch (_) {}
+    return minMs;
+  }
+
   function bgGapFor(kind, pollMs) {
     let remMs = 0;
     try {
@@ -3949,7 +4001,7 @@
      * ever corrected it. Checked more eagerly while it is unknown. */
     if (now >= bgDueAt('hot'))    { bgSetDue('hot', getHot() ? HOT_REFRESH_MS : pollMs); fetchHotBg(); return true; }
     // Protection moves by the hour, not the minute — half the rate is plenty.
-    if (now >= bgDueAt('prot'))   { bgSetDue('prot',   pollMs * 2);                 fetchProt();     return true; }
+    if (now >= bgDueAt('prot'))   { bgSetDue('prot',   bgGapForProt(pollMs * 2));    fetchProt();     return true; }
     return false;
   }
 
@@ -6445,7 +6497,23 @@
       incJailCount();
       updateJailCountUI();
       st.lastJail = now; markActed('jail', cfg.jailInt); saveSt();
-      setTimeout(() => { st.acting = false; st.action = ''; GM_setValue('cbActStart',0); safeNav('/authenticated/jail.aspx?'+Date.now()); }, 500 + Math.floor(Math.random()*400));
+      /* RELEASE THE GUARD, BUT DO NOT NAVIGATE (2000.286).
+       *
+       * The break link is an ASP.NET postback: it reloads jail.aspx by itself.
+       * The safeNav that used to sit here was therefore a SECOND full page load
+       * for every bust — and jail is over half of all the traffic Jarvis makes,
+       * so it was up to 654 wasted page loads an hour on its own.
+       *
+       * Worse than wasteful: it fired 500-900ms after the click, and safeNav
+       * adds another 150-500ms before assigning window.location. On any server
+       * response slower than ~650-1750ms that assignment CANCELLED the in-flight
+       * POST, so the bust never happened and we paid two requests for nothing.
+       * That is a plausible part of what 'jail is glitchy' looked like.
+       *
+       * Nothing breaks if the postback ever turns out to be a partial one that
+       * does not reload: doJailbreak simply clicks again once the cooldown
+       * elapses, and checkStuck() releases the guard after 15s regardless. */
+      setTimeout(() => { st.acting = false; st.action = ''; GM_setValue('cbActStart',0); }, 500 + Math.floor(Math.random()*400));
     } else { st.lastJail = now; markActed('jail', cfg.jailInt); saveSt(); }
   }
 
@@ -11687,7 +11755,7 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
     // Online check — see the section note above for why this comes from players.aspx.
     let pool = cands;
     try {
-      const f = await fetchOwPage();
+      const f = await getPlayersDoc(true);   // names only — see getPlayersDoc
       const online = parseOwPlayers(f.doc);
       if (online && online.size) {
         const on = cands.filter(c => online.has(c.key));
