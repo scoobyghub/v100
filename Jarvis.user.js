@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.286
+// @version      2000.287
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -34,7 +34,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.286
+/*  Jarvis Bot 2000.287
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -121,7 +121,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.286';
+  const APP_VERSION = '2000.287';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -511,18 +511,37 @@
   function getCapsolverKey() { return (localStorage.getItem(LS_CAPSOLVER_KEY) || '').trim(); }
   function setCapsolverKey(k) { localStorage.setItem(LS_CAPSOLVER_KEY, (k || '').trim()); }
 
-  async function solveRecaptchaWithCapsolver(siteKey, pageUrl) {
+  /* WHICH CHALLENGE IS ON THE PAGE (2000.287).
+   *
+   * The site serves Cloudflare Turnstile on some login visits and reCAPTCHA on
+   * others (see 2000.276). CapSolver needs a DIFFERENT TASK TYPE for each —
+   * submitting a Turnstile sitekey as a ReCaptchaV2 task simply fails — it
+   * returns the answer under a different key, and the answer has to be written
+   * into a different field. All three were reCAPTCHA-only here, so with a
+   * CapSolver key set the paid auto-solve could never work on a Turnstile page.
+   *
+   * 2000.276 is unaffected and was a different problem: READING a token that
+   * something else had already solved. That handles both providers already.
+   * This is only the auto-solve path.
+   */
+  function capIsTurnstile() {
+    return !!document.querySelector('.cf-turnstile[data-sitekey], input[name="cf-turnstile-response"]');
+  }
+
+  async function solveCaptchaWithCapsolver(siteKey, pageUrl) {
     const apiKey = getCapsolverKey();
     if (!apiKey) return null;
     const clog = (...a) => console.log('[JB CapSolver]', ...a);
+    // Turnstile and reCAPTCHA are different products with different task types.
+    const taskType = capIsTurnstile() ? 'AntiTurnstileTaskProxyLess' : 'ReCaptchaV2TaskProxyless';
     try {
-      clog('Submitting captcha…');
+      clog('Submitting captcha as ' + taskType + '…');
       const createRes = await fetch('https://api.capsolver.com/createTask', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           clientKey: apiKey,
-          task: { type: 'ReCaptchaV2TaskProxyless', websiteURL: pageUrl, websiteKey: siteKey }
+          task: { type: taskType, websiteURL: pageUrl, websiteKey: siteKey }
         })
       });
       const createData = await createRes.json();
@@ -543,7 +562,9 @@
         const resultData = await resultRes.json();
         if (resultData.errorId > 0) { clog('result error:', resultData.errorCode); return null; }
         if (resultData.status === 'ready') {
-          const token = resultData.solution?.gRecaptchaResponse;
+          // Turnstile answers under `token`, reCAPTCHA under `gRecaptchaResponse`.
+          const sol = resultData.solution || {};
+          const token = sol.token || sol.gRecaptchaResponse;
           clog(`solved in ${Math.round((Date.now() - start) / 1000)}s`);
           return token || null;
         }
@@ -559,20 +580,40 @@
     }
   }
 
-  // Find the reCAPTCHA site key on the current page (data-sitekey or the widget
-  // iframe's k= param). Returns null if none present.
-  function findRecaptchaSiteKey() {
-    const el = document.querySelector('.g-recaptcha[data-sitekey], [data-sitekey]');
+  // The sitekey of whichever widget is present (data-sitekey, or the reCAPTCHA
+  // iframe's k= param). Turnstile is checked FIRST: a page carrying both must be
+  // solved as Turnstile, because that is the one gating the form.
+  function findCaptchaSiteKey() {
+    const el = document.querySelector('.cf-turnstile[data-sitekey]') ||
+               document.querySelector('.g-recaptcha[data-sitekey]') ||
+               document.querySelector('[data-sitekey]');
     if (el && el.getAttribute('data-sitekey')) return el.getAttribute('data-sitekey');
     const ifr = document.querySelector('iframe[src*="recaptcha"][src*="k="]');
     if (ifr) { const m = ifr.getAttribute('src').match(/[?&]k=([^&]+)/); if (m) return decodeURIComponent(m[1]); }
     return null;
   }
 
-  // Inject a solved token into the g-recaptcha-response field and fire any
-  // grecaptcha callback so the page treats the captcha as completed.
-  function injectRecaptchaToken(token) {
+  // Write a solved token into whichever response field this page uses, and fire
+  // any grecaptcha callback so the page treats the captcha as completed.
+  function injectCaptchaToken(token) {
     if (!token) return false;
+    if (capIsTurnstile()) {
+      let inp = document.querySelector('input[name="cf-turnstile-response"]');
+      if (!inp) {
+        inp = document.createElement('input');
+        inp.type = 'hidden'; inp.name = 'cf-turnstile-response';
+        // Into the FORM, not the body — it has to be posted to be worth anything.
+        (document.forms[0] || document.body).appendChild(inp);
+      }
+      inp.value = token;
+      inp.dispatchEvent(new Event('input', { bubbles: true }));
+      inp.dispatchEvent(new Event('change', { bubbles: true }));
+      /* No callback to invoke: Turnstile keeps its widget in a CLOSED shadow
+       * root, so there is nothing reachable to call the way grecaptcha's config
+       * can be walked below. Writing the field is the whole of what a page can
+       * do — and the field is what gets posted, which is what matters. */
+      return true;
+    }
     let ta = document.querySelector('textarea[name="g-recaptcha-response"], #g-recaptcha-response');
     if (!ta) {
       ta = document.createElement('textarea');
@@ -789,6 +830,90 @@
 
     function log(...a) { console.log('[JB Login]', ...a); }
 
+    /* === STUCK ON THE LOGIN PAGE (2000.287) ===
+     *
+     * We fire one alert on landing here and then go quiet, so a device that
+     * cannot get back in is a DEAD PLAYER, silently, all night — no crimes, no
+     * jail, and no answer if a staff check arrives. This chases it.
+     *
+     * THE NUDGE IS THE USEFUL HALF. ASP.NET keeps the Login button disabled
+     * until its handlers are satisfied the fields have been touched, and setting
+     * .value programmatically fires none of the events those handlers listen
+     * for — so a perfectly filled form can sit there with a dead button for ever.
+     * Re-dispatching focus/input/change/blur is what re-enables it. Taken from
+     * the reference's tmnNudgeLoginButton (4.20.265).
+     *
+     * Nudge FIRST and only alert if that did not help: a fault we can fix without
+     * bothering you is not worth a notification.
+     */
+    const LS_LP_SINCE   = 'cbLoginPageSince';
+    const LS_LP_ALERTED = 'cbLoginPageAlerted';
+    const LS_LP_NUDGE   = 'cbLoginPageNudged';
+    const LP_STUCK_MS   = 60 * 1000;         // grace before anything happens
+    const LP_REPEAT_MS  = 10 * 60 * 1000;    // then re-alert this often
+
+    /* Self-contained sender, deliberately. `tg` and `tgMsgOn` are declared far
+     * BELOW this block and the login branch returns before ever reaching them,
+     * so touching either would throw on the temporal dead zone. This is the same
+     * reason earlyLogoutTelegram() reads GM storage directly — do not 'tidy'
+     * this into sendTg(). */
+    function loginStuckTelegram(msg) {
+      try {
+        if (!GM_getValue('cbTgEnabled', false)) return;
+        if (GM_getValue('cbTgMsg_loginStuck', true) === false) return;
+        const token = GM_getValue('cbTgToken', ''), chat = GM_getValue('cbTgChat', '');
+        if (!token || !chat) return;
+        GM_xmlhttpRequest({
+          method:'POST', url:'https://api.telegram.org/bot' + token + '/sendMessage',
+          timeout:15000, headers:{'Content-Type':'application/json'},
+          data:JSON.stringify({ chat_id: chat, text: msg, parse_mode:'HTML' })
+        });
+      } catch(_) {}
+    }
+
+    function nudgeLoginFields() {
+      try {
+        const u = document.getElementById(UID), p = document.getElementById(PID);
+        if (!u || !p) return false;
+        [u, p].forEach(el => {
+          el.focus();
+          el.dispatchEvent(new Event('input',  { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+          el.blur();
+        });
+        log('Nudged the login fields — trying to re-enable the button');
+        return true;
+      } catch(_) { return false; }
+    }
+
+    function loginStuckTick() {
+      const now = Date.now();
+      const since = parseInt(localStorage.getItem(LS_LP_SINCE) || '0', 10);
+      if (!since) { localStorage.setItem(LS_LP_SINCE, String(now)); return; }
+      if (now - since < LP_STUCK_MS) return;
+
+      const btn = document.getElementById(BID);
+      if (btn && btn.disabled) {
+        const lastNudge = parseInt(localStorage.getItem(LS_LP_NUDGE) || '0', 10);
+        if (now - lastNudge >= LP_STUCK_MS) {
+          localStorage.setItem(LS_LP_NUDGE, String(now));
+          if (nudgeLoginFields()) return;   // give it a cycle before complaining
+        }
+      }
+
+      const last = parseInt(localStorage.getItem(LS_LP_ALERTED) || '0', 10);
+      if (last && now - last < LP_REPEAT_MS) return;
+      localStorage.setItem(LS_LP_ALERTED, String(now));
+      const mins  = Math.max(1, Math.round((now - since) / 60000));
+      const state = !btn ? 'missing' : (btn.disabled ? 'DISABLED' : 'enabled');
+      console.warn('[JB Login] Stuck on the login page ' + mins + 'm — button ' + state);
+      showOverlay('🔐 Stuck ' + mins + 'm — login button ' + state);
+      loginStuckTelegram('🔐 <b>STUCK ON LOGIN</b>' + String.fromCharCode(10) +
+        (GM_getValue('cbPlayer','') || '?') + ' | ' + fmtDate() + String.fromCharCode(10) +
+        'On the login page ' + mins + 'm — button <b>' + state + '</b>.' + String.fromCharCode(10) +
+        'You are logged out and nothing is running.');
+    }
+
     function showOverlay(msg) {
       if (!overlay) {
         overlay = document.createElement('div');
@@ -930,16 +1055,16 @@
       if (_autoSolveTried) return;
       if (!getCapsolverKey()) return;   // no key → keep existing manual-solve behaviour
       if (getToken()) return;           // already solved
-      const siteKey = findRecaptchaSiteKey();
+      const siteKey = findCaptchaSiteKey();
       if (!siteKey) {                   // widget may not have loaded yet — retry briefly
         if (_autoSolveWaits++ < 20) setTimeout(maybeAutoSolveCaptcha, 1000);
         return;
       }
       _autoSolveTried = true;
-      showOverlay('🤖 Solving captcha…');
-      solveRecaptchaWithCapsolver(siteKey, window.location.href).then(token => {
+      showOverlay(capIsTurnstile() ? '🤖 Solving Turnstile…' : '🤖 Solving captcha…');
+      solveCaptchaWithCapsolver(siteKey, window.location.href).then(token => {
         if (token) {
-          injectRecaptchaToken(token);
+          injectCaptchaToken(token);
           showOverlay('✅ Captcha solved — submitting…');
           // checkLogin()'s 1s interval detects the injected token and submits.
         } else {
@@ -1024,6 +1149,13 @@
         return;
       }
 
+      /* Past every deliberate reason to be here (halted, parked, sleeping, a
+       * watch-logout window), so from now on still sitting on this page is a
+       * fault worth chasing rather than a state we chose. */
+      const lpIv = setInterval(loginStuckTick, 20000);
+      window.addEventListener('beforeunload', () => clearInterval(lpIv));
+      loginStuckTick();
+
       if (canAuto()) {
         showOverlay('Solve captcha to continue...');
         const iv = setInterval(checkLogin, 1000);
@@ -1041,6 +1173,9 @@
 
   if (_path.includes('/authenticated/')) {
     localStorage.removeItem(LS_LO_TS);
+    // We are in — retire the stuck-login watchdog's stamps so the next visit to
+    // the login page starts its clock from scratch.
+    ['cbLoginPageSince','cbLoginPageAlerted','cbLoginPageNudged'].forEach(k => localStorage.removeItem(k));
     const la = parseInt(localStorage.getItem('cbLoginAttempts')||'0',10);
     if (la > 0 || localStorage.getItem('cbLoginPaused') === 'true') {
       localStorage.setItem('cbLoginAttempts','0');
@@ -1354,6 +1489,7 @@
     { key:'crusher',     label:'Crusher events',        def:true  },
     { key:'propDrop',    label:'Property dropped',      def:true  },
     { key:'watchdog',    label:'Watchdog',              def:true  },
+    { key:'loginStuck',  label:'Stuck on login',        def:true  },
     { key:'rankup',      label:'Rank up',               def:true  },
     { key:'xpReport',    label:'Hourly XP report',      def:true  },
     { key:'readyAgain',  label:'OC/DTM still ready',    def:true  },
