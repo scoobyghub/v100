@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.295
+// @version      2000.296
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -34,7 +34,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.295
+/*  Jarvis Bot 2000.296
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -121,7 +121,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.295';
+  const APP_VERSION = '2000.296';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -3578,7 +3578,7 @@
      * 'running' instead, which is still 'not ready' — the safe direction — and
      * the diagnostic below still fires either way.
      */
-    console.warn(`${APP_TAG}[TIMER] ${kind}: no wait time and no ${Q}${readyPhrase}${Q} heading — ` +
+    console.warn(`${APP_TAG}[TIMER] ${kind}: no wait time and no '${readyPhrase}' heading — ` +
       `treating as ALREADY RUNNING. #ctl00_lblMsg ${lbl ? JSON.stringify((lbl.textContent||'').trim().slice(0,120)) : 'MISSING'} · ` +
       `.NewGridTitle x${titles.length}: ${titles.slice(0,8).join(' | ') || '(none)'}`);
     return { ready:false, inProgress:true, h:0, m:0, s:0, total:0, at:Date.now() };
