@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.293
+// @version      2000.294
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -34,7 +34,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.293
+/*  Jarvis Bot 2000.294
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -121,7 +121,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.293';
+  const APP_VERSION = '2000.294';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -3520,24 +3520,60 @@
   const DTM_PATH = '/authenticated/organizedcrime.aspx?p=dtm';
   const OC_PATH  = '/authenticated/organizedcrime.aspx';
 
+  /* === WHAT THE TIMER PAGES ACTUALLY LOOK LIKE (2000.294) ===
+   *
+   * From a live probe of all three pages. Two faults found, one question left
+   * open — and the open one is why the failure path now talks.
+   *
+   * 1. `querySelector('.NewGridTitle')` took only the FIRST match. The DTM page
+   *    happens to put "Start a Drugs Transportation Mission" first, so it worked by
+   *    luck. The OC page has SEVEN of them — Organized Crime information / Role /
+   *    Name / Equipment / Status / Team Management / Organized Crime advertisement
+   *    — and one heading added or reordered ahead of the Start line would break
+   *    ready-detection outright. ALL of them are checked now.
+   *
+   * 2. `#ctl00_lblMsg` WAS NOT PRESENT ON ANY OF THE THREE PAGES, so the whole
+   *    cooldown path had nothing to read. It may simply not render when there is
+   *    no message — the probe was taken with DTM ready and the jet enabled — but
+   *    a parser should not hang on one element existing. The wait pattern is now
+   *    matched against the WHOLE BODY as a fallback, which is exactly what the
+   *    probe did to find its own answers.
+   *
+   * 3. STILL UNKNOWN: what these pages look like WHILE ON COOLDOWN. Nothing here
+   *    proves the wording is unchanged, because there was no wait to read. So a
+   *    failed parse now DUMPS what it saw instead of returning a silent null —
+   *    the next occurrence diagnoses itself rather than costing another round
+   *    trip. That is the 2000.264 lesson: a failure that does not name its own
+   *    branch sends you hunting the wrong subsystem.
+   */
+  const OCDTM_WAIT_RE = /wait (\d+) hours? (\d+) minutes? and (\d+) seconds?/i;
+
+  function parseOcDtmDoc(doc, kind, readyPhrase) {
+    const lbl = doc.querySelector('#ctl00_lblMsg');
+    const bodyTxt = (doc.body ? doc.body.textContent || '' : '').replace(/\s+/g, ' ');
+    // The label when it exists, then the whole body — see note 2.
+    const m = (lbl && (lbl.textContent || '').match(OCDTM_WAIT_RE)) || bodyTxt.match(OCDTM_WAIT_RE);
+    if (m) {
+      const h = parseInt(m[1], 10) || 0, mi = parseInt(m[2], 10) || 0, s = parseInt(m[3], 10) || 0;
+      return { ready:false, h, m:mi, s, total:h*3600+mi*60+s, at:Date.now() };
+    }
+    const titles = [...doc.querySelectorAll('.NewGridTitle')].map(e => (e.textContent || '').trim());
+    if (titles.some(x => x.includes(readyPhrase)))
+      return { ready:true, h:0, m:0, s:0, total:0, at:Date.now() };
+
+    console.warn(`${APP_TAG}[TIMER] ${kind}: no wait time and no ${Q}${readyPhrase}${Q} heading — ` +
+      `#ctl00_lblMsg ${lbl ? JSON.stringify((lbl.textContent||'').trim().slice(0,120)) : 'MISSING'} · ` +
+      `.NewGridTitle x${titles.length}: ${titles.slice(0,8).join(' | ') || '(none)'}`);
+    return null;
+  }
+
   async function fetchDtmTimer() {
     try {
       const url = `${window.location.origin}${DTM_PATH}&_=${Date.now()}`;
       const r = await fetch(url, { method:'GET', headers:{'Cache-Control':'no-cache'}, credentials:'same-origin' });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const doc = new DOMParser().parseFromString(await r.text(), 'text/html');
-      const msg = doc.querySelector('#ctl00_lblMsg');
-      if (msg) {
-        const m = (msg.textContent||'').match(/wait (\d+) hours? (\d+) minutes? and (\d+) seconds?/i);
-        if (m) {
-          const [,h,mi,s] = m.map(Number);
-          return { ready:false, h, m:mi, s, total:h*3600+mi*60+s, at:Date.now() };
-        }
-      }
-      const div = doc.querySelector('.NewGridTitle');
-      if (div && div.textContent.includes('Start a Drugs Transportation Mission'))
-        return { ready:true, h:0, m:0, s:0, total:0, at:Date.now() };
-      return null;
+      return parseOcDtmDoc(doc, 'DTM', 'Start a Drugs Transportation Mission');
     } catch(e) { console.error(APP_TAG,'DTM timer err',e); return null; }
   }
 
@@ -3547,18 +3583,7 @@
       const r = await fetch(url, { method:'GET', headers:{'Cache-Control':'no-cache'}, credentials:'same-origin' });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const doc = new DOMParser().parseFromString(await r.text(), 'text/html');
-      const msg = doc.querySelector('#ctl00_lblMsg');
-      if (msg) {
-        const m = (msg.textContent||'').match(/wait (\d+) hours? (\d+) minutes? and (\d+) seconds?/i);
-        if (m) {
-          const [,h,mi,s] = m.map(Number);
-          return { ready:false, h, m:mi, s, total:h*3600+mi*60+s, at:Date.now() };
-        }
-      }
-      const div = doc.querySelector('.NewGridTitle');
-      if (div && div.textContent.includes('Start an Organized Crime'))
-        return { ready:true, h:0, m:0, s:0, total:0, at:Date.now() };
-      return null;
+      return parseOcDtmDoc(doc, 'OC', 'Start an Organized Crime');
     } catch(e) { console.error(APP_TAG,'OC timer err',e); return null; }
   }
 
