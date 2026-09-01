@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.294
+// @version      2000.295
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -34,7 +34,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.294
+/*  Jarvis Bot 2000.295
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -121,7 +121,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.294';
+  const APP_VERSION = '2000.295';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -3561,10 +3561,27 @@
     if (titles.some(x => x.includes(readyPhrase)))
       return { ready:true, h:0, m:0, s:0, total:0, at:Date.now() };
 
+    /* NEITHER READY NOR COOLING DOWN = ONE IS ALREADY RUNNING (2000.295).
+     *
+     * Seen live: mid-DTM the headings are Status / Buy drugs / Information, and
+     * mid-OC they are Organized Crime information / Role / Name / Equipment /
+     * Status / Team Management. No "Start …" heading, and no wait time either.
+     *
+     * This state returned NULL, so storeDtm/storeOc were never called and the
+     * stored timer just sat there going stale — and a stale timer whose expiry
+     * has passed reads as **Ready**. So while an OC or DTM was actually running,
+     * the panel said Ready and Telegram cheerfully nagged that it was ready.
+     *
+     * The inference needs no heading names: no Start heading means you cannot
+     * start one, and no wait time means you are not cooling down — therefore one
+     * is underway. If the wait WORDING ever changes this would call a cooldown
+     * 'running' instead, which is still 'not ready' — the safe direction — and
+     * the diagnostic below still fires either way.
+     */
     console.warn(`${APP_TAG}[TIMER] ${kind}: no wait time and no ${Q}${readyPhrase}${Q} heading — ` +
-      `#ctl00_lblMsg ${lbl ? JSON.stringify((lbl.textContent||'').trim().slice(0,120)) : 'MISSING'} · ` +
+      `treating as ALREADY RUNNING. #ctl00_lblMsg ${lbl ? JSON.stringify((lbl.textContent||'').trim().slice(0,120)) : 'MISSING'} · ` +
       `.NewGridTitle x${titles.length}: ${titles.slice(0,8).join(' | ') || '(none)'}`);
-    return null;
+    return { ready:false, inProgress:true, h:0, m:0, s:0, total:0, at:Date.now() };
   }
 
   async function fetchDtmTimer() {
@@ -3595,6 +3612,9 @@
     if (!raw) return null;
     try {
       const d = JSON.parse(raw);
+      // Checked BEFORE the expiry maths: an in-progress marker carries total 0,
+      // which the line below would otherwise read as Ready.
+      if (d.inProgress) return { ready:false, inProgress:true, h:0, m:0, s:0, total:0 };
       const rem = Math.max(0, Math.floor((d.expires - Date.now())/1000));
       if (rem <= 0) return { ready:true, h:0, m:0, s:0, total:0 };
       return { ready:false, h:Math.floor(rem/3600), m:Math.floor((rem%3600)/60), s:rem%60, total:rem };
@@ -3606,6 +3626,7 @@
     if (!raw) return null;
     try {
       const d = JSON.parse(raw);
+      if (d.inProgress) return { ready:false, inProgress:true, h:0, m:0, s:0, total:0 };
       const rem = Math.max(0, Math.floor((d.expires - Date.now())/1000));
       if (rem <= 0) return { ready:true, h:0, m:0, s:0, total:0 };
       return { ready:false, h:Math.floor(rem/3600), m:Math.floor((rem%3600)/60), s:rem%60, total:rem };
@@ -3614,6 +3635,8 @@
 
   function fmtTimer(t, readyKey) {
     if (!t) return { txt:'—', clr:'gray', rdy:false };
+    // Before the Ready test: an in-progress entry has total 0 and would read Ready.
+    if (t.inProgress) return { txt:'Running', clr:'amber', rdy:false };
     if (t[readyKey] || t.total <= 0) return { txt:'Ready', clr:'green', rdy:true };
     const {h,m} = t;
     let txt = h > 0 ? (m > 0 ? `${h}h ${m}m` : `${h}h`) : (m > 0 ? `${m}m` : '< 1m');
@@ -3925,7 +3948,7 @@
     if (!tg.enabled || !st.notifyReady || st.inJail) return;
     const dtm = getDtm();
     if (dtm) {
-      const rdy = dtm.ready || (dtm.total||0) <= 0;
+      const rdy = !dtm.inProgress && (dtm.ready || (dtm.total||0) <= 0);
       const last = localStorage.getItem('cbDtmReadyState');
       if (rdy && last !== 'ready') {
         localStorage.setItem('cbDtmReadyState','ready');
@@ -3935,7 +3958,7 @@
     }
     const oc = getOc();
     if (oc) {
-      const rdy = oc.ready || (oc.total||0) <= 0;
+      const rdy = !oc.inProgress && (oc.ready || (oc.total||0) <= 0);
       const last = localStorage.getItem('cbOcReadyState');
       if (rdy && last !== 'ready') {
         localStorage.setItem('cbOcReadyState','ready');
@@ -12857,7 +12880,7 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
       if (ocSt === 'idle') {
         try {
           const oc = getOc();
-          if (oc && (oc.ready || (oc.total||0)<=0) && isSchedReady()) triggerCreateOC();
+          if (oc && !oc.inProgress && (oc.ready || (oc.total||0)<=0) && isSchedReady()) triggerCreateOC();
         } catch(_){}
       }
       if (ocSt !== 'idle') {
@@ -12876,7 +12899,7 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
       if (dtmSt === 'idle') {
         try {
           const dtm = getDtm();
-          if (dtm && (dtm.ready || (dtm.total||0)<=0) && isDtmSchedReady()) triggerCreateDTM();
+          if (dtm && !dtm.inProgress && (dtm.ready || (dtm.total||0)<=0) && isDtmSchedReady()) triggerCreateDTM();
         } catch(_){}
       }
       if (dtmSt !== 'idle') {
