@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.296
+// @version      2000.297
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -34,7 +34,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.296
+/*  Jarvis Bot 2000.297
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -121,7 +121,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.296';
+  const APP_VERSION = '2000.297';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -6177,6 +6177,43 @@
     return Math.max(1, Math.min(want, available));
   }
 
+  /* === THE GAME SAYS NOT YET: STAND ASIDE, DO NOT HOG THE CHAIN (2000.297) ===
+   *
+   * Reported as: the timer runs down, the action is plainly available, and
+   * Jarvis misses it — sometimes.
+   *
+   * When an action is SELECTED but its controls are absent or disabled, our
+   * timer has run ahead of the game's — `cfg.crimeInt` and friends are our own
+   * estimate of the real cooldown, not something the game tells us. All three
+   * handlers dealt with that by retrying three times and then RETURNING SILENTLY
+   * without touching `lastCrime`/`lastGta`/`lastBooze` (booze did not even
+   * retry — a bare `else` with no log at all).
+   *
+   * So the action stayed READY for ever. mainLoop picks actions with an else-if
+   * chain, so it re-selected the same stuck action on every single tick and
+   * **everything below it was starved** — GTA, booze, jail and garage never got
+   * a turn while crime was wedged. Nothing was logged, which is exactly why it
+   * looked like 'works sometimes but not others'.
+   *
+   * Backing the action off for a few seconds costs nothing, because the game is
+   * not offering it anyway, and it lets the rest of the chain run. st.refresh is
+   * set so the retry re-navigates and gets a fresh page, which also covers the
+   * case the old retry loop was really written for: a page that had not rendered
+   * yet.
+   */
+  const ACTION_BLOCKED_RETRY_MS = 20000;
+
+  function actionBlocked(action, lastKey, why) {
+    GM_setValue('cbDly_' + action, ACTION_BLOCKED_RETRY_MS);
+    st[lastKey] = Date.now();
+    st.acting = false; st.action = ''; st.refresh = true;
+    GM_setValue('cbActStart', 0);
+    saveSt();
+    console.warn(`${APP_TAG}[ACTION] ${action} was due but could not fire — ${why}. ` +
+      `Our timer is ahead of the game's; backing off ${Math.round(ACTION_BLOCKED_RETRY_MS/1000)}s ` +
+      `so the other actions get a turn.`);
+  }
+
   function doCrime() {
     if (st.inJail || !st.crime || st.acting || paused) return;
     if (dailyLimitReached('crime')) return;
@@ -6193,12 +6230,9 @@
     // Drop anything excluded (pickpocket) before a pick is even considered.
     avail = avail.filter(c => crimeAllowed(c.id, c.btn));
     if (!avail.length) {
-      const rk = 'cbCrimeRetry';
-      const rc = parseInt(localStorage.getItem(rk)||'0',10);
-      if (rc < 3) { localStorage.setItem(rk, String(rc+1)); st.acting = false; st.action = ''; GM_setValue('cbActStart',0); setTimeout(() => { st.refresh = true; saveSt(); }, 2000); return; }
-      localStorage.removeItem(rk); st.acting = false; st.action = ''; GM_setValue('cbActStart',0); return;
+      actionBlocked('crime', 'lastCrime', 'no enabled crime button on the page');
+      return;
     }
-    localStorage.removeItem('cbCrimeRetry');
     // Click immediately — humans click fast, the delay is in the cooldown
     const chosenBtn = pickCrime(avail);
     /* Last line of defence. The filter above should make this unreachable, but an
@@ -6229,11 +6263,9 @@
     if (st.gtas.length > 0) { avail = st.gtas.map(id => { const g = GTAS.find(x=>x.id===id); if(g) return [...radios].find(r=>r.value===g.val); return null; }).filter(Boolean); }
     else avail = [...radios];
     if (!avail.length) {
-      const rk = 'cbGtaRetry'; const rc = parseInt(localStorage.getItem(rk)||'0',10);
-      if (rc < 3) { localStorage.setItem(rk, String(rc+1)); st.acting = false; st.action = ''; GM_setValue('cbActStart',0); setTimeout(() => { st.refresh = true; saveSt(); }, 2000); return; }
-      localStorage.removeItem(rk); st.acting = false; st.action = ''; st.refresh = true; GM_setValue('cbActStart',0); saveSt(); return;
+      actionBlocked('gta', 'lastGta', 'no selectable car on the page');
+      return;
     }
-    localStorage.removeItem('cbGtaRetry');
     avail[Math.floor(Math.random()*avail.length)].checked = true;
     // Quick human-like gap between selecting car and clicking steal (200-600ms)
     setTimeout(() => {
@@ -6291,7 +6323,7 @@
       localStorage.removeItem('cbBoozeBroke');
       st.lastBooze = now; markActed('booze', cfg.boozeInt); st.refresh = true; donePending('booze'); saveSt();
       setTimeout(() => { st.acting = false; st.action = ''; GM_setValue('cbActStart',0); }, 400 + Math.floor(Math.random()*300));
-    } else { st.acting = false; st.action = ''; GM_setValue('cbActStart',0); }
+    } else { actionBlocked('booze', 'lastBooze', 'nothing to buy and nothing in stock to sell'); }
   }
 
   /* === JAIL DAILY ATTEMPT COUNTER (game-time reset at 00:00) === */
