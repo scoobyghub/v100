@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.298
+// @version      2000.299
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -34,7 +34,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.298
+/*  Jarvis Bot 2000.299
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -121,7 +121,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.298';
+  const APP_VERSION = '2000.299';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -6733,6 +6733,9 @@
         .filter(e => e.v > 0)
         .sort((x, y) => y.v - x.v);
       const otherV = xpState.perAction.other || 0;
+      // Legacy only: nothing has written to `other` since 2000.299, when unclaimed
+      // XP became jail's by definition. Still displayed so old sessions read back
+      // correctly rather than appearing to have lost XP.
       if (otherV > 0) entries.push({ a: 'other', v: otherV });
       if (!entries.length) {
         barsHost.innerHTML = `<div class="jb-sub" style="text-align:center;color:var(--jb-text-ter)">No XP gained yet this session.</div>`;
@@ -10724,7 +10727,12 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
   /* `travel` added in 2000.289 — flying earns XP and nothing ever tagged it, so
    * every arrival landed in `other` or was credited to whichever action fired
    * last. Precisely the fault 2000.242 found with `oc`. */
-  const XP_ACTIONS = ['crime','gta','booze','jail','garage','oc','dtm','travel'];
+  /* The six that CLAIM a reading (crime, gta, booze, oc, dtm, travel) plus jail,
+   * which never claims and is the residual — see onExperienceRead. `garage` was
+   * dropped in 2000.299: selling cars earns nothing (user-confirmed, 246), it has
+   * not called snapshotXP since then, and a permanently-zero bucket is just
+   * something to misread later. */
+  const XP_ACTIONS = ['crime','gta','booze','jail','oc','dtm','travel'];
   /* Recent-gains history. Raised from 40 to 250 in 2000.242 — the list is the
    * most useful thing on the charts for spotting what an action is actually
    * worth, and 40 entries is under an hour of play. Each entry is ~120 bytes, so
@@ -11464,23 +11472,40 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
     const bundled = covered.length > 1;
 
     const snap = GM_getValue('cbXpSnapshot', null);
-    let action = 'other', inferred = false;
+    /* === UNCLAIMED XP IS JAIL, BY DEFINITION. THERE IS NO 'other' (2000.299) ===
+     *
+     * Every earner Jarvis can see itself doing — crime, GTA, booze, OC, DTM,
+     * travel — calls snapshotXP() and CLAIMS its reading. Jail deliberately does
+     * not (snapshotXPQuiet, 246): at a 3-second interval it would overwrite the
+     * pending snapshot of every real action before that action's reading arrived,
+     * which is exactly how crime XP used to end up filed as jail.
+     *
+     * So jail is the RESIDUAL, and that is the point: **it is why we do not have
+     * to read the feed often enough to catch every individual bust.** The 288
+     * brackets separate the claimed stretches from the unclaimed ones, and the
+     * unclaimed ones are jail's by construction. An 'other' bucket added nothing
+     * but doubt about where the XP went.
+     *
+     * `inf` still marks it inferred rather than measured, and the log distinguishes
+     * the two strengths: a reading with a bust actually in its covered window is a
+     * far stronger inference than one without. **If the second kind starts
+     * carrying real weight, something earns XP that we do not model at all** —
+     * manual play between automated actions being the obvious candidate — and the
+     * charts will be quietly crediting it to jail. Watch the `?` markers.
+     *
+     * KNOWN LIMIT, unchanged: an OC/DTM payout arrives when the crime EXECUTES,
+     * potentially hours after its snapshot expired, so it lands here too. That is
+     * what the 247 completion-mail reconciliation exists to undo.
+     */
+    let action = 'jail', inferred = true;
+    const sawBust = covered.some(e => e.a === 'jail');
     if (snap && snap.action && (Date.now() - snap.t) < 90000) {
       action = snap.action;
+      inferred = false;
       GM_setValue('cbXpSnapshot', null);
-    } else if (covered.some(e => e.a === 'jail')) {
-      /* Nothing claimed this reading, but a jail bust is in the window. Jail is
-       * deliberately quiet (see snapshotXPQuiet) and is the only remaining
-       * XP-earning thing Jarvis does that doesn't claim a reading, so unclaimed
-       * XP alongside a bust is jail's. Flagged as inferred rather than measured.
-       *
-       * KNOWN LIMIT: an OC or DTM payout arrives when the crime EXECUTES, which
-       * can be hours after its snapshot expired. If jail is running, such a
-       * payout lands here and is labelled jail. Those gains are far larger than a
-       * bust, so they stand out in the history — if that starts happening, the
-       * fix is a size guard, and it needs a real observed OC payout to set it. */
-      action = 'jail';
-      inferred = true;
+    } else if (!sawBust) {
+      dlog(APP_TAG, `[XP] +${gained} arrived unclaimed with no bust in the covered window — ` +
+        `filed as jail (the residual). Frequent here means something earns XP that Jarvis does not model.`);
     }
     if (bundled) xpState.bundledReads = (xpState.bundledReads || 0) + 1;
     else         xpState.cleanReads   = (xpState.cleanReads   || 0) + 1;
