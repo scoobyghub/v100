@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.297
+// @version      2000.298
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -34,7 +34,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.297
+/*  Jarvis Bot 2000.298
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -121,7 +121,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.297';
+  const APP_VERSION = '2000.298';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -5928,58 +5928,60 @@
    * some wander off for several minutes, a few go properly AFK — a human curve, not
    * a metronome. Throughput drops (by design — you chose max camouflage).
    */
-  function humanCooldownMs(intervalSec) {
-    const floor = Math.max(0, intervalSec * 1000); // game cooldown — never act before this
-    const r = Math.random();
-    let extra;
-    if      (r < 0.45) extra = 3000   + Math.random() * 22000;   // 3–25s: still at the screen
-    else if (r < 0.80) extra = 25000  + Math.random() * 125000;  // 25s–2.5min: half-watching
-    else if (r < 0.95) extra = 150000 + Math.random() * 330000;  // 2.5–8min: wandered off
-    else               extra = 480000 + Math.random() * 720000;  // 8–20min: properly AFK
-    extra += (Math.random() - 0.5) * 6000; // soften the band edges
-    return floor + Math.max(0, extra);
-  }
-
-  /* JAIL IS NOT SUBJECT TO THE CAMOUFLAGE CURVE (2000.285).
+  /* ONE CADENCE: THE GAME COOLDOWN PLUS A SMALL JITTER (2000.298).
    *
-   * humanCooldownMs adds 3s-20min ON TOP of the interval. That is right for a
-   * crime on a 125s timer. It is nonsense for jail, whose interval is THREE
-   * SECONDS by default: the tail is up to 400x the setting, so "every 3 seconds"
-   * actually meant a ~2 MINUTE average and, one time in twenty, an 8-20 minute
-   * gap. Until 2000.283 the At-PC switch was the escape hatch; removing it left
-   * jail permanently on the slow curve, which is when it began feeling broken.
+   * The right-skewed camouflage curve from 2000.178/179 is GONE, not merely
+   * bypassed. It added 3s–20min on top of every interval, which cost roughly
+   * HALF the available actions an hour — crime 14.2/hr against a possible 28.8,
+   * booze 14.5 against 30 — and produced the reported symptom of a cooldown that
+   * had visibly expired while Jarvis sat there.
    *
-   * The reference busts on a 1-3s loop (JAIL_COOLDOWN_MIN/MAX = 1/3, with a 7s
-   * penalty after a failure) and applies no long tail at all. Jail's camouflage
-   * was never its spacing — it is the mod-presence suppression and the daily
-   * cap, and both still apply untouched. So jail gets its interval plus a small
-   * jitter, and the number in Settings means what it says.
+   * 2000.283 removed the At-PC switch. The INTENT was that everything then runs
+   * at At-PC speed; what actually happened is that everything fell through to
+   * the slow curve, because that was the branch left standing. This is the
+   * correction, not a new policy.
    *
-   * ONE LINE TO REVERT: empty FAST_ACTIONS.
+   * CAMOUFLAGE DID NOT GO WITH IT — it just no longer lives in the delay, which
+   * was always the crudest place for it. It is now carried by things that model
+   * a real session rather than jittering a timer: the coffee/lunch/sleep breaks,
+   * the mod-presence suppression and mod-online break, the per-action daily caps,
+   * the jail yield, the no-XP limiter, and the hourly forum refresh. The
+   * reference agrees — its DELAYS are 1–6s click micro-delays and it fires as
+   * soon as the game cooldown is up.
+   *
+   * rndDelay() — the per-click micro-delay — is untouched and still applies.
    */
-  const FAST_ACTIONS = new Set(['jail']);
-
-  /* ONE-TIME: bin the delay rolled under the old curve.
-   *
-   * cbDly_jail is only ever re-rolled by markActed(), i.e. after the action next
-   * FIRES. So a device updating to 285 mid-wait would sit out one last delay of
-   * up to twenty minutes before any of this took effect — and would look exactly
-   * as broken as it did before the fix, which is the worst possible first
-   * impression of a repair. Zero makes cooldownDelayMs() roll a fresh one on the
-   * next read. */
-  if (!GM_getValue('cbFastJailMigrated', false)) {
-    GM_setValue('cbFastJailMigrated', true);
-    FAST_ACTIONS.forEach(a => GM_setValue('cbDly_' + a, 0));
-    console.log(APP_TAG, '[CADENCE] Cleared the pending jail delay so the new cadence applies now');
+  function fastCooldownMs(intervalSec) {
+    return Math.max(0, intervalSec * 1000) + 500 + Math.random() * 4000;  // +0.5–4.5s
   }
 
-  // Pick the delay for this action. `action` is optional; without it you get the
-  // camouflage curve, which is the safe default for anything added later.
-  function nextCooldownMs(intervalSec, action) {
-    if (action && FAST_ACTIONS.has(action)) {
-      return Math.max(0, intervalSec * 1000) + 500 + Math.random() * 4000;
-    }
-    return humanCooldownMs(intervalSec);
+  /* The actions the cadence applies to. 2000.285 exempted jail alone from the
+   * old camouflage curve, on the grounds that a 3s interval carrying a 20-minute
+   * tail was absurd and that jail's cover was never its spacing. 2000.298 found
+   * the same argument holds for all four and removed the curve outright, so this
+   * list is now just the set whose stale delays need clearing on upgrade. */
+  const CADENCE_ACTIONS = ['crime', 'gta', 'booze', 'jail'];
+
+  /* ONE-TIME: bin every delay rolled under the old curve.
+   *
+   * cbDly_<action> is only re-rolled by markActed(), i.e. after that action next
+   * FIRES. So a device updating mid-wait would sit out one last delay of up to
+   * TWENTY MINUTES before any of this took effect — and would look exactly as
+   * broken as it did before the fix, which is the worst possible first
+   * impression of a repair. Zero makes cooldownDelayMs() roll a fresh one on the
+   * next read.
+   *
+   * 285 did this for jail alone; 298 has to do it for all four, and needs its
+   * own flag because the jail one has already run everywhere. */
+  if (!GM_getValue('cbAllFastMigrated', false)) {
+    GM_setValue('cbAllFastMigrated', true);
+    CADENCE_ACTIONS.forEach(a => GM_setValue('cbDly_' + a, 0));
+    console.log(APP_TAG, '[CADENCE] All actions now fire at the game cooldown + 0.5–4.5s — cleared the old pending delays');
+  }
+
+  // One path for every action — see fastCooldownMs.
+  function nextCooldownMs(intervalSec) {
+    return fastCooldownMs(intervalSec);
   }
 
   /* === ONE SOURCE OF TRUTH FOR WHEN AN ACTION IS DUE (2000.285) ===
@@ -6008,7 +6010,7 @@
    */
   function cooldownDelayMs(action, intervalSec) {
     let dly = GM_getValue('cbDly_' + action, 0);
-    if (!dly) { dly = nextCooldownMs(intervalSec, action); GM_setValue('cbDly_' + action, dly); }
+    if (!dly) { dly = nextCooldownMs(intervalSec); GM_setValue('cbDly_' + action, dly); }
     return dly;
   }
 
@@ -6025,13 +6027,13 @@
 
   // Roll and persist the delay until the NEXT action of this type. Call right after firing.
   function markActed(action, intervalSec) {
-    GM_setValue('cbDly_' + action, nextCooldownMs(intervalSec, action));
+    GM_setValue('cbDly_' + action, nextCooldownMs(intervalSec));
   }
 
   // Re-roll all pending action delays so a new cadence is applied immediately.
   function rerollCadence() {
     [['crime',cfg.crimeInt],['gta',cfg.gtaInt],['booze',cfg.boozeInt],['jail',cfg.jailInt]]
-      .forEach(([a, iv]) => GM_setValue('cbDly_' + a, nextCooldownMs(iv, a)));
+      .forEach(([a, iv]) => GM_setValue('cbDly_' + a, nextCooldownMs(iv)));
   }
 
   /* === SMART ACTION PICKING ===
