@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.300
+// @version      2000.301
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -34,7 +34,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.300
+/*  Jarvis Bot 2000.301
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -121,7 +121,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.300';
+  const APP_VERSION = '2000.301';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -3615,16 +3615,43 @@
    *    trip. That is the 2000.264 lesson: a failure that does not name its own
    *    branch sends you hunting the wrong subsystem.
    */
-  const OCDTM_WAIT_RE = /wait (\d+) hours? (\d+) minutes? and (\d+) seconds?/i;
+  /* === PARSING THE COOLDOWN: THE OLD REGEX MISSED MOST WORDINGS (2000.301) ===
+   *
+   * Reported: right after finishing an OC the panel read **Running** when the
+   * real answer was a ~5h45m cooldown. The page WAS stating it; we could not
+   * read it, and 295 then files anything unparsed as in-progress — so a failure
+   * to parse now shows as Running instead of the old stale Ready. Same root
+   * cause, new symptom.
+   *
+   * `wait (\d+) hours? (\d+) minutes? and (\d+) seconds?` was brittle in three
+   * separate ways, each enough on its own:
+   *   · it REQUIRED the word 'and' — 'wait 5 hours 45 minutes 12 seconds' missed;
+   *   · it used literal single spaces, so any double space or newline in the
+   *     markup missed. The #ctl00_lblMsg path passed RAW textContent, which is
+   *     exactly where newlines live — only the body path normalised whitespace;
+   *   · it REQUIRED seconds, so 'wait 5 hours 45 minutes' missed.
+   *
+   * Parsing each unit independently handles every form, including no-hours and
+   * seconds-only. Whitespace is normalised first, once, for both sources.
+   */
+  function parseWaitSeconds(text) {
+    const s = String(text || '').replace(/\s+/g, ' ');
+    if (!/\bwait\b/i.test(s)) return null;
+    const m = s.match(/wait\s+(?:(\d+)\s*hours?\s*(?:and\s+)?)?(?:(\d+)\s*minutes?\s*(?:and\s+)?)?(?:(\d+)\s*seconds?)?/i);
+    if (!m) return null;
+    const h = parseInt(m[1] || '0', 10), mi = parseInt(m[2] || '0', 10), sec = parseInt(m[3] || '0', 10);
+    const total = h * 3600 + mi * 60 + sec;
+    return total > 0 ? { h, m: mi, s: sec, total } : null;
+  }
 
   function parseOcDtmDoc(doc, kind, readyPhrase) {
     const lbl = doc.querySelector('#ctl00_lblMsg');
-    const bodyTxt = (doc.body ? doc.body.textContent || '' : '').replace(/\s+/g, ' ');
-    // The label when it exists, then the whole body — see note 2.
-    const m = (lbl && (lbl.textContent || '').match(OCDTM_WAIT_RE)) || bodyTxt.match(OCDTM_WAIT_RE);
-    if (m) {
-      const h = parseInt(m[1], 10) || 0, mi = parseInt(m[2], 10) || 0, s = parseInt(m[3], 10) || 0;
-      return { ready:false, h, m:mi, s, total:h*3600+mi*60+s, at:Date.now() };
+    const bodyTxt = (doc.body ? doc.body.textContent || '' : '');
+    // The label when it exists, then the whole body. parseWaitSeconds normalises
+    // whitespace itself, so the label's raw newlines no longer defeat it.
+    const w = (lbl && parseWaitSeconds(lbl.textContent)) || parseWaitSeconds(bodyTxt);
+    if (w) {
+      return { ready:false, h:w.h, m:w.m, s:w.s, total:w.total, at:Date.now() };
     }
     const titles = [...doc.querySelectorAll('.NewGridTitle')].map(e => (e.textContent || '').trim());
     if (titles.some(x => x.includes(readyPhrase)))
@@ -13125,6 +13152,33 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
 
       if (st.inJail) {
         const pend = localStorage.getItem(LS_PEND_DTM) ? ' (DTM pending)' : localStorage.getItem(LS_PEND_OC) ? ' (OC pending)' : '';
+        /* IS JAIL COSTING US ACTIONS? MEASURE, DO NOT GUESS (2000.301).
+         *
+         * A failed bust jails you for up to ~2m30s at high rank, and at 654
+         * busts an hour that happens often — so crime/GTA/booze can come due
+         * while locked up and simply wait. jailShouldHoldOff() only protects the
+         * 30s window BEFORE an action is due (cfg.jailYieldSec); it cannot help
+         * once you are already inside.
+         *
+         * Rather than theorise about the size of that, log which enabled actions
+         * are sitting due while we are jailed. Throttled to once a minute so a
+         * long sentence does not flood the console. If GTA shows up here often,
+         * the yield window is the lever — raise cfg.jailYieldSec. */
+        try {
+          const waiting = [
+            ['crime', st.crime, st.lastCrime, cfg.crimeInt],
+            ['gta',   st.gta,   st.lastGta,   cfg.gtaInt],
+            ['booze', st.booze, st.lastBooze, cfg.boozeInt]
+          ].filter(([a, on, last, iv]) => on && cooldownRemainingMs(a, last, iv) <= 0).map(r => r[0]);
+          if (waiting.length) {
+            const lastLog = parseInt(GM_getValue('cbJailBlockLog', 0) || 0, 10);
+            if (now - lastLog > 60000) {
+              GM_setValue('cbJailBlockLog', now);
+              console.warn(`${APP_TAG}[JAIL] In jail while ${waiting.join(', ')} ${waiting.length > 1 ? 'are' : 'is'} already due — ` +
+                `those are waiting on the sentence. Raise 'Yield to actions' in Settings if this is frequent.`);
+            }
+          }
+        } catch(_) {}
         const until = jailReleaseAt();
         const remMs = until ? until - now : 0;
         /* Always keep checking — see jailPollMs. The stated time only sets HOW
