@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.299
+// @version      2000.300
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -34,7 +34,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.299
+/*  Jarvis Bot 2000.300
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -121,7 +121,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.299';
+  const APP_VERSION = '2000.300';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -3047,22 +3047,51 @@
    * staff by the game's inline `color: #FF9900` on the profile link — and the SG
    * list colouring overwrites that very attribute with !important on the LIVE
    * document. So a staff member who is also on an SG list would be invisible to
-   * a scan of the live page. The online watch only reads names and hrefs, which
-   * the colouring does not touch, so it may use the live page; the mod watch
-   * must always parse a freshly fetched copy. */
-  let _playersDoc = null, _playersAt = 0;
-  const PLAYERS_CACHE_MS = 30000;
+   * a scan of the live page. **Both parses therefore come from a fetched copy**
+   * — see getPlayers below, which superseded the document cache in 2000.300. */
 
-  async function getPlayersDoc(allowLive) {
-    if (allowLive && /players\.aspx/i.test(window.location.pathname)) {
-      return { doc: document, url: 'current page' };
-    }
-    if (_playersDoc && (Date.now() - _playersAt) <= PLAYERS_CACHE_MS) {
-      return { doc: _playersDoc, url: 'cached' };
-    }
+  /* === CACHE THE PARSED RESULT, IN localStorage (2000.300) ===
+   *
+   * 2000.286 cached the players.aspx DOCUMENT in a plain variable. That was the
+   * wrong lifetime and the wrong thing: a page here lives about five seconds, so
+   * the cache was empty again on the next page load and almost never hit. And a
+   * whole parsed document is far too heavy to keep anyway.
+   *
+   * What every consumer actually wants is small: a list of names, and a list of
+   * staff. Parse once, store THAT with a timestamp, and the online watch, the mod
+   * watch and the DTM partner picker all share one fetch — across navigations,
+   * which is the part that was impossible before. Same idea as the reference's
+   * STATS_CACHE_DURATION / LS_CACHED_USER_DATA.
+   *
+   * ⚠️ BOTH PARSES COME FROM THE SAME FETCHED DOC, never the live page. The mod
+   * watch identifies staff by the game's inline `color: #FF9900`, and
+   * colourPlayerLinks() overwrites that attribute with !important on the live
+   * document — so a moderator who is also on an SG list would be invisible. That
+   * is why the `allowLive` shortcut 286 added is gone: the saving was marginal
+   * and the trap was not.
+   */
+  const PLAYERS_TTL_MS = 25000;
+  const LS_PLAYERS_CACHE = 'cbPlayersCache';
+
+  function cachedPlayers() {
+    try {
+      const c = JSON.parse(localStorage.getItem(LS_PLAYERS_CACHE) || 'null');
+      if (!c || (Date.now() - (c.at || 0)) > PLAYERS_TTL_MS) return null;
+      return { players: new Map(c.players || []), mods: c.mods || [], at: c.at, url: 'cached' };
+    } catch (_) { return null; }
+  }
+
+  async function getPlayers(force) {
+    if (!force) { const c = cachedPlayers(); if (c) return c; }
     const f = await fetchOwPage();
-    _playersDoc = f.doc; _playersAt = Date.now();
-    return f;
+    const players = parseOwPlayers(f.doc);
+    const mods = parseModsFromDoc(f.doc);
+    try {
+      localStorage.setItem(LS_PLAYERS_CACHE, JSON.stringify({
+        at: Date.now(), players: [...players.entries()], mods
+      }));
+    } catch (_) {}
+    return { players, mods, at: Date.now(), url: f.url };
   }
 
   async function fetchOwPage() {
@@ -3102,10 +3131,11 @@
     return map;
   }
 
-  /* curOwPlayers() was removed in 2000.286 — getPlayersDoc(true) does the same
-   * job, and leaving a second copy of 'read the live players page' lying about
-   * is precisely the trap the duplicate isInHot() turned out to be in 250:
-   * harmless while nothing calls it, wrong the moment somebody does. */
+  /* curOwPlayers() was removed in 2000.286, and getPlayersDoc() with it in 300 —
+   * getPlayers() is the one way to read the players page now. Leaving a second
+   * copy of 'read the live players page' lying about is precisely the trap the
+   * duplicate isInHot() turned out to be in 250: harmless while nothing calls
+   * it, wrong the moment somebody does. */
 
   function owBrowserNotify(title, body, url) {
     if (!ow.notify || !canNotify()) return;
@@ -3197,10 +3227,8 @@
     }
     owBusy = true;
     try {
-      // allowLive: the watch reads names and hrefs only, which SG colouring
-      // does not alter — see getPlayersDoc.
-      const f = await getPlayersDoc(true);
-      const map = parseOwPlayers(f.doc), src = f.url;
+      const f = await getPlayers();          // shared with the mod watch — see getPlayers
+      const map = f.players, src = f.url;
       for (const entry of ow.list) {
         const id = owId(entry), nm = owName(entry);
         const hit = map.get(normName(nm));
@@ -3229,12 +3257,57 @@
     } finally { owBusy = false; }
   }
 
+  /* === THE WATCHES ARE DUE-TIME DRIVEN NOW (2000.300) ===
+   *
+   * All three used `setInterval(scan, 60000)` plus a `setTimeout` kicker, on a
+   * page that lives about FIVE SECONDS. That is the 2000.258 fault exactly — it
+   * was fixed for the OC/DTM/travel timers back then and never applied here — and
+   * it broke them in OPPOSITE directions:
+   *
+   *   · ONLINE WATCH: the 60s interval never fired, but the 2.5s kicker beat the
+   *     page's lifetime, so owScan ran on essentially EVERY PAGE LOAD — roughly
+   *     720 fetches an hour instead of the 60 configured. Wildly over-fetching.
+   *   · MOD WATCH: its kicker is at 7s, LONGER than a page lives, so modScan ran
+   *     only when a page happened to sit still. That is a far better explanation
+   *     of 'two devices saw the mod and two did not' than the staleness fix in
+   *     2000.291, and it is why it looked random.
+   *   · PROPERTY WATCH: kicker at 6s. Same as mod — barely ran at all.
+   *
+   * Now they store a due time and are tested on the main-loop tick, which runs
+   * ~1.5s into every page load and cannot be outrun by a navigation. The
+   * intervals in Settings finally mean what they say.
+   */
+  const WATCH_DUE = { ow: 'cbDueOw', mod: 'cbDueMod', prop: 'cbDueProp' };
+  function watchDueAt(k) { return parseInt(GM_getValue(WATCH_DUE[k], 0) || 0, 10); }
+  function watchSetDue(k, ms) { GM_setValue(WATCH_DUE[k], Date.now() + ms); }
+  function watchResetDue() { Object.keys(WATCH_DUE).forEach(k => GM_setValue(WATCH_DUE[k], 0)); }
+
+  /* One scan per tick, in priority order, so they stagger themselves at the
+   * loop's ~2-3s cadence instead of stacking. The due time is stamped BEFORE the
+   * scan, so a failure or a mid-flight navigation costs one cycle rather than
+   * retrying every tick. */
+  function maybeWatchScan() {
+    if (isHalted() || paused) return false;
+    const now = Date.now();
+    if (owEnabled() && now >= watchDueAt('ow')) {
+      watchSetDue('ow', Math.max(OW_MIN_SEC, Number(ow.sec || OW_DEF_SEC)) * 1000);
+      owScan('due'); return true;
+    }
+    if (cfg.modWatchOn && now >= watchDueAt('mod')) {
+      watchSetDue('mod', Math.max(30, Math.min(600, Number(cfg.modPollSec) || 60)) * 1000);
+      modScan(); return true;
+    }
+    if (propWatch.on && now >= watchDueAt('prop')) {
+      watchSetDue('prop', Math.max(PROP_MIN_SEC, Number(propWatch.sec || PROP_DEF_SEC)) * 1000);
+      propScan('due'); return true;
+    }
+    return false;
+  }
+
   function owStart() {
     owStop();
     if (!owEnabled()) { renderOwUI(); return; }
-    const ms = Math.max(OW_MIN_SEC, Number(ow.sec||OW_DEF_SEC)) * 1000;
-    owTimer = setInterval(() => owScan('timer'), ms);
-    setTimeout(() => owScan('startup'), 2500);
+    GM_setValue(WATCH_DUE.ow, 0);   // scan on the next tick, then on its own schedule
     renderOwUI();
   }
 
@@ -3433,10 +3506,8 @@
     if (!cfg.modWatchOn || !tabs.isMaster || _modBusy) return;
     _modBusy = true;
     try {
-      // NOT allowLive — SG colouring overwrites the #FF9900 staff highlight on
-      // the live page, which would hide any moderator who is also on a list.
-      const f = await getPlayersDoc(false);
-      const names = parseModsFromDoc(f.doc);
+      const f = await getPlayers();          // one fetch serves both watches
+      const names = f.mods;
       const prev = modState();
       /* A PRIOR READING OLDER THAN MOD_STALE_MS IS NOT KNOWLEDGE (2000.291).
        *
@@ -3478,9 +3549,7 @@
   function modWatchStart() {
     modWatchStop();
     if (!cfg.modWatchOn) return;
-    const ms = Math.max(30, Math.min(600, Number(cfg.modPollSec) || 60)) * 1000;
-    _modTimer = setInterval(modScan, ms);
-    setTimeout(modScan, 7000);
+    GM_setValue(WATCH_DUE.mod, 0);   // see maybeWatchScan
   }
 
   function modWatchStop() { if (_modTimer) clearInterval(_modTimer); _modTimer = null; }
@@ -5281,9 +5350,7 @@
   function propWatchStart() {
     propWatchStop();
     if (!propWatch.on) { renderPropUI(); return; }
-    const ms = Math.max(PROP_MIN_SEC, Number(propWatch.sec || PROP_DEF_SEC)) * 1000;
-    propTimer = setInterval(() => propScan('timer'), ms);
-    setTimeout(() => propScan('startup'), 6000);
+    GM_setValue(WATCH_DUE.prop, 0);   // see maybeWatchScan
     renderPropUI();
   }
 
@@ -12210,8 +12277,8 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
     // Online check — see the section note above for why this comes from players.aspx.
     let pool = cands;
     try {
-      const f = await getPlayersDoc(true);   // names only — see getPlayersDoc
-      const online = parseOwPlayers(f.doc);
+      const f = await getPlayers();          // shared — see getPlayers
+      const online = f.players;
       if (online && online.size) {
         const on = cands.filter(c => online.has(c.key));
         if (!on.length) {
@@ -13031,6 +13098,7 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
      * backstop, because a page rarely lives long enough for one to fire. See
      * maybeBgFetch. Fire-and-forget: it must never delay an action. */
     try { maybeBgFetch(); } catch(_){}
+    try { maybeWatchScan(); } catch(_){}   // online / mod / property — see maybeWatchScan
     try { doForumRefresh(); } catch(_){}   // fire-and-forget; never gates the loop
     try { maybeForceStatRefresh(); } catch(_){}
 
