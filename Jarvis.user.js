@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.301
+// @version      2000.302
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -34,7 +34,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.301
+/*  Jarvis Bot 2000.302
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -121,7 +121,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.301';
+  const APP_VERSION = '2000.302';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -6721,7 +6721,12 @@
     const rateEl  = _shadow.querySelector('#jb-xp-rate');
     const lastEl  = _shadow.querySelector('#jb-xp-last');
     if (totalEl) totalEl.textContent = xpState.total > 0 ? xpState.total.toFixed(2) : '—';
-    if (sessEl)  sessEl.textContent  = xpState.sessionGain > 0 ? `+${xpState.sessionGain}` : '—';
+    /* '…' means waiting for the first measured gain; '—' means we have no XP
+     * data at all. They looked identical before, and since Total populates
+     * immediately from the status bar the panel read as half-broken on a new
+     * install when it was simply waiting. Rate has always used '…' this way. */
+    if (sessEl)  sessEl.textContent  = xpState.sessionGain > 0 ? `+${xpState.sessionGain}`
+                                     : (xpState.total > 0 ? '…' : '—');
     if (rateEl)  { const r = _xpRate(); rateEl.textContent = r ? `${r}/hr` : '…'; }
     if (lastEl) {
       const h = xpState.history[0];
@@ -10846,6 +10851,9 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
     lastApiAt:    GM_getValue('cbXpLastApiAt', 0),
     sessionGain:  GM_getValue('cbXpSessionGain', 0),
     sessionBase:  GM_getValue('cbXpSessionBase', 0),
+    /* True while sessionBase came from the ROUNDED status bar rather than the
+     * exact feed — see the baseline branch in onExperienceRead. */
+    baseProv:     GM_getValue('cbXpBaseProv', false),
     // How many readings covered exactly one action vs several — the honest
     // measure of how far to trust the per-action bars. See onExperienceRead.
     cleanReads:   GM_getValue('cbXpCleanReads', 0),
@@ -11242,6 +11250,7 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
     GM_setValue('cbXpLastApiAt', xpState.lastApiAt);
     GM_setValue('cbXpSessionGain', xpState.sessionGain);
     GM_setValue('cbXpSessionBase', xpState.sessionBase);
+    GM_setValue('cbXpBaseProv', !!xpState.baseProv);
     GM_setValue('cbXpCleanReads', xpState.cleanReads || 0);
     GM_setValue('cbXpBundledReads', xpState.bundledReads || 0);
     GM_setValue('cbXpJailRates', xpState.jailRates || []);
@@ -11257,6 +11266,7 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
     // Re-baseline: session gain is now derived as total − base, so the base has
     // to move with the reset or the counter would resume from the old figure.
     xpState.sessionBase = xpState.total || 0;
+    xpState.baseProv = false;   // an explicit reset is authoritative, not provisional
     xpState.sessionStart = Date.now();
     XP_ACTIONS.forEach(a => { xpState.perAction[a] = 0; });
     xpState.history = [];
@@ -11524,7 +11534,24 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
     if (prev === 0) {                       // first reading of this kind — baseline only
       xpState.total = Math.max(xpState.total, xp);
       if (source === 'api') xpState.apiTotal = xp;
-      if (!xpState.sessionBase) xpState.sessionBase = xp;
+      /* A BAR-DERIVED BASELINE EATS THE FIRST FEW GAINS (2000.302).
+       *
+       * Reported as Session and Rate staying blank on a new install. The status
+       * bar is the truth ROUNDED, so it can sit up to half a step ABOVE the real
+       * total — 0.15 XP at Global Dominator, where the step is 0.3. Baseline from
+       * that and `sessionGain = max(0, total - sessionBase)` stays clamped at
+       * ZERO until real gains exceed the overshoot: at ~0.08 a booze sale that is
+       * the first two gains swallowed, with the panel showing nothing the whole
+       * time. Exactly the 2000.243 fault — the bar sitting above the truth —
+       * which 243 fixed for `total` and never for the session baseline.
+       *
+       * So a bar baseline is PROVISIONAL, and the first exact reading replaces
+       * it. On a new session there are no real gains to lose by re-baselining;
+       * the bar-derived ones were noise. */
+      if (!xpState.sessionBase || (xpState.baseProv && source === 'api')) {
+        xpState.sessionBase = xp;
+        xpState.baseProv = (source === 'bar');
+      }
       /* A baseline attributes nothing, so anything queued before it belongs to a
        * gain we will never see. Leaving it would make the FIRST real reading look
        * bundled when it covered one action. */
@@ -11552,7 +11579,10 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
      * deltas meant every provisional bar reading was permanently banked, so a
      * later exact correction could not undo it and the session total drifted
      * upward all evening. Derived, it is self-correcting by construction. */
-    if (!xpState.sessionBase) xpState.sessionBase = Math.max(0, xp - gained);
+    if (!xpState.sessionBase || (xpState.baseProv && source === 'api')) {
+      xpState.sessionBase = Math.max(0, xp - gained);   // the exact value before this gain
+      xpState.baseProv = (source === 'bar');
+    }
     xpState.sessionGain = parseFloat(Math.max(0, xpState.total - xpState.sessionBase).toFixed(4));
 
     /* What this reading actually covered. Everything queued since the last
