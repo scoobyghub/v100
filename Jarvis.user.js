@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.304
+// @version      2000.305
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -34,7 +34,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.304
+/*  Jarvis Bot 2000.305
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -121,7 +121,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.304';
+  const APP_VERSION = '2000.305';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -7565,6 +7565,44 @@
   }
 
   // Returns true if it took control of this tick.
+  /* === TOP UP HEALTH BETWEEN STAYS (2000.305) ===
+   *
+   * Each time the stay runs out you are back on the street to re-enter, and you
+   * may well have been shot in the meantime — that is why you pressed the button.
+   * Going straight back in on 30% health wastes the whole point of hiding.
+   *
+   * HEALS REGARDLESS OF THE HEALTH TOGGLE, deliberately. Hold HQ is a panic mode
+   * you engaged by hand; it is already opt-in, and 2000.278's shot response sets
+   * the same precedent by healing first and unconditionally. If credits are
+   * short we go in anyway — standing outside hurt is strictly worse than being
+   * inside hurt.
+   *
+   * Returns true if a heal happened, so the caller re-evaluates on the next tick
+   * rather than entering mid-heal. */
+  async function hqHealBeforeEntry() {
+    const target = Math.min(100, Number(cfg.targetHealth) || 100);
+    const hp = getHp();
+    if (!(hp > 0) || hp >= target) return false;   // 0 = no status bar; do not guess
+    if (_healActive) return true;                  // already running — wait for it
+    if (!healAffordable()) {
+      console.warn(`${APP_TAG}[HQ] ${hp}% health and cannot afford to heal — going in anyway`);
+      return false;
+    }
+    console.log(`${APP_TAG}[HQ] Topping up ${hp}% → ${target}% before going back in`);
+    setStatus(`🏠 Hold HQ — healing ${hp}% → ${target}% before re-entering`);
+    await bgHeal(target);
+    return true;
+  }
+
+  /* HOLD HQ TAKES THE WHOLE LOOP. It sits above the action chain and returns
+   * true, so crimes, GTA, booze, jail, garage, scrap, OC/DTM creation, travel,
+   * the DTM list, invites, mail and the background fetches are all suspended
+   * while it runs — hiding and committing crimes at the same time is not hiding.
+   * It also bypasses the breaks (2000.277).
+   *
+   * Two things deliberately still run above it: the anti-bot / staff-check
+   * handling, because not getting banned outranks not getting shot; and the
+   * background heal, which is the whole point of being here. */
   async function doHoldHq() {
     if (!cfg.holdHqOn) return false;
 
@@ -7616,6 +7654,22 @@
       return true;
     }
 
+    /* ALREADY INSIDE? DO NOT PRESS ENTER AGAIN (2000.305).
+     *
+     * The countdown was only checked in the NOT-on-tab branch. After entering,
+     * the postback leaves us on network.aspx?p=p — so the next tick came down
+     * here, found the Enter control still on the page and pressed it again,
+     * burning an entry every few seconds and chewing through cfg.holdHqMax in
+     * under a minute. */
+    {
+      const staying = hqNextAt();
+      if (staying && Date.now() < staying) {
+        setStatus(`🏠 Hold HQ — inside, ${Math.max(1, Math.ceil((staying - Date.now())/60000))}m left`);
+        updateHqUI();
+        return true;
+      }
+    }
+
     /* Rule 1. A damaged HQ can be destroyed while you're in it, and that kills
      * you. Refuse, and keep refusing — this is the one condition where doing
      * nothing is unambiguously right. */
@@ -7626,6 +7680,10 @@
       console.warn(`${APP_TAG}[HQ] ${dmg}% damage — not entering`);
       return true;
     }
+
+    // Top up before going in — see hqHealBeforeEntry. One choke point, so it
+    // covers the first entry and every re-entry alike.
+    if (await hqHealBeforeEntry()) return true;
 
     const enterBtn = document.getElementById('ctl00_main_btnenter');
     const minsBox  = document.getElementById('ctl00_main_txtmins');
