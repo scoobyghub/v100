@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.302
+// @version      2000.303
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -34,7 +34,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.302
+/*  Jarvis Bot 2000.303
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -121,7 +121,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.302';
+  const APP_VERSION = '2000.303';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -7066,6 +7066,47 @@
     return healed > 0;
   }
 
+  /* Called early in mainLoop so health cannot be starved by a pause, a break or
+   * any action flow — see the note at the call site. Background path only.
+   * Returns true if a heal was started. */
+  function maybeHealNow() {
+    if (!st.health || isHalted() || !cfg.bgHealOn) return false;
+    if (_healActive) return false;
+    const hp = getHp();
+    // getHp() answers 100 when the status bar is absent, so a page without one
+    // simply skips rather than healing on a guess.
+    if (!(hp > 0) || hp >= Math.min(100, cfg.targetHealth || 100)) return false;
+    const gap = Math.max(10, Number(cfg.healthInt) || 30) * 1000;
+    if (st.lastHealth && (Date.now() - st.lastHealth) < gap) return false;
+    if (!healAffordable()) return false;
+    st.lastHealth = Date.now(); saveSt();   // claim the slot before the await
+    console.log(`${APP_TAG}[HEAL] ${hp}% < ${cfg.targetHealth || 100}% — healing (runs regardless of pauses and breaks)`);
+    bgHeal(cfg.targetHealth || 100);
+    return true;
+  }
+
+  /* CREDITS MUST NEVER SWITCH THE TOGGLE OFF (2000.303).
+   *
+   * Both paths used to do `st.health = false` when credits looked low — so once
+   * you were briefly short, health stayed off silently until you noticed and
+   * re-ticked it. Worse in the legacy path, which tested a bare `cr < 10`, and
+   * getCredits() answers **0 when the status-bar element is missing** — so any
+   * page without the bar disabled health outright.
+   *
+   * Skip the cycle instead, and say so at most once every ten minutes. */
+  function healAffordable() {
+    const cr = getCredits();
+    if (cr > 0 && cr < 10) {
+      const last = parseInt(GM_getValue('cbHealBrokeLog', 0) || 0, 10);
+      if (Date.now() - last > 600000) {
+        GM_setValue('cbHealBrokeLog', Date.now());
+        console.warn(`${APP_TAG}[HEAL] Only ${cr} credits — cannot heal. Health stays ON and will resume once you have credits.`);
+      }
+      return false;
+    }
+    return true;   // 0 means 'could not read it', not 'broke'
+  }
+
   function checkHealth() {
     if (!st.health || paused) return;
     const hp = getHp();
@@ -7084,8 +7125,7 @@
        * still adds up. Reuse healthInt as the gap. */
       const gap = Math.max(10, Number(cfg.healthInt) || 30) * 1000;
       if (st.lastHealth && (Date.now() - st.lastHealth) < gap) return;
-      const cr = getCredits();
-      if (cr > 0 && cr < 10) { st.health = false; saveSt(); return; }
+      if (!healAffordable()) return;
       st.lastHealth = Date.now(); saveSt();   // claim the slot before the await
       bgHeal(cfg.targetHealth || 100);
       return;
@@ -7093,8 +7133,7 @@
 
     // Legacy navigation path, kept for anyone who wants the old visible behaviour.
     if (st.acting) return;
-    const cr = getCredits();
-    if (cr < 10) { st.health = false; saveSt(); return; }
+    if (!healAffordable()) return;
     if (!/\/authenticated\/credits\.aspx$/i.test(location.pathname)) {
       st.buyHealth = true; saveSt(); setTimeout(() => location.href = '/authenticated/credits.aspx', 1500); return;
     }
@@ -12934,12 +12973,39 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
       }
     }
 
+    /* === HEALTH RUNS FIRST, AND ALMOST UNCONDITIONALLY (2000.303) ===
+     *
+     * checkHealth() lives near the BOTTOM of this function, behind about twenty
+     * early returns. So with health switched ON it still did nothing while:
+     *   · `paused` — which a STAFF CHECK sets, and a staff check can sit
+     *     unanswered for hours. It is also set merely by having the Settings
+     *     modal open, and by an anti-bot message and the watch-stop action.
+     *   · any break (coffee / lunch / sleep / mod) above cfg.minHealth;
+     *   · the post-jail release hold — right when you are most likely hurt;
+     *   · HOLD HQ, which you reach for precisely BECAUSE you are being shot at;
+     *   · every OC / DTM / travel / invite / mail flow.
+     * Dying costs everything, so 'health is on' has to mean it.
+     *
+     * ONLY THE BACKGROUND PATH RUNS HERE. It is same-origin POSTs to
+     * credits.aspx and never navigates, so it is safe anywhere. The legacy
+     * navigating path stays where it was, deliberately: driving the tab to
+     * credits.aspx in the middle of a staff check or a break is exactly the
+     * wrong thing to do.
+     *
+     * Still respected, and correctly: the HALT (no requests to the game at all,
+     * §4) and master-tab only, both of which have already returned above. */
+    try { maybeHealNow(); } catch(e) { console.warn(APP_TAG, '[HEAL]', e); }
+    /* The low-HP alert belongs up here with it. Its own comment claimed it 'runs
+     * at all times', but it sat BELOW the `paused` return — so the one warning
+     * that says you are bleeding out was silenced by exactly the things you would
+     * want it during: a staff check, an anti-bot message, or the Settings modal
+     * simply being open. */
+    try { checkLowHp(); } catch(e) { console.warn(APP_TAG, '[HEAL] low-hp alert', e); }
+
     if (paused) { schedLoop(1800+Math.floor(Math.random()*1400)); return; }
 
-    // HEALTH MONITORING — runs at all times, bypasses every break.
-    // Always check low-HP alerting, and if HP is critically low let health auto-buy
-    // run even during a coffee/lunch/sleep break (we don't want to die while resting).
-    checkLowHp();
+    // If HP is critically low, let the LEGACY (navigating) health path run even
+    // during a break — the background path has already had its chance above.
     const _breakActive = breaks.isSleeping ||
       (breaks.coffeeEndAt > 0 && Date.now() < breaks.coffeeEndAt) ||
       (breaks.lunchEndAt > 0 && Date.now() < breaks.lunchEndAt) ||
