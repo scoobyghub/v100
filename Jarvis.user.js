@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.303
+// @version      2000.304
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -34,7 +34,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.303
+/*  Jarvis Bot 2000.304
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -121,7 +121,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.303';
+  const APP_VERSION = '2000.304';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -7575,9 +7575,19 @@
     }
 
     const curCity = hqCityKey(getCurCity());
-    const onNet = /\/authenticated\/network\.aspx/i.test(location.pathname);
+    /* ⚠️ THE TAB MATTERS, NOT JUST THE PAGE (2000.304).
+     *
+     * This tested the PATH alone. network.aspx has several tabs and the HQ is
+     * `?p=p`; #ctl00_main_btnenter and #ctl00_main_txtmins exist on that tab and
+     * nowhere else. So landing on network.aspx WITHOUT p=p — the default tab, a
+     * redirect, a postback that drops the query, or you opening it by hand —
+     * counted as 'we are there', sailed past the enter block, and fell into the
+     * 'already inside' fallback below. Reported as: it doesn't always go into
+     * the HQ. */
+    const onHqTab = /\/authenticated\/network\.aspx/i.test(location.pathname)
+                 && /(^|[?&])p=p(&|$)/i.test(location.search);
 
-    if (!onNet) {
+    if (!onHqTab) {
       const next = hqNextAt();
       if (next && Date.now() < next) {          // inside and still counting down
         setStatus(`🏠 Hold HQ — ${Math.ceil((next - Date.now())/60000)}m left`);
@@ -7624,6 +7634,7 @@
       const n = hqEnterCount() + 1;
       minsBox.value = String(mins);
       try { minsBox.dispatchEvent(new Event('change', { bubbles: true })); } catch(_){}
+      GM_setValue('cbHqRetryAt', 0);   // entered cleanly — drop any retry backoff
       localStorage.setItem(LS_HQ_COUNT, String(n));
       localStorage.setItem(LS_HQ_NEXT, String(Date.now() + mins * 60000));
       console.log(`${APP_TAG}[HQ] Entering for ${mins}m (${n}/${max})`);
@@ -7635,9 +7646,35 @@
       return true;
     }
 
-    // No enter button: already inside. Sit out the timer.
+    /* ⚠️ ONLY CLAIM WE ARE INSIDE WITH EVIDENCE FOR IT (2000.304).
+     *
+     * This said 'inside' and returned true whether or not there was a stored
+     * release time — and returning true makes mainLoop return, so Hold HQ held
+     * **the entire loop, indefinitely, while never actually entering**. No
+     * crimes, no jail, no anything, and the panel calmly reporting that we were
+     * hiding. Combined with the tab bug above that is the whole of the reported
+     * fault.
+     *
+     * A release time still in the future is real evidence. Without one, we are
+     * on the wrong page or the control has moved — so say what was actually
+     * seen and re-open the HQ tab, rate-limited so it cannot spin. */
     const next = hqNextAt();
-    setStatus(next ? `🏠 Hold HQ — inside, ${Math.max(1, Math.ceil((next - Date.now())/60000))}m left` : '🏠 Hold HQ — inside');
+    if (next && Date.now() < next) {
+      setStatus(`🏠 Hold HQ — inside, ${Math.max(1, Math.ceil((next - Date.now())/60000))}m left`);
+      updateHqUI();
+      return true;
+    }
+
+    const why = !enterBtn ? 'no #ctl00_main_btnenter on the page'
+              : !minsBox  ? 'no #ctl00_main_txtmins on the page'
+                          : 'the Enter button is disabled';
+    console.warn(`${APP_TAG}[HQ] On ${location.pathname}${location.search} but cannot enter — ${why}. Re-opening the HQ tab.`);
+    setStatus('🏠 Hold HQ — enter control missing, retrying');
+    const retryAt = parseInt(GM_getValue('cbHqRetryAt', 0) || 0, 10);
+    if (Date.now() >= retryAt) {
+      GM_setValue('cbHqRetryAt', Date.now() + 15000);
+      safeNav(HQ_PATH + '&_=' + Date.now());
+    }
     updateHqUI();
     return true;
   }
