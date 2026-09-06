@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.306
+// @version      2000.307
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -34,7 +34,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.306
+/*  Jarvis Bot 2000.307
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -121,7 +121,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.306';
+  const APP_VERSION = '2000.307';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -13479,6 +13479,43 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
           const yieldMark = (jailRdy && modJailBlocked()) ? ' ⏸M'
                           : (jailRdy && jailShouldHoldOff()) ? ' ⏸J' : '';
           setStatus(`C:${cr}s G:${gr}s B:${br}s J:${jr}s Gar:${gar}m${yieldMark}`);
+
+          /* === WHY IS NOTHING RUNNING? SAY SO (2000.307) ===
+           *
+           * Reported twice now: an action is plainly available in the game and
+           * Jarvis sits there. Both times I reasoned from the code and both times
+           * I was wrong — first blaming the cadence tail, then rank-locked
+           * selections, which the user corrected because a new player CAN do
+           * crime and GTA. The status line shows countdowns but never says why an
+           * action at 0s still is not chosen, and reaching this branch at all
+           * means the chain picked nothing.
+           *
+           * So: when something reads READY here — remaining 0 — and yet we fell
+           * through to 'nothing to do', name the gate that actually stopped it.
+           * Once a minute, so a long genuine idle does not flood the console. */
+          try {
+            const stuck = [
+              ['crime', st.crime, cr, dailyLimitReached('crime')],
+              ['gta',   st.gta,   gr, dailyLimitReached('gta')],
+              ['booze', st.booze, br, dailyLimitReached('booze')],
+              ['jail',  st.jail,  jr, false]
+            ].filter(([, on, rem]) => on && rem <= 0);
+            if (stuck.length) {
+              const lastLog = parseInt(GM_getValue('cbIdleWhyLog', 0) || 0, 10);
+              if (now - lastLog > 60000) {
+                GM_setValue('cbIdleWhyLog', now);
+                const why = stuck.map(([a, , , capped]) => {
+                  if (capped) return a + ': daily limit reached';
+                  if (a === 'jail' && modJailBlocked()) return 'jail: staff online';
+                  if (a === 'jail' && jailShouldHoldOff()) return 'jail: yielding to a due action';
+                  return a + ': READY but not selected — unexplained';
+                });
+                console.warn(`${APP_TAG}[IDLE] Nothing ran this tick although ` +
+                  `${stuck.map(s => s[0]).join(', ')} read as due. ${why.join(' · ')}. ` +
+                  `page=${curPage()} acting=${st.acting} pending='${st.pending}' inJail=${st.inJail} refresh=${st.refresh}`);
+              }
+            }
+          } catch(_) {}
         }
       }
     }
