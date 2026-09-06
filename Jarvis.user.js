@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.305
+// @version      2000.306
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -34,7 +34,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.305
+/*  Jarvis Bot 2000.306
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -121,7 +121,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.305';
+  const APP_VERSION = '2000.306';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -6310,6 +6310,32 @@
       `so the other actions get a turn.`);
   }
 
+  /* === A LOCKED SELECTION MUST NOT MEAN 'DO NOTHING' (2000.306) ===
+   *
+   * The defaults are tuned for a high rank: crimes [1,3,5] is Credit card fraud,
+   * Sell illegal weapons and Rob a bank, and GTA [5] is Car jack from street —
+   * the top tier. **A brand-new player cannot do most of those.**
+   *
+   * The fall-back to 'scan everything' only ran when the selection was EMPTY.
+   * With a non-empty selection whose every entry is locked at your rank, the
+   * candidate list came out empty, actionBlocked() backed off 20s, and that
+   * repeated for ever — the action never fired and nothing said why, even though
+   * the game was offering perfectly good alternatives. On a fresh install that
+   * is the difference between working and appearing dead.
+   *
+   * So: your selection first, and if none of it is available but something else
+   * is, use what the game IS offering and say so. Never a reason to sit idle.
+   */
+  function noteSelectionFallback(kind, wanted) {
+    const k = 'cbSelFallback_' + kind;
+    const last = parseInt(GM_getValue(k, 0) || 0, 10);
+    if (Date.now() - last < 1800000) return;          // half an hour
+    GM_setValue(k, Date.now());
+    console.warn(`${APP_TAG}[${kind.toUpperCase()}] None of your selected ${kind}s (${wanted.join(', ')}) ` +
+      `are available at this rank — using whatever the game IS offering instead. ` +
+      `Pick different ones in Settings once you rank up.`);
+  }
+
   function doCrime() {
     if (st.inJail || !st.crime || st.acting || paused) return;
     if (dailyLimitReached('crime')) return;
@@ -6319,10 +6345,19 @@
     st.acting = true; st.action = 'crime'; GM_setValue('cbActStart', now);
     // Carries the crime id alongside the button so smart picking can look up its
     // success percentage; random picking ignores the id.
-    let avail = [];
-    if (st.crimes.length > 0) {
-      avail = st.crimes.map(id => { const c = CRIMES.find(x=>x.id===id); if(c) { const b = document.getElementById(c.el); if(b && !b.disabled) return { id, btn:b }; } return null; }).filter(Boolean);
-    } else { for(let i=1;i<=5;i++) { const b = document.getElementById(`ctl00_main_btnCrime${i}`); if(b && !b.disabled) avail.push({ id:i, btn:b }); } }
+    const enabledCrime = id => {
+      const c = CRIMES.find(x => x.id === id);
+      if (!c) return null;
+      const b = document.getElementById(c.el);
+      return (b && !b.disabled) ? { id, btn: b } : null;
+    };
+    const ALL_CRIME_IDS = CRIMES.map(c => c.id);
+    let avail = (st.crimes.length ? st.crimes : ALL_CRIME_IDS).map(enabledCrime).filter(Boolean);
+    // Nothing you picked is available, but something else is — see noteSelectionFallback.
+    if (!avail.length && st.crimes.length) {
+      const any = ALL_CRIME_IDS.map(enabledCrime).filter(Boolean).filter(c => crimeAllowed(c.id, c.btn));
+      if (any.length) { noteSelectionFallback('crime', st.crimes); avail = any; }
+    }
     // Drop anything excluded (pickpocket) before a pick is even considered.
     avail = avail.filter(c => crimeAllowed(c.id, c.btn));
     if (!avail.length) {
@@ -6355,9 +6390,15 @@
     if (st.refresh || curPage() !== 'gta') { st.refresh = false; saveSt(); safeNav('/authenticated/crimes.aspx?p=g&'+Date.now()); return; }
     st.acting = true; st.action = 'gta'; GM_setValue('cbActStart', now);
     const radios = document.querySelectorAll('input[name="ctl00$main$carslist"]');
-    let avail = [];
-    if (st.gtas.length > 0) { avail = st.gtas.map(id => { const g = GTAS.find(x=>x.id===id); if(g) return [...radios].find(r=>r.value===g.val); return null; }).filter(Boolean); }
-    else avail = [...radios];
+    const radioFor = id => { const g = GTAS.find(x => x.id === id); return g ? [...radios].find(r => r.value === g.val) : null; };
+    let avail = st.gtas.length ? st.gtas.map(radioFor).filter(Boolean) : [...radios];
+    /* Same trap as crime, and worse here: the DEFAULT is [5], the top tier, which
+     * a new player certainly cannot do — so a fresh install would never fire a
+     * GTA at all. */
+    if (!avail.length && st.gtas.length && radios.length) {
+      noteSelectionFallback('gta', st.gtas);
+      avail = [...radios];
+    }
     if (!avail.length) {
       actionBlocked('gta', 'lastGta', 'no selectable car on the page');
       return;
