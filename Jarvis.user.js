@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.307
+// @version      2000.308
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -34,7 +34,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.307
+/*  Jarvis Bot 2000.308
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -121,7 +121,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.307';
+  const APP_VERSION = '2000.308';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -11087,6 +11087,42 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
     const span = nextBase - base;
     const pct = span > 0 ? Math.min(100, Math.max(0, ((xp - base) / span) * 100)) : 0;
     return { rank, next: nextRank, pct, toNext: parseFloat((nextBase - xp).toFixed(2)) };
+  }
+
+  /* === STATS-PAGE RANK BAR FILL (2000.308) ===
+   * statistics.aspx?p=p renders a locked "Rank bar" widget
+   * (#ctl00_main_rbRank_lblPerc / #ctl00_main_rbRank_progress) showing "You
+   * need to buy a rank bar in the Credits Store..." instead of a percentage,
+   * unless that's been bought. We already have the same figure for free —
+   * xpRankProgress() off xpState.total — so this just draws our own number
+   * into the locked element. Cosmetic only: nothing is purchased and nothing
+   * server-side changes, it only affects what this browser renders.
+   * Ported from the reference script's tmnStatsRankBarInit (v4.20.270).
+   */
+  if (_path.includes('/authenticated/statistics.aspx')) {
+    (function fillStatsRankBar() {
+      function fill() {
+        try {
+          const lbl = document.getElementById('ctl00_main_rbRank_lblPerc');
+          if (!lbl || lbl.dataset.jbFilled) return;
+          if (!(xpState.total > 0)) return;
+          const rp = xpRankProgress(xpState.total);
+          if (!rp) return;
+          const pct = rp.next ? rp.pct : 100;
+          lbl.dataset.jbFilled = '1';
+          lbl.style.whiteSpace = 'nowrap';
+          lbl.textContent = pct.toFixed(1) + '% ';
+          const bar = document.getElementById('ctl00_main_rbRank_progress');
+          if (bar) {
+            bar.style.width = Math.max(0, Math.min(100, pct)).toFixed(1) + '%';
+            bar.style.overflow = 'visible';
+          }
+        } catch(_) {}
+      }
+      if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', fill);
+      else fill();
+      window.addEventListener('load', fill);
+    })();
   }
 
   /* === STATUS-BAR XP FALLBACK (2000.224) ===
