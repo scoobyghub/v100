@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.308
+// @version      2000.309
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -34,7 +34,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.308
+/*  Jarvis Bot 2000.309
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -121,7 +121,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.308';
+  const APP_VERSION = '2000.309';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -1250,6 +1250,15 @@
     uiSize:       GM_getValue('cbUiSize', 'n'),
     timerDispSec: GM_getValue('cbTimerDispSec', 5),    // panel refresh
     bgPollSec:    GM_getValue('cbBgPollSec', 60),      // OC/DTM/travel background fetches
+    /* Tablet mode (2000.309): one front-panel switch that bundles this whole
+     * performance section with the costly optional toggles (hover, SG lists,
+     * props, silent audio, worker ticker) into their lowest-resource setting,
+     * for an old/low-RAM device (e.g. a tablet in Firefox that runs out of
+     * memory). The panel handler snapshots whatever was actually running
+     * BEFORE applying the preset, so switching it back off restores your real
+     * setup rather than a guess — same reasoning as the ALL switch's
+     * snapshot/restore (2000.256). */
+    tabletMode:   GM_getValue('cbTabletMode', false),
     // Anti-bot / soft-ban message detection — pauses everything and alerts.
     antiBotOn:    GM_getValue('cbAntiBotOn', true),
     // Scrap → FMJ conversion at store.aspx?p=s (5 scrap = 1000 FMJ).
@@ -8577,6 +8586,7 @@
               <label class="jb-switch" title="Property drop watch"><input type="checkbox" id="jb-prop-on"> 🏠 Props</label>
               <label class="jb-switch" title="Player hover tooltip (reload to apply)"><input type="checkbox" id="jb-hover-on"> 🔍 Hover</label>
               <label class="jb-switch" title="Colour player links from your Starvinggeeks lists — watched (orange), safe (green), allied (blue). Read-only: three GETs, nothing is ever sent."><input type="checkbox" id="jb-sg-on"> 🎨 SG lists <span id="jb-sg-status" style="font-size:9px;letter-spacing:0.02em">—</span></label>
+              <label class="jb-switch" title="Ultra-low-resource preset for an old/low-RAM device (e.g. a tablet in Firefox that keeps running out of memory). Pushes panel refresh, background polls and the XP backstop to their slowest settings, and switches off Hover, SG lists, Props, Silent audio and the Worker ticker. Switching this back off restores exactly what you had running before."><input type="checkbox" id="jb-tablet-mode" ${cfg.tabletMode?'checked':''}> 📱 Tablet</label>
               <label class="jb-switch" title="Telegram ping when an OC or DTM comes off cooldown, plus the repeat reminders while it is still sitting there unused. This is ONLY the OC/DTM ready pings — every other alert lives in Settings → Alerts, and script checks are never gated by it."><input type="checkbox" id="jb-notify-ready"> 🔔 OC/DTM alerts</label>
               <label class="jb-switch"><input type="checkbox" id="jb-auto-travel" ${st.autoTravel?'checked':''}> ✈️ Auto Travel</label>
               <label class="jb-switch" title="ADVERTISE yourself on the DTM list (ocads.aspx) when a DTM is ready, so others can invite you"><input type="checkbox" id="jb-auto-dtmlist" ${st.autoDtmList?'checked':''}> 📋 DTM List</label>
@@ -8995,7 +9005,7 @@
             <label class="jb-switch jb-mb" title="Verbose console logging for diagnostics. Off keeps the console quiet (real events still log)."><input type="checkbox" id="jb-debug" ${_debug?'checked':''}> 🐛 Verbose debug logging</label>
             <hr class="jb-sep">
             <div class="jb-sect-title">Performance (low-RAM devices)</div>
-            <div class="jb-sub jb-mb" style="line-height:1.5">For an old tablet: raise these to cut memory and CPU. Everything else costly — Hover, SG lists, Props, Silent audio, Worker ticker — already has its own switch on the panel or above.</div>
+            <div class="jb-sub jb-mb" style="line-height:1.5">For an old tablet: raise these to cut memory and CPU. Everything else costly — Hover, SG lists, Props, Silent audio, Worker ticker — already has its own switch on the panel or above. The front-panel <b>📱 Tablet</b> switch applies all of this at once, and restores exactly what you had when switched back off.</div>
             <div class="jb-row">
               <label class="jb-label" style="white-space:nowrap">Panel refresh (s):</label>
               <input class="jb-input jb-input-sm" type="number" id="jb-perf-disp" value="${cfg.timerDispSec}" min="2" max="60">
@@ -9572,6 +9582,66 @@
       if (w) w.addEventListener('change', e => { ka.wakeLock = e.target.checked; saveKa(); if (ka.wakeLock) requestWakeLock(); else releaseWakeLock(); }); }
     { const k = _shadow.querySelector('#jb-ka-worker');
       if (k) k.addEventListener('change', e => { ka.worker = e.target.checked; saveKa(); if (ka.worker) startKaWorker(); else stopKaWorker(); }); }
+
+    /* Tablet mode (2000.309) — bundles the performance knobs and the costly
+     * optional toggles into one switch for an old/low-RAM device. Mirrors the
+     * ALL switch's snapshot/restore (2000.256): the ON direction snapshots
+     * whatever was actually running BEFORE the preset, so switching it back
+     * OFF restores your real setup rather than defaulting to something. */
+    const TABLET_SNAP_KEY = 'cbTabletPreMode';
+    { const tcb = _shadow.querySelector('#jb-tablet-mode');
+      if (tcb) tcb.addEventListener('change', e => {
+        const on = e.target.checked;
+        cfg.tabletMode = on; GM_setValue('cbTabletMode', on);
+        let snap = null;
+        if (on) {
+          GM_setValue(TABLET_SNAP_KEY, {
+            timerDispSec: cfg.timerDispSec, bgPollSec: cfg.bgPollSec, xpPollSec: cfg.xpPollSec,
+            hoverOn: hoverCfg.on, sgOn: sgCfg.on, propOn: propWatch.on,
+            kaAudio: ka.audio, kaWorker: ka.worker, kaWake: ka.wakeLock
+          });
+          cfg.timerDispSec = 60; GM_setValue('cbTimerDispSec', 60);
+          cfg.bgPollSec = 900; GM_setValue('cbBgPollSec', 900); try { resetBgDue(); } catch(_){}
+          cfg.xpPollSec = 1800; GM_setValue('cbXpPollSec', 1800); GM_setValue('cbLastStatRefresh', 0);
+          hoverCfg.on = false; saveHoverCfg();
+          sgCfg.on = false; saveSgCfg(); try { renderSgStatusUI(); } catch(_){}
+          propWatch.on = false; savePropWatch(); try { propWatchStart(); } catch(_){}
+          ka.audio = false; ka.worker = false; ka.wakeLock = false; saveKa();
+          try { stopKaAudio(); } catch(_){}
+          try { stopKaWorker(); } catch(_){}
+          try { releaseWakeLock(); } catch(_){}
+          setStatus('📱 Tablet mode on — ultra-low resource preset applied');
+        } else {
+          snap = GM_getValue(TABLET_SNAP_KEY, null);
+          if (snap) {
+            cfg.timerDispSec = snap.timerDispSec; GM_setValue('cbTimerDispSec', cfg.timerDispSec);
+            cfg.bgPollSec = snap.bgPollSec; GM_setValue('cbBgPollSec', cfg.bgPollSec); try { resetBgDue(); } catch(_){}
+            cfg.xpPollSec = snap.xpPollSec; GM_setValue('cbXpPollSec', cfg.xpPollSec);
+            hoverCfg.on = !!snap.hoverOn; saveHoverCfg();
+            sgCfg.on = !!snap.sgOn; saveSgCfg();
+            if (sgCfg.on) { try { initSgLists(); fetchSgLists(true); } catch(_){} }
+            try { renderSgStatusUI(); } catch(_){}
+            propWatch.on = !!snap.propOn; savePropWatch(); try { propWatchStart(); } catch(_){}
+            ka.audio = !!snap.kaAudio; ka.worker = !!snap.kaWorker; ka.wakeLock = !!snap.kaWake; saveKa();
+            if (ka.audio) { try { startKaAudio(); } catch(_){} }
+            if (ka.worker) { try { startKaWorker(); } catch(_){} }
+            if (ka.wakeLock) { try { requestWakeLock(); } catch(_){} }
+          }
+          setStatus('📱 Tablet mode off' + (snap ? ' — previous settings restored' : ''));
+        }
+        try { restartTimerIntervals(); } catch(_){}
+        // Reflect the programmatic changes in every other switch/field on the panel.
+        const perfDisp = _shadow.querySelector('#jb-perf-disp'); if (perfDisp) perfDisp.value = cfg.timerDispSec;
+        const perfPoll = _shadow.querySelector('#jb-perf-poll'); if (perfPoll) perfPoll.value = cfg.bgPollSec;
+        const xpPollEl = _shadow.querySelector('#jb-xp-poll'); if (xpPollEl) xpPollEl.value = cfg.xpPollSec;
+        const hoverEl = _shadow.querySelector('#jb-hover-on'); if (hoverEl) hoverEl.checked = hoverCfg.on;
+        const sgEl = _shadow.querySelector('#jb-sg-on'); if (sgEl) sgEl.checked = sgCfg.on;
+        const propEl = _shadow.querySelector('#jb-prop-on'); if (propEl) propEl.checked = propWatch.on;
+        const kaAudioEl = _shadow.querySelector('#jb-ka-audio'); if (kaAudioEl) kaAudioEl.checked = ka.audio;
+        const kaWorkerEl = _shadow.querySelector('#jb-ka-worker'); if (kaWorkerEl) kaWorkerEl.checked = ka.worker;
+        const kaWakeEl = _shadow.querySelector('#jb-ka-wake'); if (kaWakeEl) kaWakeEl.checked = ka.wakeLock;
+      }); }
+
     { const d = _shadow.querySelector('#jb-debug');
       if (d) d.addEventListener('change', e => { _debug = e.target.checked; GM_setValue('cbDebug', _debug); }); }
 
