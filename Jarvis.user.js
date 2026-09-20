@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.309
+// @version      2000.310
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -34,7 +34,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.309
+/*  Jarvis Bot 2000.310
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -102,6 +102,26 @@
 
 (function blockLogoutRedirect() {
   try {
+    /* Catch the CLICK, not just the arrival — added 2000.310. By the time the
+     * browser has already loaded login.aspx?act=out, the ASP.NET handler has
+     * almost certainly signed the session out server-side already, so bouncing
+     * back home below is a backstop, not a real fix; it leaves you looking at
+     * default.aspx while actually logged out. Capture-phase on the document so
+     * this runs ahead of the link's own default navigation AND ahead of any
+     * bubble-phase handler on the link itself (e.g. an onclick doing the same
+     * thing another way) — stopPropagation() here keeps the event from ever
+     * reaching the target, not just cancels navigation. */
+    document.addEventListener('click', function (e) {
+      const link = e.target && e.target.closest && e.target.closest('a[href*="act=out" i]');
+      if (!link) return;
+      // A deliberate logout (doLogout()/sleep-mode sign-out) sets this flag
+      // first, so only an accidental/stray click is blocked.
+      if (localStorage.getItem('cbLogoutIntent') === '1') return;
+      e.preventDefault();
+      e.stopPropagation();
+      console.warn('[JB] Blocked click on logout link:', link.href);
+    }, true);
+
     if (!window.location.search.includes('act=out')) return;
     // A deliberate logout (e.g. sleep-mode sign-out) sets this flag first, so
     // only accidental/stray logout URLs get bounced back to the game.
@@ -121,7 +141,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.309';
+  const APP_VERSION = '2000.310';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -1515,6 +1535,7 @@
     { key:'invalid',     label:'Invalid invite',        def:true  },
     { key:'travel',      label:'Auto travel',           def:true  },
     { key:'dtmList',     label:'DTM list add',          def:true  },
+    { key:'ocList',      label:'OC list add',           def:true  },
     { key:'jail',        label:'Jail limit/reset',      def:true  },
     { key:'crusher',     label:'Crusher events',        def:true  },
     { key:'propDrop',    label:'Property dropped',      def:true  },
@@ -2181,6 +2202,7 @@
     ocLeft:    GM_getValue('cbOcLeft', 0),
     autoTravel:GM_getValue('cbAutoTravel', false),
     autoDtmList:GM_getValue('cbAutoDtmList', false),
+    autoOcList:GM_getValue('cbAutoOcList', false),
     /* HALTED — the ALL switch is a power switch, not a summary of the others.
      * See the HARD HALT section for what this actually stops and why it has to
      * be more than "turn the actions off". */
@@ -2579,7 +2601,7 @@
       cbCreateOC:st.createOC, cbOcTrans:st.ocTrans, cbOcWeapon:st.ocWeapon,
       cbOcExplo:st.ocExplo, cbOcSched:st.ocSched, cbOcType:st.ocType,
       cbOcRepeat:st.ocRepeat, cbOcLeft:st.ocLeft,
-      cbAutoTravel:st.autoTravel, cbAutoDtmList:st.autoDtmList,
+      cbAutoTravel:st.autoTravel, cbAutoDtmList:st.autoDtmList, cbAutoOcList:st.autoOcList,
       cbHalted:st.halted
     };
     for (const [k,v] of Object.entries(m)) GM_setValue(k, v);
@@ -8590,6 +8612,7 @@
               <label class="jb-switch" title="Telegram ping when an OC or DTM comes off cooldown, plus the repeat reminders while it is still sitting there unused. This is ONLY the OC/DTM ready pings — every other alert lives in Settings → Alerts, and script checks are never gated by it."><input type="checkbox" id="jb-notify-ready"> 🔔 OC/DTM alerts</label>
               <label class="jb-switch"><input type="checkbox" id="jb-auto-travel" ${st.autoTravel?'checked':''}> ✈️ Auto Travel</label>
               <label class="jb-switch" title="ADVERTISE yourself on the DTM list (ocads.aspx) when a DTM is ready, so others can invite you"><input type="checkbox" id="jb-auto-dtmlist" ${st.autoDtmList?'checked':''}> 📋 DTM List</label>
+              <label class="jb-switch" title="ADVERTISE yourself on the OC list (ocads.aspx) when an OC is ready, so others can invite you"><input type="checkbox" id="jb-auto-oclist" ${st.autoOcList?'checked':''}> 📋 OC List</label>
               <label class="jb-switch" title="PANIC: hide inside your network HQ so you can't be shot. Pauses everything else, re-enters until the cap, then switches itself off. Never enters a damaged HQ — if it's destroyed while you're inside, you die."><input type="checkbox" id="jb-holdhq-on" ${cfg.holdHqOn?'checked':''}> 🏠 Hold HQ</label>
             </div>
           </div>
@@ -9309,7 +9332,7 @@
      * from the same list so the two can't drift again.
      */
     const ALL_ST_KEYS  = ['crime','gta','booze','jail','health','garage','autoOC','autoDTM',
-                          'createOC','createDTM','autoTravel','autoDtmList','crusher'];
+                          'createOC','createDTM','autoTravel','autoDtmList','autoOcList','crusher'];
     const ALL_CFG_KEYS = [['scrapOn','cbScrapOn']];
 
     /* The ALL box is a POWER SWITCH, not a summary of the other toggles.
@@ -9402,6 +9425,7 @@
       // UI disagrees with what Jarvis is actually doing.
       [['#jb-create-oc','createOC'], ['#jb-create-dtm','createDTM'],
        ['#jb-auto-travel','autoTravel'], ['#jb-auto-dtmlist','autoDtmList'],
+       ['#jb-auto-oclist','autoOcList'],
        ['#jb-crusher','crusher']].forEach(([sel, k]) => {
         const el = _shadow.querySelector(sel);
         if (el && !el.disabled) el.checked = st[k];
@@ -9482,6 +9506,12 @@
       st.autoDtmList = e.target.checked; saveSt();
       setStatus('📋 DTM List ' + (st.autoDtmList ? 'ON' : 'OFF'));
       if (st.autoDtmList && !getHot()) fetchHot();
+    });
+
+    _shadow.querySelector('#jb-auto-oclist').addEventListener('change', e => {
+      st.autoOcList = e.target.checked; saveSt();
+      setStatus('📋 OC List ' + (st.autoOcList ? 'ON' : 'OFF'));
+      if (st.autoOcList && !getHot()) fetchHot();
     });
 
     /* Theme. The title-bar button cycles every scheme; the Settings → System
@@ -10202,6 +10232,7 @@
             notifyReady: true, whitelist: false, wlNames: [], blNames: [], carCats: {},
             createOC: false, ocTrans: '', ocWeapon: '', ocExplo: '', ocSched: '',
             ocType: 'Casino', ocRepeat: 'once', ocLeft: 0, autoTravel: false, autoDtmList: false,
+            autoOcList: false,
             halted: false
           };
           saveSt();
@@ -10590,6 +10621,7 @@
 
   const OCADS_PATH = '/authenticated/ocads.aspx';
   const LS_DTM_LIST_DONE = 'cbDtmListDone';
+  const LS_OC_LIST_DONE = 'cbOcListDone';
   const LS_TRAVEL_PENDING = 'cbTravelPending';
   /* Last travel ATTEMPT, not last successful travel. Set synchronously before the
    * click and read as a cooling-off period, so a flight the game refuses can't be
@@ -11057,6 +11089,98 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
     if (dtm && !dtm.ready && dtm.total > 60) {
       // DTM is on cooldown — clear the "added" flag so we re-add when it's ready again
       localStorage.removeItem(LS_DTM_LIST_DONE);
+    }
+  }
+
+  // Auto-add to OC list at ocads.aspx — mirrors doAutoAddDtmList above.
+  // Button id confirmed live (2000.310): ctl00_main_btnAddOC, value "Add me!" —
+  // separate control from DTM's ctl00_main_btnAddDTM, so matching by id keeps
+  // the two from ever being confused on a page that carries both ad types.
+  async function doAutoAddOcList() {
+    if (!st.autoOcList || st.inJail || st.acting || paused) return false;
+
+    // OC timer must be ready
+    const oc = getOc();
+    if (!oc || !oc.ready) return false;
+
+    // Must be in hot city (same requirement as the DTM list / OC creation)
+    if (!isInHot()) {
+      // If auto-travel is on, it will handle getting us there
+      return false;
+    }
+
+    // Check if we already added today (or recently) — don't spam
+    const lastDone = parseInt(localStorage.getItem(LS_OC_LIST_DONE) || '0', 10);
+    if (lastDone > 0 && (Date.now() - lastDone) < 30 * 60 * 1000) {
+      // Added within last 30 min — skip
+      return false;
+    }
+
+    const onOcads = window.location.pathname.toLowerCase().includes('ocads.aspx');
+
+    // Navigate to ocads page if not there
+    if (!onOcads) {
+      console.log('[JB][OCLIST] Navigating to OC list page');
+      setStatus('📋 Adding to OC list...');
+      safeNav(OCADS_PATH + '?' + Date.now());
+      return true;
+    }
+
+    // On ocads page — find and click "Add me!" button (OC side)
+    const addBtn = document.getElementById('ctl00_main_btnAddOC') ||
+                   [...document.querySelectorAll('input[type="submit"]')].find(b => /btnAddOC/i.test(b.name || ''));
+
+    if (addBtn && !addBtn.disabled) {
+      console.log('[JB][OCLIST] Clicking Add me! button');
+      st.acting = true; st.action = 'oclist';
+      GM_setValue('cbActStart', Date.now());
+
+      setTimeout(() => {
+        addBtn.click();
+        localStorage.setItem(LS_OC_LIST_DONE, String(Date.now()));
+        tgMsg('ocList', `📋 <b>OC List</b>\n${st.player||'?'} | Added to OC list in ${getCurCity()}`);
+        setStatus('📋 Added to OC list');
+
+        setTimeout(() => {
+          st.acting = false; st.action = '';
+          GM_setValue('cbActStart', 0);
+          saveSt();
+          // Go back to crimes
+          window.location.href = '/authenticated/crimes.aspx?' + Date.now();
+        }, 1500);
+      }, 300 + Math.floor(Math.random() * 400));
+
+      return true;
+    } else {
+      // Button not found or disabled — maybe already on list or not eligible.
+      // The exact "already added" wording has not been captured live, so this
+      // logs what it actually saw rather than assuming — same discipline as
+      // the OC/DTM timer parser dump (2000.294).
+      const bodyTxt = (document.body.textContent || '').toLowerCase();
+      if (bodyTxt.includes('already') || bodyTxt.includes('on the list')) {
+        console.log('[JB][OCLIST] Already on OC list');
+        localStorage.setItem(LS_OC_LIST_DONE, String(Date.now()));
+        setStatus('📋 Already on OC list');
+      } else if (bodyTxt.includes('cooldown') || bodyTxt.includes('wait')) {
+        console.log('[JB][OCLIST] OC on cooldown');
+      } else {
+        console.log('[JB][OCLIST] Add button not available — dumping submit inputs for diagnosis:',
+          [...document.querySelectorAll('input[type="submit"]')].map(b => `${b.name}="${b.value}"`));
+      }
+      // Navigate away
+      setTimeout(() => {
+        window.location.href = '/authenticated/crimes.aspx?' + Date.now();
+      }, 1000);
+      return true;
+    }
+  }
+
+  // Clear OC list done flag when OC timer goes from ready to cooldown (means we did an OC)
+  function checkOcListReset() {
+    const oc = getOc();
+    if (oc && !oc.ready && oc.total > 60) {
+      // OC is on cooldown — clear the "added" flag so we re-add when it's ready again
+      localStorage.removeItem(LS_OC_LIST_DONE);
     }
   }
 
@@ -13403,11 +13527,12 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
       }
     }
 
-    // Auto-travel to hot city and DTM list (priority after OC/DTM creation, before invites)
+    // Auto-travel to hot city and DTM/OC list (priority after OC/DTM creation, before invites)
     if (!st.inJail && !st.acting) {
       checkDtmListReset();
+      checkOcListReset();
 
-      // Auto-travel: if we need to be in hot city (for DTM list or OC creation)
+      // Auto-travel: if we need to be in hot city (for DTM/OC list or OC creation)
       if (st.autoTravel) {
         const handled = await doAutoTravel();
         if (handled) { schedLoop(3000); return; }
@@ -13416,6 +13541,12 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
       // Auto-add to DTM list: in hot city + DTM ready
       if (st.autoDtmList) {
         const handled = await doAutoAddDtmList();
+        if (handled) { schedLoop(3000); return; }
+      }
+
+      // Auto-add to OC list: in hot city + OC ready
+      if (st.autoOcList) {
+        const handled = await doAutoAddOcList();
         if (handled) { schedLoop(3000); return; }
       }
     }
