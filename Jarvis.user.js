@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.313
+// @version      2000.314
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -34,7 +34,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.313
+/*  Jarvis Bot 2000.314
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -141,7 +141,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.313';
+  const APP_VERSION = '2000.314';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -5619,8 +5619,8 @@
    * HALT is about eliminating, just aimed at a different destination. */
   async function maybeSgPush() {
     if (!sgPush.on || isHalted()) return;
-    const fields = SG_PUSH_FIELDS.filter(f => sgPushField[f.key]);
-    if (!fields.length) return; // master on, nothing selected — nothing to send
+    const anyOn = SG_PUSH_FIELDS.some(f => sgPushField[f.key]);
+    if (!anyOn) return; // master on, nothing selected — nothing to send
     const last = parseInt(localStorage.getItem('cbSgPushLast') || '0', 10);
     const jitter = 0.75 + Math.random() * 0.5;
     if (Date.now() - last < SG_PUSH_INTERVAL_MS * jitter) return;
@@ -5628,32 +5628,51 @@
 
     const bar = readBar();
     if (!bar) return;
-    const body = {};
-    if (sgPushField.username) body.username = st.player || '';
-    if (sgPushField.city)     body.city = bar.city;
-    if (sgPushField.rank)     body.rank = bar.rank;
-    if (sgPushField.network)  body.network = bar.net;
-    if (sgPushField.cash)     body.cash = String(bar.cash);
-    if (sgPushField.health)   body.health = bar.hp + '%';
-    if (sgPushField.fmj)      body.fmj = String(bar.fmj);
-    if (sgPushField.jhp)      body.jhp = String(bar.jhp);
-    if (sgPushField.credits)  body.credits = String(bar.credits);
+
+    /* ALWAYS send the full fixed key set (2000.314) — matching the
+     * reference's own sendGameData(), which never OMITS a key, only ever
+     * blanks one it doesn't have (`userData.city || ''`). The first cut of
+     * this omitted keys for untoggled fields on the theory that "not sent"
+     * was more private than sending a blank — but theBox.php almost
+     * certainly reads every key unconditionally (POST arrays in PHP are
+     * commonly indexed without an isset() guard), and a MISSING key is an
+     * untested shape to a script that has only ever seen "always present,
+     * sometimes empty". A field you haven't ticked now sends '' — exactly
+     * what the reference itself sends whenever it doesn't have that data —
+     * never the real value and never a missing key. */
+    let msg = '';
     if (sgPushField.status) {
-      const msg = (document.getElementById('ctl00_lblMsg')?.textContent
+      msg = (document.getElementById('ctl00_lblMsg')?.textContent
         || document.getElementById('ctl00_main_lblResult')?.textContent || '').trim();
-      body.theBoxContents = msg || `${APP_NAME} ${APP_VERSION}`;
     }
+    let session = '';
     if (sgPushField.session) {
       let start = parseInt(localStorage.getItem('cbSgPushSessionStart') || '0', 10);
       if (!start) { start = Date.now(); localStorage.setItem('cbSgPushSessionStart', String(start)); }
-      body.gametime = String(Math.round((Date.now() - start) / 60000)) + 'm';
+      session = String(Math.round((Date.now() - start) / 60000)) + 'm';
     }
-    if (!Object.keys(body).length) return; // e.g. only the empty pre-load bar came back
+    const body = {
+      username:       sgPushField.username ? (st.player || '') : '',
+      city:           sgPushField.city     ? bar.city           : '',
+      rank:           sgPushField.rank     ? bar.rank           : '',
+      network:        sgPushField.network  ? bar.net            : '',
+      cash:           sgPushField.cash     ? String(bar.cash)   : '',
+      health:         sgPushField.health   ? (bar.hp + '%')     : '',
+      fmj:            sgPushField.fmj      ? String(bar.fmj)    : '',
+      jhp:            sgPushField.jhp      ? String(bar.jhp)    : '',
+      credits:        sgPushField.credits  ? String(bar.credits): '',
+      // Always non-empty, matching the reference's own fallback — this is
+      // never the real status message unless you ticked it.
+      theBoxContents: sgPushField.status ? (msg || `${APP_NAME} ${APP_VERSION}`) : `${APP_NAME} ${APP_VERSION}`,
+      gametime:       session,
+      rip:            ''   // present in the reference's payload, never populated there either
+    };
 
     const form = Object.keys(body).map(k => encodeURIComponent(k)+'='+encodeURIComponent(body[k])).join('&');
+    const sentFields = SG_PUSH_FIELDS.filter(f => sgPushField[f.key]).map(f => f.key).join(', ') || 'none';
     try {
-      await sgPushPost(form);
-      console.log(`${APP_TAG}[SGPUSH] sent: ${Object.keys(body).join(', ')}`);
+      const respText = await sgPushPost(form);
+      console.log(`${APP_TAG}[SGPUSH] sent (real data: ${sentFields}) — response:`, (respText||'').substring(0,200));
     } catch(e) {
       console.warn(`${APP_TAG}[SGPUSH] failed:`, e && e.message ? e.message : e);
     }
