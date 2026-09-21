@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.310
+// @version      2000.311
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -34,7 +34,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.310
+/*  Jarvis Bot 2000.311
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -141,7 +141,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.310';
+  const APP_VERSION = '2000.311';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -5147,6 +5147,65 @@
 
   /* === OC/DTM PAGE HANDLERS === */
 
+  /* === OC PARTICIPANT "PARKING" (transporter with no car) ===
+   * Narrowly ported from the reference's ocPartPark/ocPartDispatch. Without
+   * this, an empty car dropdown fell through to the generic "click whichever
+   * choose button exists" loop below, which clicked ctl00_main_btnchoosecar
+   * with NOTHING selected — a blind click that resolves nothing, repeated
+   * every tick until the 120s pending window gave up and the seat was simply
+   * never filled. Scoped to the car-empty case only: a non-empty car list,
+   * and the weapon-master/explosive-expert roles, are untouched and still
+   * fall through to the existing generic loop exactly as before.
+   */
+  const LS_OC_PART_PARKED       = 'cbOcPartParked';       // JSON {at, lastCheck}
+  const LS_OC_PART_NOCAR_SINCE  = 'cbOcPartNoCarSince';
+  const LS_OC_PART_GARAGE_TRIPS = 'cbOcPartGarageTrips';
+  const LS_OC_PART_LAST_GARAGE  = 'cbOcPartLastGarage';
+  const OC_PART_PARK_MAX_MS     = 3 * 60 * 60 * 1000;  // give up watching after 3h
+  const OC_PART_RECHECK_MS      = 10 * 60 * 1000;       // re-check the OC page every 10 min while parked
+  const OC_PART_NOCAR_GIVEUP_MS = 4 * 60 * 1000;        // wall-clock cap regardless of trip pacing
+
+  function ocPartParked() {
+    try {
+      const p = JSON.parse(localStorage.getItem(LS_OC_PART_PARKED) || 'null');
+      if (p && p.at && Date.now() - p.at < OC_PART_PARK_MAX_MS) return p;
+      if (p) localStorage.removeItem(LS_OC_PART_PARKED);
+    } catch(_) {}
+    return null;
+  }
+  function ocPartClearCarState() {
+    localStorage.removeItem(LS_OC_PART_NOCAR_SINCE);
+    localStorage.removeItem(LS_OC_PART_GARAGE_TRIPS);
+    localStorage.removeItem(LS_OC_PART_LAST_GARAGE);
+  }
+  // Stop trying this OC, alert once, and stand down — checkOcPartParked() below
+  // re-checks the OC page every 10 min in case a car turns up later (bought,
+  // repaired, or freed from another use).
+  function ocPartPark() {
+    localStorage.setItem(LS_OC_PART_PARKED, JSON.stringify({ at: Date.now() }));
+    ocPartClearCarState();
+    localStorage.removeItem('cbPendOcHandle');
+    localStorage.removeItem('cbPendOcHandleTs');
+    st.acting = false; st.action = ''; GM_setValue('cbActStart', 0);
+    console.warn(`${APP_TAG}[OCPART] No usable car for this OC — seat parked, re-checking every 10 min`);
+    tgMsg('ocCreate', `🚗 <b>OC Transporter parked</b>\n${st.player||'?'} | Garage has no car for this OC — will keep checking`);
+  }
+  // Periodic recheck while parked — called from mainLoop like checkDtmListReset(),
+  // but returns true when it navigates so the caller can bail out of the tick
+  // rather than risk a second navigation racing this one.
+  function checkOcPartParked() {
+    const p = ocPartParked();
+    if (!p) return false;
+    if (st.inJail || st.acting || paused) return false;
+    if (Date.now() - (p.lastCheck || p.at) < OC_PART_RECHECK_MS) return false;
+    try { localStorage.setItem(LS_OC_PART_PARKED, JSON.stringify({ ...p, lastCheck: Date.now() })); } catch(_) {}
+    console.log(`${APP_TAG}[OCPART] Parked recheck — revisiting the OC page for a car`);
+    localStorage.setItem('cbPendOcHandle', 'true');
+    localStorage.setItem('cbPendOcHandleTs', String(Date.now()));
+    safeNav(OC_PATH + '?' + Date.now());
+    return true;
+  }
+
   function handleOcPage() {
     if (localStorage.getItem('cbPendOcHandle') !== 'true') return false;
     const pts = parseInt(localStorage.getItem('cbPendOcHandleTs')||'0',10);
@@ -5163,6 +5222,39 @@
 
     const acceptLink = [...document.querySelectorAll('a')].find(a => (a.textContent||'').trim().toLowerCase() === 'accept' && (a.getAttribute('href')||'').toLowerCase().includes('organizedcrime.aspx'));
     if (acceptLink) { setTimeout(() => acceptLink.click(), rndDelay(DLY.quick)); return true; }
+
+    // TRANSPORTER WITH AN EMPTY CAR LIST — see the block comment above.
+    const carDd = document.getElementById('ctl00_main_carslist');
+    if (carDd && carDd.tagName === 'SELECT' && carDd.options.length === 0) {
+      const trips = parseInt(localStorage.getItem(LS_OC_PART_GARAGE_TRIPS) || '0', 10);
+      const lastGarage = parseInt(localStorage.getItem(LS_OC_PART_LAST_GARAGE) || '0', 10);
+      let noCarSince = parseInt(localStorage.getItem(LS_OC_PART_NOCAR_SINCE) || '0', 10);
+      if (!noCarSince) { noCarSince = Date.now(); localStorage.setItem(LS_OC_PART_NOCAR_SINCE, String(noCarSince)); }
+
+      if (Date.now() - noCarSince > OC_PART_NOCAR_GIVEUP_MS || trips >= 3) {
+        ocPartPark();
+        return true;
+      }
+      if (st.garage && Date.now() - lastGarage >= 60000) {
+        localStorage.setItem(LS_OC_PART_GARAGE_TRIPS, String(trips + 1));
+        localStorage.setItem(LS_OC_PART_LAST_GARAGE, String(Date.now()));
+        // Keep the pending window alive across the detour, and point the
+        // "not on OC page" branch above back here (LS_PEND_OC is otherwise
+        // empty by this point in the flow — it was already consumed to get
+        // us here in the first place).
+        localStorage.setItem('cbPendOcHandleTs', String(Date.now()));
+        localStorage.setItem(LS_PEND_OC, window.location.origin + OC_PATH);
+        console.log(`${APP_TAG}[OCPART] Transporter: car list empty — sending the garage a look (${trips+1}/3)`);
+        st.acting = false;
+        setTimeout(() => { window.location.href = '/authenticated/playerproperty.aspx?p=g&' + Date.now(); }, rndDelay(DLY.quick));
+        return true;
+      }
+      // Garage feature off, or still pacing between trips — refresh the
+      // window and wait for the next tick rather than spinning.
+      localStorage.setItem('cbPendOcHandleTs', String(Date.now()));
+      st.acting = false;
+      return true;
+    }
 
     const selIds = ['ctl00_main_explosiveslist','ctl00_main_weaponslist','ctl00_main_carslist','ctl00_main_vehicleslist','ctl00_main_weaponlist','ctl00_main_carlist'];
     for (const sid of selIds) { const sel = document.getElementById(sid); if (sel && sel.tagName === 'SELECT' && sel.options.length > 0) { if (sel.selectedIndex < 0) sel.selectedIndex = 0; try { sel.dispatchEvent(new Event('change',{bubbles:true})); } catch(_){} } }
@@ -5454,6 +5546,102 @@
 
   const sgCfg = { on: GM_getValue('cbSgOn', false) };
   function saveSgCfg() { GM_setValue('cbSgOn', sgCfg.on); }
+
+  /* === STARVINGGEEKS DATA PUSH ===
+   * A reversal of a previously documented "never port" decision (see
+   * CLAUDE.md §7/§8) — added at the user's explicit second request, after
+   * confirming it was a deliberate change of mind and not something to
+   * build from the older note. Mirrors the reference's sendGameData() →
+   * theBox.php, POSTing a snapshot of your own stats to starvinggeeks.net.
+   *
+   * OFF IN EVERY DIMENSION BY DEFAULT: the master switch AND every individual
+   * field default to false, and nothing is sent unless the master switch is
+   * on AND at least one field is ticked — "all off as default", by request.
+   * Fields are opt-in individually ("so I choose what is seen"): an unticked
+   * field is omitted from the POST body entirely, not sent blank.
+   */
+  const SG_PUSH_URL = 'https://starvinggeeks.net/helper/theBox.php';
+  const SG_PUSH_FIELDS = [
+    { key:'username', label:'Username' },
+    { key:'city',     label:'City' },
+    { key:'rank',     label:'Rank' },
+    { key:'network',  label:'Net worth' },
+    { key:'cash',     label:'Cash' },
+    { key:'health',   label:'Health' },
+    { key:'fmj',      label:'FMJ bullets' },
+    { key:'jhp',      label:'JHP bullets' },
+    { key:'credits',  label:'Credits' },
+    { key:'status',   label:"Status message (the on-page box)" },
+    { key:'session',  label:'Session length' }
+  ];
+  const sgPush = { on: GM_getValue('cbSgPushOn', false) };
+  const sgPushField = {};
+  SG_PUSH_FIELDS.forEach(f => { sgPushField[f.key] = GM_getValue('cbSgPushField_'+f.key, false); });
+  function saveSgPush() {
+    GM_setValue('cbSgPushOn', sgPush.on);
+    SG_PUSH_FIELDS.forEach(f => GM_setValue('cbSgPushField_'+f.key, sgPushField[f.key]));
+  }
+
+  function sgPushPost(body) {
+    return new Promise((res, rej) => {
+      GM_xmlhttpRequest({
+        method:'POST', url: SG_PUSH_URL, timeout:15000,
+        headers:{'Content-Type':'application/x-www-form-urlencoded'},
+        data: body,
+        onload: r => { if (r.status < 200 || r.status >= 300) return rej(new Error('HTTP '+r.status)); res(r.responseText); },
+        onerror:   () => rej(new Error('network')),
+        ontimeout: () => rej(new Error('timeout'))
+      });
+    });
+  }
+
+  const SG_PUSH_INTERVAL_MS = 5 * 60 * 1000; // matches SG_TTL_MS above — no reason to differ
+  /* Fire-and-forget, called once per mainLoop tick (like doForumRefresh()).
+   * Gated by isHalted() itself, same as every other outbound call in §4's
+   * doctrine — this isn't an alert that has to survive a stop, it's exactly
+   * the kind of "still telling the world you're active" traffic the HARD
+   * HALT is about eliminating, just aimed at a different destination. */
+  async function maybeSgPush() {
+    if (!sgPush.on || isHalted()) return;
+    const fields = SG_PUSH_FIELDS.filter(f => sgPushField[f.key]);
+    if (!fields.length) return; // master on, nothing selected — nothing to send
+    const last = parseInt(localStorage.getItem('cbSgPushLast') || '0', 10);
+    const jitter = 0.75 + Math.random() * 0.5;
+    if (Date.now() - last < SG_PUSH_INTERVAL_MS * jitter) return;
+    localStorage.setItem('cbSgPushLast', String(Date.now()));
+
+    const bar = readBar();
+    if (!bar) return;
+    const body = {};
+    if (sgPushField.username) body.username = st.player || '';
+    if (sgPushField.city)     body.city = bar.city;
+    if (sgPushField.rank)     body.rank = bar.rank;
+    if (sgPushField.network)  body.network = bar.net;
+    if (sgPushField.cash)     body.cash = String(bar.cash);
+    if (sgPushField.health)   body.health = bar.hp + '%';
+    if (sgPushField.fmj)      body.fmj = String(bar.fmj);
+    if (sgPushField.jhp)      body.jhp = String(bar.jhp);
+    if (sgPushField.credits)  body.credits = String(bar.credits);
+    if (sgPushField.status) {
+      const msg = (document.getElementById('ctl00_lblMsg')?.textContent
+        || document.getElementById('ctl00_main_lblResult')?.textContent || '').trim();
+      body.theBoxContents = msg || `${APP_NAME} ${APP_VERSION}`;
+    }
+    if (sgPushField.session) {
+      let start = parseInt(localStorage.getItem('cbSgPushSessionStart') || '0', 10);
+      if (!start) { start = Date.now(); localStorage.setItem('cbSgPushSessionStart', String(start)); }
+      body.gametime = String(Math.round((Date.now() - start) / 60000)) + 'm';
+    }
+    if (!Object.keys(body).length) return; // e.g. only the empty pre-load bar came back
+
+    const form = Object.keys(body).map(k => encodeURIComponent(k)+'='+encodeURIComponent(body[k])).join('&');
+    try {
+      await sgPushPost(form);
+      console.log(`${APP_TAG}[SGPUSH] sent: ${Object.keys(body).join(', ')}`);
+    } catch(e) {
+      console.warn(`${APP_TAG}[SGPUSH] failed:`, e && e.message ? e.message : e);
+    }
+  }
 
   function sgReadList(key, fallback = []) {
     try {
@@ -6787,6 +6975,7 @@
 
   // Front-panel summary line (cheap; runs on each xp read + timer tick)
   function updateXpUI() {
+    try { updateHeaderRankBar(); } catch(_){}
     if (!_shadow) return;
     const totalEl = _shadow.querySelector('#jb-xp-total');
     const sessEl  = _shadow.querySelector('#jb-xp-session');
@@ -8359,12 +8548,12 @@
         background: var(--jb-header-bg); color: var(--jb-header-text);
         padding: 6px 10px; display: flex; justify-content: space-between; align-items: center;
         font-size: 12px; font-weight: 600; cursor: default; border-radius: 2px 2px 0 0;
-        user-select: none;
+        user-select: none; touch-action: none;
       }
       .jb-modal-head {
         background: var(--jb-header-bg); color: var(--jb-header-text);
         padding: 8px 12px; display: flex; justify-content: space-between; align-items: center;
-        font-size: 13px; font-weight: 600; border-radius: 2px 2px 0 0;
+        font-size: 13px; font-weight: 600; border-radius: 2px 2px 0 0; touch-action: none;
       }
       .jb-header-btns { display: flex; gap: 4px; }
       .jb-hbtn {
@@ -8394,6 +8583,27 @@
         border-bottom: 1px solid var(--jb-border); padding-bottom: 2px;
       }
       .jb-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 12px; }
+      /* Front-panel quick-toggle row only (Settings' own .jb-grid checkbox lists —
+       * Telegram messages, SG push fields, etc. — keep the plain switch look above,
+       * which reads better for a long vertical list). Re-skinned as compact pill
+       * chips: same .jb-switch elements and the same checkbox underneath — the
+       * toggle-switch graphic stays exactly as clickable as before, including on
+       * the five (Crusher/Create DTM/Whitelist/Create OC/Watch) that are a <div>
+       * rather than a <label> specifically so their embedded link can open a modal
+       * without also flipping the switch; hiding the checkbox there would have
+       * removed the only thing that still toggles them. The space saving is the
+       * flex-wrap row (several short pills per line) plus tighter padding, not a
+       * change to what's clickable. */
+      .jb-quickgrid { display: flex; flex-wrap: wrap; gap: 4px; }
+      .jb-quickgrid .jb-switch {
+        gap: 4px; padding: 2px 6px; border-radius: 3px; font-size: 10px; font-weight: 600;
+        background: var(--jb-ribbon-off); color: var(--jb-ribbon-off-text);
+        transition: background .15s, color .15s;
+      }
+      .jb-quickgrid .jb-switch:has(input:checked) { background: var(--jb-ribbon-on); color: var(--jb-ribbon-on-text); }
+      .jb-quickgrid .jb-switch input[type="checkbox"] { width: 20px; height: 11px; }
+      .jb-quickgrid .jb-switch input[type="checkbox"]::after { width: 7px; height: 7px; }
+      .jb-quickgrid .jb-switch input[type="checkbox"]:checked::after { transform: translateX(9px); }
       .jb-switch {
         display: flex; align-items: center; gap: 6px; padding: 2px 0;
         cursor: pointer; user-select: none; font-size: 11px;
@@ -8599,15 +8809,16 @@
           </div>
 
           <div class="jb-sect">
-            <div class="jb-grid">
+            <div class="jb-grid jb-quickgrid">
               <div class="jb-switch" title="Crusher for owned cars"><input type="checkbox" id="jb-crusher"> Crusher</div>
+              <label class="jb-switch" title="Property drop watch"><input type="checkbox" id="jb-prop-on"> 🏠 Props</label>
+              <label class="jb-switch" title="Player hover tooltip (reload to apply)"><input type="checkbox" id="jb-hover-on"> 🔍 Hover</label>
               <div class="jb-switch" title="START a DTM yourself and invite a partner. Click the text to set the partner, schedule and repeat."><input type="checkbox" id="jb-create-dtm"> <span id="jb-dtm-link" style="cursor:pointer;text-decoration:underline;color:var(--jb-accent)">Create DTM</span></div>
               <div class="jb-switch"><input type="checkbox" id="jb-wl-on"> <span id="jb-wl-link" style="cursor:pointer;text-decoration:underline;color:var(--jb-accent)">Whitelist</span></div>
               <div class="jb-switch"><input type="checkbox" id="jb-create-oc"> <span id="jb-oc-link" style="cursor:pointer;text-decoration:underline;color:var(--jb-accent)">Create OC</span></div>
               <div class="jb-switch" title="Master switch for Online Watch — off means neither group can fire. Enable/disable Group 1 and Group 2 individually inside the Watch window."><input type="checkbox" id="jb-ow-on"> <span id="jb-ow-link" style="cursor:pointer;text-decoration:underline;color:var(--jb-accent)">🟢 Watch</span></div>
-              <label class="jb-switch" title="Property drop watch"><input type="checkbox" id="jb-prop-on"> 🏠 Props</label>
-              <label class="jb-switch" title="Player hover tooltip (reload to apply)"><input type="checkbox" id="jb-hover-on"> 🔍 Hover</label>
               <label class="jb-switch" title="Colour player links from your Starvinggeeks lists — watched (orange), safe (green), allied (blue). Read-only: three GETs, nothing is ever sent."><input type="checkbox" id="jb-sg-on"> 🎨 SG lists <span id="jb-sg-status" style="font-size:9px;letter-spacing:0.02em">—</span></label>
+              <label class="jb-switch" title="Send the fields ticked in Settings → System → Advanced (username/city/rank/cash/health/ammo/credits/status/session — all off by default) to starvinggeeks.net every few minutes. This switch alone sends nothing without at least one field ticked there."><input type="checkbox" id="jb-sgpush-on" ${sgPush.on?'checked':''}> 📤 SG Push</label>
               <label class="jb-switch" title="Ultra-low-resource preset for an old/low-RAM device (e.g. a tablet in Firefox that keeps running out of memory). Pushes panel refresh, background polls and the XP backstop to their slowest settings, and switches off Hover, SG lists, Props, Silent audio and the Worker ticker. Switching this back off restores exactly what you had running before."><input type="checkbox" id="jb-tablet-mode" ${cfg.tabletMode?'checked':''}> 📱 Tablet</label>
               <label class="jb-switch" title="Telegram ping when an OC or DTM comes off cooldown, plus the repeat reminders while it is still sitting there unused. This is ONLY the OC/DTM ready pings — every other alert lives in Settings → Alerts, and script checks are never gated by it."><input type="checkbox" id="jb-notify-ready"> 🔔 OC/DTM alerts</label>
               <label class="jb-switch"><input type="checkbox" id="jb-auto-travel" ${st.autoTravel?'checked':''}> ✈️ Auto Travel</label>
@@ -9066,6 +9277,12 @@
             <label class="jb-switch jb-mb" title="Detects the game's Important-message panel when it carries a warning or soft ban, pauses everything, and alerts repeatedly until you see it. Never auto-answers anything."><input type="checkbox" id="jb-antibot-on" ${cfg.antiBotOn?'checked':''}> 🚨 Anti-bot / soft-ban detection</label>
             <div class="jb-sub jb-mb" id="jb-antibot-status" style="color:var(--jb-text-ter);font-size:9px">Pauses on detection and parses the stated expiry, so the pause lifts by itself. Staff questions are untouched — they still go through the script-check path.</div>
             <hr class="jb-sep">
+            <div class="jb-sect-title">Starvinggeeks Data Push</div>
+            <div class="jb-sub jb-mb" style="color:var(--jb-warning)">⚠️ Sends the fields ticked below to a third party (starvinggeeks.net) every few minutes. Off in every field by default — the front-panel <b>📤 SG Push</b> switch AND at least one field here must both be on before anything is sent. An unticked field is left out of the message entirely, not sent blank.</div>
+            <div class="jb-grid" id="jb-sgpush-fields">
+              ${SG_PUSH_FIELDS.map(f => `<label class="jb-switch" style="font-size:10px"><input type="checkbox" class="jb-sgpush-field-cb" data-key="${f.key}" ${sgPushField[f.key]?'checked':''}> ${esc(f.label)}</label>`).join('')}
+            </div>
+            <hr class="jb-sep">
             <div class="jb-row">
               <button class="jb-btn jb-btn-danger" id="jb-reset-all">Reset All</button>
               <button class="jb-btn jb-btn-outline" id="jb-clear-player">Clear Player</button>
@@ -9465,6 +9682,12 @@
           try { renderSgStatusUI(); } catch(_){ }
         }); } }
 
+    { const spb = _shadow.querySelector('#jb-sgpush-on');
+      if (spb) spb.addEventListener('change', e => {
+        sgPush.on = e.target.checked; saveSgPush();
+        setStatus('📤 Starvinggeeks push ' + (sgPush.on ? 'ON' : 'OFF'));
+      }); }
+
     { const hcb = _shadow.querySelector('#jb-hover-on');
       if (hcb) { hcb.checked = hoverCfg.on;
         // Toggling on takes effect immediately; toggling off needs a reload to detach.
@@ -9505,13 +9728,15 @@
     _shadow.querySelector('#jb-auto-dtmlist').addEventListener('change', e => {
       st.autoDtmList = e.target.checked; saveSt();
       setStatus('📋 DTM List ' + (st.autoDtmList ? 'ON' : 'OFF'));
-      if (st.autoDtmList && !getHot()) fetchHot();
+      if (st.autoDtmList) { if (!getHot()) fetchHot(); }
+      else localStorage.setItem(LS_DTM_LIST_REMOVE, 'true');
     });
 
     _shadow.querySelector('#jb-auto-oclist').addEventListener('change', e => {
       st.autoOcList = e.target.checked; saveSt();
       setStatus('📋 OC List ' + (st.autoOcList ? 'ON' : 'OFF'));
-      if (st.autoOcList && !getHot()) fetchHot();
+      if (st.autoOcList) { if (!getHot()) fetchHot(); }
+      else localStorage.setItem(LS_OC_LIST_REMOVE, 'true');
     });
 
     /* Theme. The title-bar button cycles every scheme; the Settings → System
@@ -9897,6 +10122,14 @@
         cfg.antiBotOn = e.target.checked; GM_setValue('cbAntiBotOn', cfg.antiBotOn);
         setStatus(cfg.antiBotOn ? '🚨 Anti-bot detection on' : '🚨 Anti-bot detection off');
       }); }
+    // Starvinggeeks data push — the master switch lives on the front panel only
+    // (same pattern as SG lists), wired in the front-panel section below.
+    _shadow.querySelectorAll('.jb-sgpush-field-cb').forEach(cb => {
+      cb.addEventListener('change', e => {
+        const k = e.target.dataset.key;
+        if (k in sgPushField) { sgPushField[k] = e.target.checked; saveSgPush(); }
+      });
+    });
     { const xp = _shadow.querySelector('#jb-xp-poll');
       if (xp) xp.addEventListener('change', e => {
         cfg.xpPollSec = Math.max(10, Math.min(1800, parseInt(e.target.value,10)||300));
@@ -10589,6 +10822,27 @@
     document.addEventListener('mousemove', e => { if (!dragging) return; host.style.right='auto'; host.style.left=(hx+e.clientX-dx)+'px'; host.style.top=(hy+e.clientY-dy)+'px'; });
     document.addEventListener('mouseup', () => { if (!dragging) return; dragging = false; root.style.cursor = locked?'default':'move'; const r = host.getBoundingClientRect(); GM_setValue('cbPosX',r.left); GM_setValue('cbPosY',r.top); });
 
+    /* Touch equivalents of the three listeners above — added for the tablet.
+     * Firefox treats touch and mouse as separate event streams, so the mouse
+     * listeners never fire from a touch; without these the panel simply
+     * couldn't be moved on that device. Same DRAG_IGNORE scope, same shared
+     * dragging/dx/dy/hx/hy state. touchmove must be non-passive so
+     * preventDefault() can stop the page scrolling under the drag. */
+    root.addEventListener('touchstart', e => {
+      if (locked || e.touches.length !== 1) return;
+      if (e.target.closest(DRAG_IGNORE)) return;
+      const t = e.touches[0];
+      dragging = true; root.style.cursor = 'grabbing';
+      const rect = host.getBoundingClientRect(); hx = rect.left; hy = rect.top; dx = t.clientX; dy = t.clientY;
+    }, { passive: true });
+    document.addEventListener('touchmove', e => {
+      if (!dragging || !e.touches.length) return;
+      const t = e.touches[0];
+      host.style.right='auto'; host.style.left=(hx+t.clientX-dx)+'px'; host.style.top=(hy+t.clientY-dy)+'px';
+      e.preventDefault();
+    }, { passive: false });
+    document.addEventListener('touchend', () => { if (!dragging) return; dragging = false; root.style.cursor = locked?'default':'move'; const r = host.getBoundingClientRect(); GM_setValue('cbPosX',r.left); GM_setValue('cbPosY',r.top); });
+
     // Make each modal window draggable by its title bar. Modals are centred via
     // a CSS transform, so on first grab we switch to explicit left/top coords.
     function makeModalDraggable(modal, handle) {
@@ -10609,6 +10863,25 @@
         modal.style.top  = (stp + e.clientY - sy) + 'px';
       });
       document.addEventListener('mouseup', () => { md = false; });
+
+      // Touch equivalent — see the panel-drag touch handlers above for why.
+      handle.addEventListener('touchstart', e => {
+        if (e.touches.length !== 1 || e.target.closest('button, input, select, textarea, a')) return;
+        const t = e.touches[0];
+        const rect = modal.getBoundingClientRect();
+        modal.style.transform = 'none';
+        modal.style.left = rect.left + 'px';
+        modal.style.top  = rect.top + 'px';
+        md = true; sx = t.clientX; sy = t.clientY; sl = rect.left; stp = rect.top;
+      }, { passive: true });
+      document.addEventListener('touchmove', e => {
+        if (!md || !e.touches.length) return;
+        const t = e.touches[0];
+        modal.style.left = (sl + t.clientX - sx) + 'px';
+        modal.style.top  = (stp + t.clientY - sy) + 'px';
+        e.preventDefault();
+      }, { passive: false });
+      document.addEventListener('touchend', () => { md = false; });
     }
     _shadow.querySelectorAll('.jb-modal').forEach(m => {
       const head = m.querySelector('.jb-modal-head');
@@ -10622,6 +10895,10 @@
   const OCADS_PATH = '/authenticated/ocads.aspx';
   const LS_DTM_LIST_DONE = 'cbDtmListDone';
   const LS_OC_LIST_DONE = 'cbOcListDone';
+  // Set when the front-panel switch goes OFF while still listed, so mainLoop
+  // knows to visit ocads.aspx once more and take the ad down — see maybeRemoveAd().
+  const LS_DTM_LIST_REMOVE = 'cbDtmListRemove';
+  const LS_OC_LIST_REMOVE  = 'cbOcListRemove';
   const LS_TRAVEL_PENDING = 'cbTravelPending';
   /* Last travel ATTEMPT, not last successful travel. Set synchronously before the
    * click and read as a cooling-off period, so a flight the game refuses can't be
@@ -11184,6 +11461,55 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
     }
   }
 
+  /* Come off the OC/DTM classifieds board when the front-panel switch is
+   * switched OFF while still listed. Ported from the reference's
+   * ocAdsRemoveIfOff() (2000.31x) — without this, switching the list off only
+   * stops NEW ads; an existing one otherwise sits there until the next
+   * cooldown-triggered reset happens to run doAutoAdd*List() again, which
+   * could be hours away. kind is 'dtm' or 'oc'. */
+  async function maybeRemoveAd(kind) {
+    const needKey = kind === 'dtm' ? LS_DTM_LIST_REMOVE : LS_OC_LIST_REMOVE;
+    if (localStorage.getItem(needKey) !== 'true') return false;
+    if (st.inJail || st.acting || paused) return false;
+
+    const btnId = kind === 'dtm' ? 'ctl00_main_btnAddDTM' : 'ctl00_main_btnAddOC';
+    const onOcads = window.location.pathname.toLowerCase().includes('ocads.aspx');
+    if (!onOcads) {
+      console.log(`${APP_TAG}[ADS] Navigating to ocads.aspx to remove the ${kind.toUpperCase()} ad`);
+      safeNav(OCADS_PATH + '?' + Date.now());
+      return true;
+    }
+
+    const btn = document.getElementById(btnId);
+    if (!btn || (btn.value || '').trim().toLowerCase() !== 'remove me!') {
+      // Not currently listed (never added, already removed by hand, or a
+      // previous run already took it down) — nothing left to do.
+      localStorage.removeItem(needKey);
+      return false;
+    }
+
+    // Rate-limited so a page that reloads mid-postback can't double-click.
+    const rateKey = 'cbAdRemoveLast_' + kind;
+    const last = parseInt(localStorage.getItem(rateKey) || '0', 10);
+    if (Date.now() - last < 60000) return true;
+    localStorage.setItem(rateKey, String(Date.now()));
+
+    console.log(`${APP_TAG}[ADS] ${kind.toUpperCase()} list switched off but still advertised — clicking Remove me!`);
+    st.acting = true; st.action = kind + 'list-remove';
+    GM_setValue('cbActStart', Date.now());
+    setTimeout(() => {
+      btn.click();
+      localStorage.removeItem(needKey);
+      setTimeout(() => {
+        st.acting = false; st.action = '';
+        GM_setValue('cbActStart', 0);
+        saveSt();
+        window.location.href = '/authenticated/crimes.aspx?' + Date.now();
+      }, 1500);
+    }, 300 + Math.floor(Math.random() * 400));
+    return true;
+  }
+
   /* === XP TRACKING + NO-XP STREAK LIMITER ===
    * Reads the player's Experience from the game's own status-refresh XHR
    * (hndlr.ashx?m=pst), attributes each gain to the action that fired just
@@ -11317,6 +11643,45 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
       else fill();
       window.addEventListener('load', fill);
     })();
+  }
+
+  /* === HEADER RANK BAR (every authenticated page) ===
+   * The 2000.308 fill above only shows on statistics.aspx — you have to go
+   * looking for it. This puts the SAME already-computed figure
+   * (xpRankProgress off xpState.total, identical source to 308) as a thin
+   * bar next to the rank name in the game's own header, on every page.
+   * Cosmetic only, same as 308: nothing purchased, nothing server-side —
+   * this browser draws a bar next to a number the game already shows you.
+   * No settings toggle: it costs nothing to run (no fetch, no navigation,
+   * updates only when XP already updates) and, unlike an action switch,
+   * there is no wrong state for it to be in.
+   */
+  let _hdrRankBarEl = null;
+  function updateHeaderRankBar() {
+    try {
+      const lbl = document.getElementById('ctl00_userInfo_lblrank');
+      if (!lbl || !(xpState.total > 0)) return;
+      const rp = xpRankProgress(xpState.total);
+      if (!rp) return;
+      const pct = rp.next ? rp.pct : 100;
+
+      if (!_hdrRankBarEl || !_hdrRankBarEl.isConnected) {
+        const wrap = document.createElement('span');
+        wrap.id = 'jb-hdr-rankbar';
+        wrap.style.cssText = 'display:inline-block;vertical-align:middle;margin-left:6px;width:50px;height:6px;'
+          + 'background:rgba(128,128,128,.35);border-radius:3px;overflow:hidden;';
+        const fill = document.createElement('span');
+        fill.style.cssText = 'display:block;height:100%;background:#4caf50;border-radius:3px;transition:width .3s;';
+        wrap.appendChild(fill);
+        lbl.insertAdjacentElement('afterend', wrap);
+        _hdrRankBarEl = wrap;
+      }
+      const fillEl = _hdrRankBarEl.firstElementChild;
+      if (fillEl) fillEl.style.width = Math.max(0, Math.min(100, pct)).toFixed(1) + '%';
+      _hdrRankBarEl.title = rp.next
+        ? `${pct.toFixed(1)}% to ${rp.next} (${rp.toNext} XP to go)`
+        : `${rp.rank} — max rank`;
+    } catch(_) {}
   }
 
   /* === STATUS-BAR XP FALLBACK (2000.224) ===
@@ -13531,6 +13896,13 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
     if (!st.inJail && !st.acting) {
       checkDtmListReset();
       checkOcListReset();
+      if (checkOcPartParked()) { schedLoop(3000); return; }
+
+      // A switch flipped OFF while still advertised — take the ad down before
+      // anything else, regardless of hot city / ready state (removal needs
+      // neither). See maybeRemoveAd().
+      { const h = await maybeRemoveAd('dtm'); if (h) { schedLoop(3000); return; } }
+      { const h = await maybeRemoveAd('oc');  if (h) { schedLoop(3000); return; } }
 
       // Auto-travel: if we need to be in hot city (for DTM/OC list or OC creation)
       if (st.autoTravel) {
@@ -13596,6 +13968,7 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
     try { maybeBgFetch(); } catch(_){}
     try { maybeWatchScan(); } catch(_){}   // online / mod / property — see maybeWatchScan
     try { doForumRefresh(); } catch(_){}   // fire-and-forget; never gates the loop
+    try { maybeSgPush(); } catch(_){}      // fire-and-forget; off by default, see maybeSgPush()
     try { maybeForceStatRefresh(); } catch(_){}
 
     /* Health. The background path needs no navigation, so it is safe to run even
