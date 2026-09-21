@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.311
+// @version      2000.312
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -34,7 +34,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.311
+/*  Jarvis Bot 2000.312
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -141,7 +141,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.311';
+  const APP_VERSION = '2000.312';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -1901,6 +1901,21 @@
     if (city) e.fields.push({ name: 'Where', value: city, inline: true });
     // Keyed by the mail id — one statement per mail, for ever.
     dcSendOnce('dcwit', String(mailId || `${killer}>${victim}`), e);
+  }
+
+  /* Fallback for when WITNESS_BODY_RE matches the SUBJECT but not the mail
+   * BODY (2000.312) — this was the actual bug behind "witness posts to
+   * Telegram but never Discord": discordWitness() was only ever called from
+   * the branch where killer/victim parsed, so an unparsed body sent a
+   * Telegram alert and NOTHING to Discord, silently, every single time the
+   * body regex didn't match. Same event key scheme (by mail id) so a later
+   * regex fix that starts parsing the same mail can't double-post it. */
+  function discordWitnessRaw(mailId, subject, body) {
+    if (!dc.witness || !dcConfigured()) return;
+    const e = dcBase('👁️ Witness statement (unparsed)', DC_COLOUR.witness);
+    e.description = subject || 'A murder was witnessed, but the body didn\'t match the known pattern.';
+    if (body) e.fields = [{ name: 'Mail body', value: body.substring(0, 500) }];
+    dcSendOnce('dcwit', String(mailId), e);
   }
 
   /* A shot is a red embed like the critical alerts, because it is the same class
@@ -4803,6 +4818,7 @@
               console.warn(`${APP_TAG}[WITNESS] mail ${mailId} matched the subject but not the body — subject: "${subject}" | body: ${wBody.substring(0,200)}`);
               const preview = wBody ? `\n<pre>${esc(wBody.substring(0,300))}</pre>` : '';
               tgMsg('witness', `👁️ <b>WITNESSED A MURDER</b>\n${st.player||'?'} | ${fmtDate()}\n${esc(subject)}${preview}`);
+              try { discordWitnessRaw(mailId, subject, wBody); } catch(e) { console.warn(APP_TAG, '[DC] witness raw', e); }
             }
           }
         }
