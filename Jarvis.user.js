@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.312
+// @version      2000.313
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -34,7 +34,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.312
+/*  Jarvis Bot 2000.313
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -141,7 +141,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.312';
+  const APP_VERSION = '2000.313';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -11661,42 +11661,63 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
     })();
   }
 
-  /* === HEADER RANK BAR (every authenticated page) ===
+  /* === HEADER RANK % (every authenticated page) ===
    * The 2000.308 fill above only shows on statistics.aspx — you have to go
    * looking for it. This puts the SAME already-computed figure
-   * (xpRankProgress off xpState.total, identical source to 308) as a thin
-   * bar next to the rank name in the game's own header, on every page.
-   * Cosmetic only, same as 308: nothing purchased, nothing server-side —
-   * this browser draws a bar next to a number the game already shows you.
-   * No settings toggle: it costs nothing to run (no fetch, no navigation,
-   * updates only when XP already updates) and, unlike an action switch,
-   * there is no wrong state for it to be in.
+   * (xpRankProgress off xpState.total, identical source to 308) as plain
+   * percentage text next to the rank name in the game's own header, on
+   * every page. Cosmetic only, same as 308: nothing purchased, nothing
+   * server-side — this browser writes text next to a number the game
+   * already shows you. No settings toggle: it costs nothing to run (no
+   * fetch, no navigation, updates only when XP already updates) and,
+   * unlike an action switch, there is no wrong state for it to be in.
+   *
+   * 2000.313: was a filled bar, computed fresh from xpState.total on each
+   * page — which is blank for a moment on a fresh page load before the XP
+   * interceptor has read anything THIS page, so the header could sit empty
+   * depending on timing. Now text (plainer, easier to read at a glance next
+   * to the rank name than a thin bar), and the last computed figure is
+   * cached in localStorage (`cbHdrRankPct`, shared by every tab and every
+   * page) so a page with nothing fresh yet still paints the last KNOWN
+   * percentage immediately rather than staying blank until this page's own
+   * reading arrives.
    */
-  let _hdrRankBarEl = null;
+  const LS_HDR_RANK_PCT = 'cbHdrRankPct';
+  let _hdrRankPctEl = null;
   function updateHeaderRankBar() {
     try {
       const lbl = document.getElementById('ctl00_userInfo_lblrank');
-      if (!lbl || !(xpState.total > 0)) return;
-      const rp = xpRankProgress(xpState.total);
-      if (!rp) return;
-      const pct = rp.next ? rp.pct : 100;
+      if (!lbl) return;
 
-      if (!_hdrRankBarEl || !_hdrRankBarEl.isConnected) {
-        const wrap = document.createElement('span');
-        wrap.id = 'jb-hdr-rankbar';
-        wrap.style.cssText = 'display:inline-block;vertical-align:middle;margin-left:6px;width:50px;height:6px;'
-          + 'background:rgba(128,128,128,.35);border-radius:3px;overflow:hidden;';
-        const fill = document.createElement('span');
-        fill.style.cssText = 'display:block;height:100%;background:#4caf50;border-radius:3px;transition:width .3s;';
-        wrap.appendChild(fill);
-        lbl.insertAdjacentElement('afterend', wrap);
-        _hdrRankBarEl = wrap;
+      let pct = null, rank, next, toNext;
+      if (xpState.total > 0) {
+        const rp = xpRankProgress(xpState.total);
+        if (rp) {
+          pct = rp.next ? rp.pct : 100; rank = rp.rank; next = rp.next; toNext = rp.toNext;
+          try { localStorage.setItem(LS_HDR_RANK_PCT, JSON.stringify({ pct, rank, next, toNext })); } catch(_) {}
+        }
       }
-      const fillEl = _hdrRankBarEl.firstElementChild;
-      if (fillEl) fillEl.style.width = Math.max(0, Math.min(100, pct)).toFixed(1) + '%';
-      _hdrRankBarEl.title = rp.next
-        ? `${pct.toFixed(1)}% to ${rp.next} (${rp.toNext} XP to go)`
-        : `${rp.rank} — max rank`;
+      if (pct === null) {
+        // Nothing fresh yet this page — fall back to the last known figure
+        // (any page, any tab) so the header isn't blank while we wait.
+        try {
+          const cached = JSON.parse(localStorage.getItem(LS_HDR_RANK_PCT) || 'null');
+          if (cached && typeof cached.pct === 'number') { ({ pct, rank, next, toNext } = cached); }
+        } catch(_) {}
+      }
+      if (pct === null) return;
+
+      if (!_hdrRankPctEl || !_hdrRankPctEl.isConnected) {
+        const el = document.createElement('span');
+        el.id = 'jb-hdr-rankpct';
+        el.style.cssText = 'margin-left:6px;font-size:11px;opacity:.85;white-space:nowrap;';
+        lbl.insertAdjacentElement('afterend', el);
+        _hdrRankPctEl = el;
+      }
+      _hdrRankPctEl.textContent = `(${pct.toFixed(1)}%)`;
+      _hdrRankPctEl.title = next
+        ? `${pct.toFixed(1)}% to ${next} (${toNext} XP to go)`
+        : `${rank} — max rank`;
     } catch(_) {}
   }
 
