@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.317
+// @version      2000.318
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -35,7 +35,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.317
+/*  Jarvis Bot 2000.318
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -142,7 +142,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.317';
+  const APP_VERSION = '2000.318';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -9810,12 +9810,24 @@
      * specifically so their embedded link can open a modal without also
      * flipping the switch — and the ribbon-button look hides the checkbox
      * entirely (pointer-events:none, see the CSS), so nothing forwards a
-     * click to it any more without this. Forward every click EXCEPT one that
-     * lands on the link itself, which keeps its own existing click handler
-     * (wired below/elsewhere) untouched. */
+     * click to it any more without this.
+     *
+     * MUST check e.target === div, not "target isn't the link" (2000.318 fix,
+     * the first cut used `if (e.target.closest('span, a')) return;`). cb.click()
+     * dispatches its own click event, which ALSO bubbles up through this same
+     * div and re-enters this SAME listener with e.target === the checkbox —
+     * which is neither a span nor an <a>, so the old check let it straight
+     * through into another cb.click(), which fired another bubbled click, which
+     * called cb.click() again... a synchronous infinite recursion on every
+     * single click, toggling back and forth until the browser hit its call
+     * stack limit and threw. Net effect: the switch never visibly changed
+     * state, which is exactly "stops the switch being turned off and on".
+     * Requiring the ORIGINAL click target to be the div itself — not the link,
+     * and not the checkbox's own bubbled synthetic click — fixes it outright:
+     * only a genuine click on the pill's own background reaches this branch. */
     _shadow.querySelectorAll('.jb-quickgrid > div.jb-ribbon-btn').forEach(div => {
       div.addEventListener('click', e => {
-        if (e.target.closest('span, a')) return;
+        if (e.target !== div) return;
         const cb = div.querySelector('input[type="checkbox"]');
         if (cb && !cb.disabled) cb.click();
       });
