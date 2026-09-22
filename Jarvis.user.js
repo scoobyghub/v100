@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.318
+// @version      2000.319
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -35,7 +35,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.318
+/*  Jarvis Bot 2000.319
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -142,7 +142,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.318';
+  const APP_VERSION = '2000.319';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -8728,6 +8728,19 @@
       .jb-ribbon-btn:has(input[type="checkbox"]:not(:checked)) { background: var(--jb-ribbon-off); color: var(--jb-ribbon-off-text); }
       .jb-ribbon-btn:has(input[type="checkbox"]:disabled) { opacity: .45; cursor: not-allowed; filter: none; }
       .jb-ribbon-btn input[type="checkbox"] { position: absolute; opacity: 0; width: 1px; height: 1px; pointer-events: none; }
+      /* The four <div>-wrapped items (Create DTM/Whitelist/Create OC/Watch) get
+       * a REAL, visible, directly clickable checkbox instead (2000.319) — no
+       * <label> forwarding is possible there (the embedded link needs its own
+       * separate click target from the toggle), and the delegated-click-to-
+       * hidden-checkbox approach tried in 2000.316/318 gave them a hit area of
+       * "whatever sliver of background isn't covered by the text", which was
+       * too small to reliably hit — and needed a fragile re-entrancy guard to
+       * avoid a synthetic-click feedback loop. A real, native checkbox has
+       * neither problem: its own click target, no forwarding code at all. */
+      div.jb-ribbon-btn input[type="checkbox"] {
+        position: static; opacity: 1; width: 13px; height: 13px; pointer-events: auto;
+        margin: 0 4px 0 0; vertical-align: middle; accent-color: var(--jb-ribbon-on);
+      }
       .jb-body { padding: 8px 10px; max-height: 420px; overflow-y: auto; }
       .jb-body::-webkit-scrollbar { width: 6px; }
       .jb-body::-webkit-scrollbar-thumb { background: var(--jb-border-strong); border-radius: 3px; }
@@ -9808,30 +9821,15 @@
 
     /* Create DTM / Whitelist / Create OC / Watch are a <div>, not a <label>,
      * specifically so their embedded link can open a modal without also
-     * flipping the switch — and the ribbon-button look hides the checkbox
-     * entirely (pointer-events:none, see the CSS), so nothing forwards a
-     * click to it any more without this.
-     *
-     * MUST check e.target === div, not "target isn't the link" (2000.318 fix,
-     * the first cut used `if (e.target.closest('span, a')) return;`). cb.click()
-     * dispatches its own click event, which ALSO bubbles up through this same
-     * div and re-enters this SAME listener with e.target === the checkbox —
-     * which is neither a span nor an <a>, so the old check let it straight
-     * through into another cb.click(), which fired another bubbled click, which
-     * called cb.click() again... a synchronous infinite recursion on every
-     * single click, toggling back and forth until the browser hit its call
-     * stack limit and threw. Net effect: the switch never visibly changed
-     * state, which is exactly "stops the switch being turned off and on".
-     * Requiring the ORIGINAL click target to be the div itself — not the link,
-     * and not the checkbox's own bubbled synthetic click — fixes it outright:
-     * only a genuine click on the pill's own background reaches this branch. */
-    _shadow.querySelectorAll('.jb-quickgrid > div.jb-ribbon-btn').forEach(div => {
-      div.addEventListener('click', e => {
-        if (e.target !== div) return;
-        const cb = div.querySelector('input[type="checkbox"]');
-        if (cb && !cb.disabled) cb.click();
-      });
-    });
+     * flipping the switch. 2000.316/318 tried forwarding a click anywhere on
+     * the div to a HIDDEN checkbox — first cut re-forwarded the checkbox's own
+     * bubbled synthetic click into an infinite recursive loop (318), and even
+     * fixed, the real click target was just "whatever background sliver isn't
+     * covered by the text", too small to reliably hit. 2000.319 drops the
+     * forwarding entirely: the checkbox is REAL and directly clickable again
+     * (see the CSS), so it needs no JS wiring here at all — same as it never
+     * needed any before 2000.316.
+     */
 
     // Other checkboxes
     _shadow.querySelector('#jb-crusher').checked = st.crusher;
