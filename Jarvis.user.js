@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.320
+// @version      2000.321
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -31,11 +31,12 @@
 // @connect      raw.githubusercontent.com
 // @connect      starvinggeeks.net
 // @connect      helper.starvinggeeks.net
+// @connect      tmn-tf-ocdtm.teddybear.workers.dev
 // @updateURL    https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.meta.js
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.320
+/*  Jarvis Bot 2000.321
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -142,7 +143,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.320';
+  const APP_VERSION = '2000.321';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -1307,6 +1308,10 @@
     // Header rank % (see updateHeaderRankBar) — on by default, off once a real
     // rank bar is bought (the game's own becomes the accurate one to read).
     hdrRankPctOn:  GM_getValue('cbHdrRankPctOn', true),
+    // Kay worker OC/DTM availability sync — shared community system, off by
+    // default even though the credential is shipped (see the KAY_WORKER
+    // section for why building it and running it unasked are different).
+    kayWorkerOn:   GM_getValue('cbKayWorkerOn', false),
     /* Seconds between XP readings. The game's own page polls every 15s, and our
      * refresh fires the identical request, so anything near 15-20s matches what a
      * browser left open does by itself. See xpPollMs(). */
@@ -5787,6 +5792,82 @@
     });
   }
 
+  /* === KAY WORKER — OC/DTM AVAILABILITY (2000.321) ===
+   * Ported from the reference's syncOCDTMAvailability(), on explicit,
+   * INFORMED request after the "no consent to alter" note above was
+   * revisited directly with the user: they confirmed they understand this
+   * posts into a SHARED coordination system operated by teddybear/Kay —
+   * not something private to this account — and want it anyway.
+   *
+   * KAY_SHARED_SECRET is the reference's own hardcoded constant: not a
+   * per-user credential, the same value every install of the reference
+   * script ships with. That is what makes "it's widely used and it works"
+   * true — it is shared BY DESIGN, not a leaked secret this project is
+   * newly exposing. Still off by default, same as every other outbound
+   * feature here: building it on request is a different question from
+   * running it unasked.
+   *
+   * Payload is deliberately minimal, matching the reference exactly:
+   * { secret, name, type: 'oc'|'dtm', city, ready }. "ready" comes from
+   * Jarvis's own getOc()/getDtm() (cooldown expired AND not mid-crime) —
+   * cleaner than the reference's own scattered cooldown-key reads, same
+   * meaning. Debounced the same way the reference does: a POST only goes
+   * out when the reported ready/busy state actually CHANGES, or once every
+   * KAY_REFRESH_MS as a periodic re-affirm — not on every tick.
+   */
+  const KAY_WORKER_URL = 'https://tmn-tf-ocdtm.teddybear.workers.dev';
+  const KAY_SHARED_SECRET = 'Attack!Skill!Observe!Accident!Dirt2';
+  const KAY_TICK_MS = 15000;    // don't even evaluate more often than this
+  const KAY_REFRESH_MS = 20000; // re-affirm an unchanged state at least this often
+  let _kayLastSync = 0;
+
+  function kayPostAvail(type, ready, city) {
+    return new Promise(resolve => {
+      GM_xmlhttpRequest({
+        method:'POST', url: KAY_WORKER_URL, timeout:15000,
+        headers:{ 'Content-Type':'application/json' },
+        data: JSON.stringify({ secret: KAY_SHARED_SECRET, name: st.player || 'unknown', type, city, ready }),
+        onload:  r => { console.log(`${APP_TAG}[KAY] POST ${type} ready=${ready} → ${r.status}`); resolve(r.status >= 200 && r.status < 300); },
+        onerror: () => { console.warn(`${APP_TAG}[KAY] POST ${type} error`); resolve(false); },
+        ontimeout: () => { console.warn(`${APP_TAG}[KAY] POST ${type} timeout`); resolve(false); }
+      });
+    });
+  }
+
+  async function kaySyncType(type, ready, city) {
+    const reportedKey = 'cbKay' + type.toUpperCase() + 'Reported';
+    const lastPushKey = 'cbKay' + type.toUpperCase() + 'LastPush';
+    const wasReported = localStorage.getItem(reportedKey) === 'true';
+    const lastPush = parseInt(localStorage.getItem(lastPushKey) || '0', 10);
+    const due = Date.now() - lastPush >= KAY_REFRESH_MS;
+    if (ready) {
+      if (!wasReported || due) {
+        const ok = await kayPostAvail(type, true, city);
+        if (ok) { localStorage.setItem(reportedKey, 'true'); localStorage.setItem(lastPushKey, String(Date.now())); }
+      }
+    } else if (wasReported) {
+      const ok = await kayPostAvail(type, false, city);
+      if (ok) localStorage.setItem(reportedKey, 'false');
+    }
+  }
+
+  // Fire-and-forget, called once per mainLoop tick. Gated by isHalted() —
+  // this announces you as ACTIVELY AVAILABLE for an OC/DTM, which is exactly
+  // the kind of "still telling the world you're here" signal the HARD HALT
+  // is about eliminating, same reasoning as the other outbound features.
+  async function maybeKaySync() {
+    if (!cfg.kayWorkerOn || isHalted()) return;
+    if (Date.now() - _kayLastSync < KAY_TICK_MS) return;
+    _kayLastSync = Date.now();
+    if (!st.player) return;
+    try {
+      const city = getCurCity() || 'Unknown';
+      const oc = getOc(), dtm = getDtm();
+      await kaySyncType('oc',  !!(oc  && oc.ready),  city);
+      await kaySyncType('dtm', !!(dtm && dtm.ready), city);
+    } catch(e) { console.warn(`${APP_TAG}[KAY] sync error:`, e); }
+  }
+
   function sgReadList(key, fallback = []) {
     try {
       const raw = localStorage.getItem(key);
@@ -9452,6 +9533,10 @@
               <input class="jb-input" id="jb-fleet-token" value="${esc(fleet.token)}" placeholder="Group token">
             </div>
             <hr class="jb-sep">
+            <div class="jb-sect-title">Kay Worker (OC/DTM availability)</div>
+            <div class="jb-sub jb-mb" style="color:var(--jb-warning)">⚠️ A third, different outbound feature — posts a bare ready/busy flag for OC and DTM to <b>tmn-tf-ocdtm.teddybear.workers.dev</b>, teddybear/Kay's SHARED coordination worker used by the wider community running the reference bot, not something private to this account. Uses the reference script's own built-in credential — there is nothing to fill in — so the only control is the switch. Off by default.</div>
+            <label class="jb-switch jb-mb"><input type="checkbox" id="jb-kay-on" ${cfg.kayWorkerOn?'checked':''}> 🛰️ Enable Kay Worker sync</label>
+            <hr class="jb-sep">
             <div class="jb-row">
               <button class="jb-btn jb-btn-danger" id="jb-reset-all">Reset All</button>
               <button class="jb-btn jb-btn-outline" id="jb-clear-player">Clear Player</button>
@@ -10321,6 +10406,12 @@
       if (fg) fg.addEventListener('input', e => { fleet.group = e.target.value.trim(); saveFleet(); }); }
     { const ft = _shadow.querySelector('#jb-fleet-token');
       if (ft) ft.addEventListener('input', e => { fleet.token = e.target.value.trim(); saveFleet(); }); }
+    // Kay worker — shared community sync, credential built in, only a switch.
+    { const kw = _shadow.querySelector('#jb-kay-on');
+      if (kw) kw.addEventListener('change', e => {
+        cfg.kayWorkerOn = e.target.checked; GM_setValue('cbKayWorkerOn', cfg.kayWorkerOn);
+        setStatus('🛰️ Kay Worker sync ' + (cfg.kayWorkerOn ? 'ON' : 'OFF'));
+      }); }
     { const xp = _shadow.querySelector('#jb-xp-poll');
       if (xp) xp.addEventListener('change', e => {
         cfg.xpPollSec = Math.max(10, Math.min(1800, parseInt(e.target.value,10)||300));
@@ -14199,6 +14290,7 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
     try { doForumRefresh(); } catch(_){}   // fire-and-forget; never gates the loop
     try { maybeSgPush(); } catch(_){}      // fire-and-forget; off by default, see maybeSgPush()
     try { maybeFleetCheckin(); } catch(_){} // fire-and-forget; off by default, see maybeFleetCheckin()
+    try { maybeKaySync(); } catch(_){}      // fire-and-forget; off by default, see maybeKaySync()
     try { maybeForceStatRefresh(); } catch(_){}
 
     /* Health. The background path needs no navigation, so it is safe to run even
