@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.316
+// @version      2000.317
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -35,7 +35,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.316
+/*  Jarvis Bot 2000.317
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -142,7 +142,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.316';
+  const APP_VERSION = '2000.317';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -5723,6 +5723,23 @@
     GM_setValue('cbFleetToken', fleet.token);
   }
 
+  /* Matches the reference's own _secs() wording for ocTimer/dtmTimer (null /
+   * "<N>s" / "due") rather than the 'ready' this first shipped with — if the
+   * dashboard has any special-case rendering keyed to the exact string, an
+   * unrecognised one would silently not render, which fits "not showing up"
+   * better than a wrong number would.
+   * Also fixes a real bug: getOc()/getDtm() return {inProgress:true, total:0}
+   * for an OC/DTM that's currently RUNNING, which read identically to
+   * "total 0s" (i.e. about to become ready) — the two are opposite states.
+   * The reference can't tell these apart (it only diffs a stored timestamp);
+   * Jarvis can, via the same .inProgress flag fmtTimer() already uses. */
+  function fleetTimerStr(t) {
+    if (!t) return null;
+    if (t.inProgress) return 'running';
+    if (t.ready || t.total <= 0) return 'due';
+    return t.total + 's';
+  }
+
   const FLEET_INTERVAL_MS = 5 * 60 * 1000; // same cadence as the SG push above
   async function maybeFleetCheckin() {
     if (!fleet.on || !fleet.group.trim() || !fleet.token.trim() || isHalted()) return;
@@ -5739,8 +5756,8 @@
       version:    'v' + APP_VERSION,
       running:    !isHalted(),
       session:    outboundSessionMinutes() + 'm',
-      ocTimer:    oc  ? (oc.ready  ? 'ready' : oc.total  + 's') : null,
-      dtmTimer:   dtm ? (dtm.ready ? 'ready' : dtm.total + 's') : null,
+      ocTimer:    fleetTimerStr(oc),
+      dtmTimer:   fleetTimerStr(dtm),
       city:       bar ? bar.city : null,
       rank:       bar ? bar.rank : null,
       cash:       bar ? String(bar.cash) : null,
@@ -5754,6 +5771,7 @@
       // acted on.
     };
 
+    console.log(`${APP_TAG}[FLEET] sending:`, payload);
     return new Promise(resolve => {
       GM_xmlhttpRequest({
         method:'POST', url: FLEET_URL, timeout:15000,
