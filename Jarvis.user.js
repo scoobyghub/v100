@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.315
+// @version      2000.316
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -35,7 +35,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.315
+/*  Jarvis Bot 2000.316
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -142,7 +142,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.315';
+  const APP_VERSION = '2000.316';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -8696,6 +8696,20 @@
       }
       .jb-ribbon-btn:hover { filter: brightness(1.15); }
       .jb-ribbon-btn.off { background: var(--jb-ribbon-off); color: var(--jb-ribbon-off-text); }
+      /* .jb-ribbon-btn built from a wrapped checkbox instead of a plain <button> —
+       * Crusher/Props/Hover in the ribbon itself, and the whole front-panel
+       * quick-toggle row below it (2000.31x, replacing an earlier coloured-pill
+       * attempt the user wasn't keen on). Same solid on/off fill as the plain
+       * ribbon buttons, driven by :has() instead of the .off class/inline style
+       * those use — the two mechanisms don't conflict since a plain <button> has
+       * no checkbox descendant for :has() to match. The checkbox itself is
+       * visually hidden (still present, still what every existing change-handler
+       * reads/toggles — zero JS changes needed) since the whole pill's fill IS
+       * the on/off indicator, same as the plain ribbon buttons which have no
+       * separate toggle graphic either. */
+      .jb-ribbon-btn:has(input[type="checkbox"]:not(:checked)) { background: var(--jb-ribbon-off); color: var(--jb-ribbon-off-text); }
+      .jb-ribbon-btn:has(input[type="checkbox"]:disabled) { opacity: .45; cursor: not-allowed; filter: none; }
+      .jb-ribbon-btn input[type="checkbox"] { position: absolute; opacity: 0; width: 1px; height: 1px; pointer-events: none; }
       .jb-body { padding: 8px 10px; max-height: 420px; overflow-y: auto; }
       .jb-body::-webkit-scrollbar { width: 6px; }
       .jb-body::-webkit-scrollbar-thumb { background: var(--jb-border-strong); border-radius: 3px; }
@@ -8707,26 +8721,11 @@
       }
       .jb-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 12px; }
       /* Front-panel quick-toggle row only (Settings' own .jb-grid checkbox lists —
-       * Telegram messages, SG push fields, etc. — keep the plain switch look above,
-       * which reads better for a long vertical list). Re-skinned as compact pill
-       * chips: same .jb-switch elements and the same checkbox underneath — the
-       * toggle-switch graphic stays exactly as clickable as before, including on
-       * the five (Crusher/Create DTM/Whitelist/Create OC/Watch) that are a <div>
-       * rather than a <label> specifically so their embedded link can open a modal
-       * without also flipping the switch; hiding the checkbox there would have
-       * removed the only thing that still toggles them. The space saving is the
-       * flex-wrap row (several short pills per line) plus tighter padding, not a
-       * change to what's clickable. */
+       * Telegram messages, SG push fields, etc. — keep the plain .jb-switch look,
+       * which reads better for a long vertical list) — just the flex-wrap layout;
+       * the button look itself now comes from .jb-ribbon-btn above. */
       .jb-quickgrid { display: flex; flex-wrap: wrap; gap: 4px; }
-      .jb-quickgrid .jb-switch {
-        gap: 4px; padding: 2px 6px; border-radius: 3px; font-size: 10px; font-weight: 600;
-        background: var(--jb-ribbon-off); color: var(--jb-ribbon-off-text);
-        transition: background .15s, color .15s;
-      }
-      .jb-quickgrid .jb-switch:has(input:checked) { background: var(--jb-ribbon-on); color: var(--jb-ribbon-on-text); }
-      .jb-quickgrid .jb-switch input[type="checkbox"] { width: 20px; height: 11px; }
-      .jb-quickgrid .jb-switch input[type="checkbox"]::after { width: 7px; height: 7px; }
-      .jb-quickgrid .jb-switch input[type="checkbox"]:checked::after { transform: translateX(9px); }
+      .jb-quickgrid .jb-ribbon-btn { font-size: 10px; padding: 3px 7px; }
       .jb-switch {
         display: flex; align-items: center; gap: 6px; padding: 2px 0;
         cursor: pointer; user-select: none; font-size: 11px;
@@ -8868,6 +8867,9 @@
           <button class="jb-ribbon-btn ${st.garage?'':'off'}" id="jb-r-garage">Garage</button>
           <button class="jb-ribbon-btn ${st.autoOC?'':'off'}" id="jb-r-oc" title="Auto-ACCEPT organised crime invites sent to you">OC</button>
           <button class="jb-ribbon-btn ${st.autoDTM?'':'off'}" id="jb-r-dtm" title="Auto-ACCEPT DTM invites sent to you (not the same as Create DTM)">DTM</button>
+          <label class="jb-ribbon-btn" title="Crusher for owned cars"><input type="checkbox" id="jb-crusher"> Crusher</label>
+          <label class="jb-ribbon-btn" title="Property drop watch"><input type="checkbox" id="jb-prop-on"> Props</label>
+          <label class="jb-ribbon-btn" title="Player hover tooltip (reload to apply)"><input type="checkbox" id="jb-hover-on"> Hover</label>
         </div>
 
         <div class="jb-body">
@@ -8933,21 +8935,18 @@
 
           <div class="jb-sect">
             <div class="jb-grid jb-quickgrid">
-              <div class="jb-switch" title="Crusher for owned cars"><input type="checkbox" id="jb-crusher"> Crusher</div>
-              <label class="jb-switch" title="Property drop watch"><input type="checkbox" id="jb-prop-on"> 🏠 Props</label>
-              <label class="jb-switch" title="Player hover tooltip (reload to apply)"><input type="checkbox" id="jb-hover-on"> 🔍 Hover</label>
-              <div class="jb-switch" title="START a DTM yourself and invite a partner. Click the text to set the partner, schedule and repeat."><input type="checkbox" id="jb-create-dtm"> <span id="jb-dtm-link" style="cursor:pointer;text-decoration:underline;color:var(--jb-accent)">Create DTM</span></div>
-              <div class="jb-switch"><input type="checkbox" id="jb-wl-on"> <span id="jb-wl-link" style="cursor:pointer;text-decoration:underline;color:var(--jb-accent)">Whitelist</span></div>
-              <div class="jb-switch"><input type="checkbox" id="jb-create-oc"> <span id="jb-oc-link" style="cursor:pointer;text-decoration:underline;color:var(--jb-accent)">Create OC</span></div>
-              <div class="jb-switch" title="Master switch for Online Watch — off means neither group can fire. Enable/disable Group 1 and Group 2 individually inside the Watch window."><input type="checkbox" id="jb-ow-on"> <span id="jb-ow-link" style="cursor:pointer;text-decoration:underline;color:var(--jb-accent)">🟢 Watch</span></div>
-              <label class="jb-switch" title="Colour player links from your Starvinggeeks lists — watched (orange), safe (green), allied (blue). Read-only: three GETs, nothing is ever sent."><input type="checkbox" id="jb-sg-on"> 🎨 SG lists <span id="jb-sg-status" style="font-size:9px;letter-spacing:0.02em">—</span></label>
-              <label class="jb-switch" title="Send the fields ticked in Settings → System → Advanced (username/city/rank/cash/health/ammo/credits/status/session — all off by default) to starvinggeeks.net every few minutes. This switch alone sends nothing without at least one field ticked there."><input type="checkbox" id="jb-sgpush-on" ${sgPush.on?'checked':''}> 📤 SG Push</label>
-              <label class="jb-switch" title="Ultra-low-resource preset for an old/low-RAM device (e.g. a tablet in Firefox that keeps running out of memory). Pushes panel refresh, background polls and the XP backstop to their slowest settings, and switches off Hover, SG lists, Props, Silent audio and the Worker ticker. Switching this back off restores exactly what you had running before."><input type="checkbox" id="jb-tablet-mode" ${cfg.tabletMode?'checked':''}> 📱 Tablet</label>
-              <label class="jb-switch" title="Telegram ping when an OC or DTM comes off cooldown, plus the repeat reminders while it is still sitting there unused. This is ONLY the OC/DTM ready pings — every other alert lives in Settings → Alerts, and script checks are never gated by it."><input type="checkbox" id="jb-notify-ready"> 🔔 OC/DTM alerts</label>
-              <label class="jb-switch"><input type="checkbox" id="jb-auto-travel" ${st.autoTravel?'checked':''}> ✈️ Auto Travel</label>
-              <label class="jb-switch" title="ADVERTISE yourself on the DTM list (ocads.aspx) when a DTM is ready, so others can invite you"><input type="checkbox" id="jb-auto-dtmlist" ${st.autoDtmList?'checked':''}> 📋 DTM List</label>
-              <label class="jb-switch" title="ADVERTISE yourself on the OC list (ocads.aspx) when an OC is ready, so others can invite you"><input type="checkbox" id="jb-auto-oclist" ${st.autoOcList?'checked':''}> 📋 OC List</label>
-              <label class="jb-switch" title="PANIC: hide inside your network HQ so you can't be shot. Pauses everything else, re-enters until the cap, then switches itself off. Never enters a damaged HQ — if it's destroyed while you're inside, you die."><input type="checkbox" id="jb-holdhq-on" ${cfg.holdHqOn?'checked':''}> 🏠 Hold HQ</label>
+              <div class="jb-ribbon-btn" title="START a DTM yourself and invite a partner. Click the text to set the partner, schedule and repeat."><input type="checkbox" id="jb-create-dtm"> <span id="jb-dtm-link" style="cursor:pointer;text-decoration:underline">Create DTM</span></div>
+              <div class="jb-ribbon-btn"><input type="checkbox" id="jb-wl-on"> <span id="jb-wl-link" style="cursor:pointer;text-decoration:underline">Whitelist</span></div>
+              <div class="jb-ribbon-btn"><input type="checkbox" id="jb-create-oc"> <span id="jb-oc-link" style="cursor:pointer;text-decoration:underline">Create OC</span></div>
+              <div class="jb-ribbon-btn" title="Master switch for Online Watch — off means neither group can fire. Enable/disable Group 1 and Group 2 individually inside the Watch window."><input type="checkbox" id="jb-ow-on"> <span id="jb-ow-link" style="cursor:pointer;text-decoration:underline">🟢 Watch</span></div>
+              <label class="jb-ribbon-btn" title="Colour player links from your Starvinggeeks lists — watched (orange), safe (green), allied (blue). Read-only: three GETs, nothing is ever sent."><input type="checkbox" id="jb-sg-on"> 🎨 SG lists <span id="jb-sg-status" style="font-size:9px;letter-spacing:0.02em">—</span></label>
+              <label class="jb-ribbon-btn" title="Send the fields ticked in Settings → System → Advanced (username/city/rank/cash/health/ammo/credits/status/session — all off by default) to starvinggeeks.net every few minutes. This switch alone sends nothing without at least one field ticked there."><input type="checkbox" id="jb-sgpush-on" ${sgPush.on?'checked':''}> 📤 SG Push</label>
+              <label class="jb-ribbon-btn" title="Ultra-low-resource preset for an old/low-RAM device (e.g. a tablet in Firefox that keeps running out of memory). Pushes panel refresh, background polls and the XP backstop to their slowest settings, and switches off Hover, SG lists, Props, Silent audio and the Worker ticker. Switching this back off restores exactly what you had running before."><input type="checkbox" id="jb-tablet-mode" ${cfg.tabletMode?'checked':''}> 📱 Tablet</label>
+              <label class="jb-ribbon-btn" title="Telegram ping when an OC or DTM comes off cooldown, plus the repeat reminders while it is still sitting there unused. This is ONLY the OC/DTM ready pings — every other alert lives in Settings → Alerts, and script checks are never gated by it."><input type="checkbox" id="jb-notify-ready"> 🔔 OC/DTM alerts</label>
+              <label class="jb-ribbon-btn"><input type="checkbox" id="jb-auto-travel" ${st.autoTravel?'checked':''}> ✈️ Auto Travel</label>
+              <label class="jb-ribbon-btn" title="ADVERTISE yourself on the DTM list (ocads.aspx) when a DTM is ready, so others can invite you"><input type="checkbox" id="jb-auto-dtmlist" ${st.autoDtmList?'checked':''}> 📋 DTM List</label>
+              <label class="jb-ribbon-btn" title="ADVERTISE yourself on the OC list (ocads.aspx) when an OC is ready, so others can invite you"><input type="checkbox" id="jb-auto-oclist" ${st.autoOcList?'checked':''}> 📋 OC List</label>
+              <label class="jb-ribbon-btn" title="PANIC: hide inside your network HQ so you can't be shot. Pauses everything else, re-enters until the cap, then switches itself off. Never enters a damaged HQ — if it's destroyed while you're inside, you die."><input type="checkbox" id="jb-holdhq-on" ${cfg.holdHqOn?'checked':''}> 🏠 Hold HQ</label>
             </div>
           </div>
         </div>
@@ -9787,6 +9786,21 @@
       setStatus(!v ? 'ALL OFF — everything stopped'
                 : _allRestored ? 'ALL ON — your previous selection restored'
                 : 'ALL ON — nothing saved, tick what you want');
+    });
+
+    /* Create DTM / Whitelist / Create OC / Watch are a <div>, not a <label>,
+     * specifically so their embedded link can open a modal without also
+     * flipping the switch — and the ribbon-button look hides the checkbox
+     * entirely (pointer-events:none, see the CSS), so nothing forwards a
+     * click to it any more without this. Forward every click EXCEPT one that
+     * lands on the link itself, which keeps its own existing click handler
+     * (wired below/elsewhere) untouched. */
+    _shadow.querySelectorAll('.jb-quickgrid > div.jb-ribbon-btn').forEach(div => {
+      div.addEventListener('click', e => {
+        if (e.target.closest('span, a')) return;
+        const cb = div.querySelector('input[type="checkbox"]');
+        if (cb && !cb.disabled) cb.click();
+      });
     });
 
     // Other checkboxes
