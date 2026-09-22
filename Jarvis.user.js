@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.322
+// @version      2000.323
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -35,7 +35,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.322
+/*  Jarvis Bot 2000.323
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -131,8 +131,12 @@
       console.log('[JB] Intentional logout — allowing');
       return;
     }
-    console.log('[JB] Logout URL intercepted — redirecting to home');
-    window.location.replace('/authenticated/default.aspx');
+    // crimes.aspx rather than default.aspx (2000.323, by request) — it's the
+    // one page every other "go somewhere safe" path in this script already
+    // uses, so landing here after a bounced logout is the same as landing
+    // here after anything else, not a special case to reason about.
+    console.log('[JB] Logout URL intercepted — redirecting to crimes.aspx');
+    window.location.replace('/authenticated/crimes.aspx');
   } catch (_) {}
 })();
 
@@ -142,7 +146,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.322';
+  const APP_VERSION = '2000.323';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
