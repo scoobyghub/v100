@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.319
+// @version      2000.320
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -35,7 +35,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.319
+/*  Jarvis Bot 2000.320
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -142,7 +142,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.319';
+  const APP_VERSION = '2000.320';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -1304,6 +1304,9 @@
     // No-XP limiter extra trigger: also cap an action if it has gained no XP for
     // this many minutes despite firing. 0 disables (streak count still applies).
     noXpStaleMin:  GM_getValue('cbNoXpStaleMin', 0),
+    // Header rank % (see updateHeaderRankBar) — on by default, off once a real
+    // rank bar is bought (the game's own becomes the accurate one to read).
+    hdrRankPctOn:  GM_getValue('cbHdrRankPctOn', true),
     /* Seconds between XP readings. The game's own page polls every 15s, and our
      * refresh fires the identical request, so anything near 15-20s matches what a
      * browser left open does by itself. See xpPollMs(). */
@@ -9409,6 +9412,7 @@
             <label class="jb-switch jb-mb"><input type="checkbox" id="jb-resume" ${resume.on?'checked':''}> Auto-Resume</label>
             <label class="jb-switch jb-mb"><input type="checkbox" id="jb-stats-on" ${stats.on?'checked':''}> Stats Collection</label>
             <label class="jb-switch jb-mb" title="Backstop for when the game's exact XP feed goes quiet: derives XP from the status-bar rank %, which is server-rendered on every page load. It STANDS DOWN whenever an exact reading has arrived in the last 10 minutes — it is rounded to the rank's step (0.3 XP at Global Dominator), so it must never compete with the real figures."><input type="checkbox" id="jb-xpbar-on" ${GM_getValue('cbXpBarOn',true)!==false?'checked':''}> 📊 Status-bar XP fallback</label>
+            <label class="jb-switch jb-mb" title="Shows our own computed rank progress (e.g. 40.09%) next to your rank name in the game's header, on every page. Switch off once you've actually bought the real in-game rank bar from the Credits Store — that one becomes the accurate thing to read, and this becomes redundant."><input type="checkbox" id="jb-hdrpct-on" ${cfg.hdrRankPctOn?'checked':''}> 🏷️ Header rank %</label>
             <div class="jb-row" title="How often to read your XP. The game's own page polls every 15 seconds while it sits open, and Jarvis fires the identical request — so 15-20s matches what an ordinary open browser does by itself.">
               <label class="jb-label" style="white-space:nowrap">XP backstop (s):</label>
               <input class="jb-input jb-input-sm" type="number" id="jb-xp-poll" value="${cfg.xpPollSec}" min="10" max="1800" step="10">
@@ -10613,6 +10617,12 @@
       _lastBarXp = 0; _barXpLogged = false;   // re-baseline so it re-reads on the next tick
       setStatus(e.target.checked ? 'Status-bar XP on' : 'Status-bar XP off');
     });
+    { const hp = _shadow.querySelector('#jb-hdrpct-on');
+      if (hp) hp.addEventListener('change', e => {
+        cfg.hdrRankPctOn = e.target.checked; GM_setValue('cbHdrRankPctOn', cfg.hdrRankPctOn);
+        try { updateHeaderRankBar(); } catch(_){}   // apply/remove immediately, don't wait for the next XP update
+        setStatus('🏷️ Header rank % ' + (cfg.hdrRankPctOn ? 'ON' : 'OFF'));
+      }); }
     const noXpCb = _shadow.querySelector('#jb-noxp-on');
     if (noXpCb) noXpCb.addEventListener('change', e => { cfg.noXpLimiterOn = e.target.checked; GM_setValue('cbNoXpLimiterOn', cfg.noXpLimiterOn); setStatus(cfg.noXpLimiterOn?'No-XP limiter on':'No-XP limiter off'); });
     const noXpStreak = _shadow.querySelector('#jb-noxp-streak');
@@ -11852,11 +11862,22 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
    * page) so a page with nothing fresh yet still paints the last KNOWN
    * percentage immediately rather than staying blank until this page's own
    * reading arrives.
+   *
+   * 2000.320: two decimal places (40.09% rather than 40.1%), and a settings
+   * toggle after all — Settings → System → Advanced → "Header rank %". This
+   * display exists because the real in-game rank bar is locked behind a
+   * Credits Store purchase (see 2000.308); once that's actually bought the
+   * game's own bar becomes the more accurate thing to read and this one is
+   * redundant, so cfg.hdrRankPctOn (default true) can switch it off.
    */
   const LS_HDR_RANK_PCT = 'cbHdrRankPct';
   let _hdrRankPctEl = null;
   function updateHeaderRankBar() {
     try {
+      if (!cfg.hdrRankPctOn) {
+        if (_hdrRankPctEl && _hdrRankPctEl.isConnected) _hdrRankPctEl.remove();
+        return;
+      }
       const lbl = document.getElementById('ctl00_userInfo_lblrank');
       if (!lbl) return;
 
@@ -11885,9 +11906,9 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
         lbl.insertAdjacentElement('afterend', el);
         _hdrRankPctEl = el;
       }
-      _hdrRankPctEl.textContent = `(${pct.toFixed(1)}%)`;
+      _hdrRankPctEl.textContent = `(${pct.toFixed(2)}%)`;
       _hdrRankPctEl.title = next
-        ? `${pct.toFixed(1)}% to ${next} (${toNext} XP to go)`
+        ? `${pct.toFixed(2)}% to ${next} (${toNext} XP to go)`
         : `${rank} — max rank`;
     } catch(_) {}
   }
