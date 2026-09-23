@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.324
+// @version      2000.325
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -36,7 +36,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.324
+/*  Jarvis Bot 2000.325
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -147,7 +147,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.324';
+  const APP_VERSION = '2000.325';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -5738,6 +5738,36 @@
     GM_setValue('cbFleetToken', fleet.token);
   }
 
+  /* Per-field breakout (2000.325), added after a report of Fleet Check-in
+   * still sending credits despite it being switched off in the SG push's
+   * OWN field list above — the two features are independent, always were
+   * (Fleet Check-in ported the reference's fixed payload shape verbatim, no
+   * granular control), so a toggle in one never touched the other. This
+   * gives Fleet Check-in the same "choose what's seen" breakout, mirroring
+   * SG_PUSH_FIELDS. group/name/version/running/ocTimer/dtmTimer stay
+   * mandatory — they're the actual point of this feature (who you are,
+   * whether you're up, what your OC/DTM state is); only the extra stat
+   * fields that came along with matching the reference's payload shape are
+   * optional. Defaults ON (unlike SG push's all-off default) because this
+   * is retrofitting a control onto an already-running feature that was
+   * already sending all of these — turning the toggles off is what changes
+   * behaviour, not adding them in the first place. */
+  const FLEET_FIELDS = [
+    { key:'city',    label:'City' },
+    { key:'rank',    label:'Rank' },
+    { key:'cash',    label:'Cash' },
+    { key:'health',  label:'Health' },
+    { key:'fmj',     label:'FMJ bullets' },
+    { key:'jhp',     label:'JHP bullets' },
+    { key:'credits', label:'Credits' },
+    { key:'session', label:'Session length' }
+  ];
+  const fleetField = {};
+  FLEET_FIELDS.forEach(f => { fleetField[f.key] = GM_getValue('cbFleetField_'+f.key, true); });
+  function saveFleetFields() {
+    FLEET_FIELDS.forEach(f => GM_setValue('cbFleetField_'+f.key, fleetField[f.key]));
+  }
+
   /* Matches the reference's own _secs() wording for ocTimer/dtmTimer (null /
    * "<N>s" / "due") rather than the 'ready' this first shipped with — if the
    * dashboard has any special-case rendering keyed to the exact string, an
@@ -5765,21 +5795,25 @@
 
     const bar = readBar();
     const oc = getOc(), dtm = getDtm();
+    // Same discipline as the SG push (2000.314): a field that's off is sent
+    // as null, never simply OMITTED — theBox.php choked on a missing key,
+    // and there's no reason to assume this endpoint is any more forgiving
+    // of a payload shape it's never seen before.
     const payload = {
       group:      fleet.group.trim(),
       name:       st.player || 'unknown',
       version:    'v' + APP_VERSION,
       running:    !isHalted(),
-      session:    outboundSessionMinutes() + 'm',
+      session:    fleetField.session ? (outboundSessionMinutes() + 'm') : null,
       ocTimer:    fleetTimerStr(oc),
       dtmTimer:   fleetTimerStr(dtm),
-      city:       bar ? bar.city : null,
-      rank:       bar ? bar.rank : null,
-      cash:       bar ? String(bar.cash) : null,
-      health:     bar ? (bar.hp + '%') : null,
-      fmj:        bar ? String(bar.fmj) : null,
-      jhp:        bar ? String(bar.jhp) : null,
-      credits:    bar ? String(bar.credits) : null,
+      city:       fleetField.city    ? (bar ? bar.city : null) : null,
+      rank:       fleetField.rank    ? (bar ? bar.rank : null) : null,
+      cash:       fleetField.cash    ? (bar ? String(bar.cash) : null) : null,
+      health:     fleetField.health  ? (bar ? (bar.hp + '%') : null) : null,
+      fmj:        fleetField.fmj     ? (bar ? String(bar.fmj) : null) : null,
+      jhp:        fleetField.jhp     ? (bar ? String(bar.jhp) : null) : null,
+      credits:    fleetField.credits ? (bar ? String(bar.credits) : null) : null,
       reportedAt: new Date().toISOString()
       // No ack/ackResult/command fields — this is send-only. The response
       // body is logged for diagnostics and nothing in it is ever parsed or
@@ -9467,7 +9501,7 @@
             </div>
             <div class="jb-mb">
               <label class="jb-label">Password</label>
-              <input class="jb-input" id="jb-login-pass" type="text" value="${esc(LOGIN.pass)}">
+              <input class="jb-input" id="jb-login-pass" type="password" autocomplete="off" value="${esc(LOGIN.pass)}">
             </div>
             <label class="jb-switch jb-mb"><input type="checkbox" id="jb-auto-submit" ${LOGIN.autoSubmit?'checked':''}> Auto-submit</label>
             <div class="jb-mb">
@@ -9538,6 +9572,10 @@
             <div class="jb-mb">
               <label class="jb-label">Token</label>
               <input class="jb-input" type="password" id="jb-fleet-token" value="${esc(fleet.token)}" placeholder="Group token" autocomplete="off">
+            </div>
+            <div class="jb-sub jb-mb" style="color:var(--jb-text-ter);font-size:9px">Group/name/version/running/OC/DTM status are always sent — that's the point of the feature. The extra fields below are optional; an unticked one goes out as blank, never the real value.</div>
+            <div class="jb-grid" id="jb-fleet-fields">
+              ${FLEET_FIELDS.map(f => `<label class="jb-switch" style="font-size:10px"><input type="checkbox" class="jb-fleet-field-cb" data-key="${f.key}" ${fleetField[f.key]?'checked':''}> ${esc(f.label)}</label>`).join('')}
             </div>
             <hr class="jb-sep">
             <div class="jb-sect-title">Kay Worker (OC/DTM availability)</div>
@@ -10413,6 +10451,12 @@
       if (fg) fg.addEventListener('input', e => { fleet.group = e.target.value.trim(); saveFleet(); }); }
     { const ft = _shadow.querySelector('#jb-fleet-token');
       if (ft) ft.addEventListener('input', e => { fleet.token = e.target.value.trim(); saveFleet(); }); }
+    _shadow.querySelectorAll('.jb-fleet-field-cb').forEach(cb => {
+      cb.addEventListener('change', e => {
+        const k = e.target.dataset.key;
+        if (k in fleetField) { fleetField[k] = e.target.checked; saveFleetFields(); }
+      });
+    });
     // Kay worker — shared community sync, credential built in, only a switch.
     { const kw = _shadow.querySelector('#jb-kay-on');
       if (kw) kw.addEventListener('change', e => {
