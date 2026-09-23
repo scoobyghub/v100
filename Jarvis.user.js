@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.323
+// @version      2000.324
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -30,12 +30,13 @@
 // @connect      discord.com
 // @connect      raw.githubusercontent.com
 // @connect      starvinggeeks.net
+// @connect      helper.starvinggeeks.net
 // @connect      tmn-tf-ocdtm.teddybear.workers.dev
 // @updateURL    https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.meta.js
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.323
+/*  Jarvis Bot 2000.324
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -146,7 +147,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.323';
+  const APP_VERSION = '2000.324';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -5623,9 +5624,11 @@
     });
   }
 
-  // The SG push's "session" field — how long has this been running. Starts
-  // on first read, not on script init — cheapest correct definition, and
-  // matches how nothing else here tracks a "script start" moment either.
+  // Shared by every outbound "how long have you been running" field (SG push's
+  // session field, Fleet Check-in below) so there's one session clock, not
+  // several independently-drifting ones. Starts on first read, not on script
+  // init — cheapest correct definition, and matches how nothing else here
+  // tracks a "script start" moment either.
   function outboundSessionMinutes() {
     let start = parseInt(localStorage.getItem('cbSessionStart') || '0', 10);
     if (!start) { start = Date.now(); localStorage.setItem('cbSessionStart', String(start)); }
@@ -5695,6 +5698,106 @@
     }
   }
 
+  /* === FLEET CHECK-IN ===
+   * A SEPARATE reversal from the theBox.php push above, added on explicit
+   * request after the user asked about the reference's OC/DTM status
+   * reporting. Two different mechanisms exist there:
+   *   1. syncOCDTMAvailability() → a Cloudflare worker
+   *      (tmn-tf-ocdtm.teddybear.workers.dev), authenticated with a SHARED
+   *      SECRET hardcoded in the reference script itself
+   *      ("Attack!Skill!Observe!Accident!Dirt2") — the author's own private
+   *      key for their own coordination system, not a per-user credential.
+   *      Ported anyway in 2000.321, on later explicit re-confirmation — see
+   *      §7 in CLAUDE.md for that arc.
+   *   2. sendFleetCheckin() → helper.starvinggeeks.net/checkin, authenticated
+   *      with a group + token the settings menu asks the USER to fill in —
+   *      a real per-user credential, same shape as the Telegram token or the
+   *      Discord webhook URL already handled this way. THIS is what's
+   *      ported below.
+   *
+   * Removed in 2000.322 (no working credentials existed for it), RE-ADDED in
+   * 2000.324 at the user's request to keep the option available even though
+   * it still needs real credentials from teddybear to do anything — see
+   * CLAUDE.md for the full back-and-forth.
+   *
+   * Send-only, by explicit request: the reference's response handling reads
+   * a `command` back and acts on it (ack/ackResult in its payload). That is
+   * deliberately NOT reproduced here — the response is logged and nothing
+   * else. Off by default; needs both the switch and a group + token filled
+   * in before anything sends.
+   */
+  const FLEET_URL = 'https://helper.starvinggeeks.net/checkin';
+  const fleet = {
+    on:    GM_getValue('cbFleetOn', false),
+    group: GM_getValue('cbFleetGroup', ''),
+    token: GM_getValue('cbFleetToken', '')
+  };
+  function saveFleet() {
+    GM_setValue('cbFleetOn', fleet.on);
+    GM_setValue('cbFleetGroup', fleet.group);
+    GM_setValue('cbFleetToken', fleet.token);
+  }
+
+  /* Matches the reference's own _secs() wording for ocTimer/dtmTimer (null /
+   * "<N>s" / "due") rather than the 'ready' this first shipped with — if the
+   * dashboard has any special-case rendering keyed to the exact string, an
+   * unrecognised one would silently not render, which fits "not showing up"
+   * better than a wrong number would.
+   * Also fixes a real bug: getOc()/getDtm() return {inProgress:true, total:0}
+   * for an OC/DTM that's currently RUNNING, which read identically to
+   * "total 0s" (i.e. about to become ready) — the two are opposite states.
+   * The reference can't tell these apart (it only diffs a stored timestamp);
+   * Jarvis can, via the same .inProgress flag fmtTimer() already uses. */
+  function fleetTimerStr(t) {
+    if (!t) return null;
+    if (t.inProgress) return 'running';
+    if (t.ready || t.total <= 0) return 'due';
+    return t.total + 's';
+  }
+
+  const FLEET_INTERVAL_MS = 5 * 60 * 1000; // same cadence as the SG push above
+  async function maybeFleetCheckin() {
+    if (!fleet.on || !fleet.group.trim() || !fleet.token.trim() || isHalted()) return;
+    const last = parseInt(localStorage.getItem('cbFleetLast') || '0', 10);
+    const jitter = 0.75 + Math.random() * 0.5;
+    if (Date.now() - last < FLEET_INTERVAL_MS * jitter) return;
+    localStorage.setItem('cbFleetLast', String(Date.now()));
+
+    const bar = readBar();
+    const oc = getOc(), dtm = getDtm();
+    const payload = {
+      group:      fleet.group.trim(),
+      name:       st.player || 'unknown',
+      version:    'v' + APP_VERSION,
+      running:    !isHalted(),
+      session:    outboundSessionMinutes() + 'm',
+      ocTimer:    fleetTimerStr(oc),
+      dtmTimer:   fleetTimerStr(dtm),
+      city:       bar ? bar.city : null,
+      rank:       bar ? bar.rank : null,
+      cash:       bar ? String(bar.cash) : null,
+      health:     bar ? (bar.hp + '%') : null,
+      fmj:        bar ? String(bar.fmj) : null,
+      jhp:        bar ? String(bar.jhp) : null,
+      credits:    bar ? String(bar.credits) : null,
+      reportedAt: new Date().toISOString()
+      // No ack/ackResult/command fields — this is send-only. The response
+      // body is logged for diagnostics and nothing in it is ever parsed or
+      // acted on.
+    };
+
+    console.log(`${APP_TAG}[FLEET] sending:`, payload);
+    return new Promise(resolve => {
+      GM_xmlhttpRequest({
+        method:'POST', url: FLEET_URL, timeout:15000,
+        headers:{ 'Content-Type':'application/json', 'Authorization':'Bearer ' + fleet.token.trim() },
+        data: JSON.stringify(payload),
+        onload:  r => { console.log(`${APP_TAG}[FLEET] check-in sent — HTTP ${r.status}:`, (r.responseText||'').substring(0,200)); resolve(); },
+        onerror: () => { console.warn(`${APP_TAG}[FLEET] check-in failed: network`); resolve(); },
+        ontimeout: () => { console.warn(`${APP_TAG}[FLEET] check-in failed: timeout`); resolve(); }
+      });
+    });
+  }
 
   /* === KAY WORKER — OC/DTM AVAILABILITY (2000.321) ===
    * Ported from the reference's syncOCDTMAvailability(), on explicit,
@@ -9425,6 +9528,18 @@
               ${SG_PUSH_FIELDS.map(f => `<label class="jb-switch" style="font-size:10px"><input type="checkbox" class="jb-sgpush-field-cb" data-key="${f.key}" ${sgPushField[f.key]?'checked':''}> ${esc(f.label)}</label>`).join('')}
             </div>
             <hr class="jb-sep">
+            <div class="jb-sect-title">Fleet Check-in</div>
+            <div class="jb-sub jb-mb" style="color:var(--jb-warning)">⚠️ A separate, different outbound feature to the push above — sends a status snapshot (OC/DTM timers, city, rank, cash, health, ammo, credits, session length) to <b>helper.starvinggeeks.net</b> every few minutes, authenticated with your own group + token. Off by default; needs the switch AND both fields below filled in. <b>Send-only</b> — nothing sent back by the server is ever read or acted on.</div>
+            <label class="jb-switch jb-mb"><input type="checkbox" id="jb-fleet-on" ${fleet.on?'checked':''}> 📡 Enable Fleet Check-in</label>
+            <div class="jb-mb">
+              <label class="jb-label">Group</label>
+              <input class="jb-input" id="jb-fleet-group" value="${esc(fleet.group)}" placeholder="Group name">
+            </div>
+            <div class="jb-mb">
+              <label class="jb-label">Token</label>
+              <input class="jb-input" type="password" id="jb-fleet-token" value="${esc(fleet.token)}" placeholder="Group token" autocomplete="off">
+            </div>
+            <hr class="jb-sep">
             <div class="jb-sect-title">Kay Worker (OC/DTM availability)</div>
             <div class="jb-sub jb-mb" style="color:var(--jb-warning)">⚠️ A separate, different outbound feature to the push above — posts a bare ready/busy flag for OC and DTM to <b>tmn-tf-ocdtm.teddybear.workers.dev</b>, teddybear/Kay's SHARED coordination worker used by the wider community running the reference bot, not something private to this account. Uses the reference script's own built-in credential — there is nothing to fill in — so the only control is the switch. Off by default.</div>
             <label class="jb-switch jb-mb"><input type="checkbox" id="jb-kay-on" ${cfg.kayWorkerOn?'checked':''}> 🛰️ Enable Kay Worker sync</label>
@@ -10288,6 +10403,16 @@
         if (k in sgPushField) { sgPushField[k] = e.target.checked; saveSgPush(); }
       });
     });
+    // Fleet Check-in — separate feature, separate credentials, send-only.
+    { const fo = _shadow.querySelector('#jb-fleet-on');
+      if (fo) fo.addEventListener('change', e => {
+        fleet.on = e.target.checked; saveFleet();
+        setStatus('📡 Fleet Check-in ' + (fleet.on ? 'ON' : 'OFF'));
+      }); }
+    { const fg = _shadow.querySelector('#jb-fleet-group');
+      if (fg) fg.addEventListener('input', e => { fleet.group = e.target.value.trim(); saveFleet(); }); }
+    { const ft = _shadow.querySelector('#jb-fleet-token');
+      if (ft) ft.addEventListener('input', e => { fleet.token = e.target.value.trim(); saveFleet(); }); }
     // Kay worker — shared community sync, credential built in, only a switch.
     { const kw = _shadow.querySelector('#jb-kay-on');
       if (kw) kw.addEventListener('change', e => {
@@ -14171,6 +14296,7 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
     try { maybeWatchScan(); } catch(_){}   // online / mod / property — see maybeWatchScan
     try { doForumRefresh(); } catch(_){}   // fire-and-forget; never gates the loop
     try { maybeSgPush(); } catch(_){}      // fire-and-forget; off by default, see maybeSgPush()
+    try { maybeFleetCheckin(); } catch(_){} // fire-and-forget; off by default, see maybeFleetCheckin()
     try { maybeKaySync(); } catch(_){}      // fire-and-forget; off by default, see maybeKaySync()
     try { maybeForceStatRefresh(); } catch(_){}
 
