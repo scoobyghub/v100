@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.325
+// @version      2000.326
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -36,7 +36,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.325
+/*  Jarvis Bot 2000.326
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -104,6 +104,26 @@
 
 (function blockLogoutRedirect() {
   try {
+    /* THE FLAG MUST BE CONSUMED UNCONDITIONALLY, ON EVERY PAGE LOAD — not only
+     * ones whose URL still contains act=out (2000.326 fix). The old code only
+     * cleared cbLogoutIntent inside the "URL still has act=out" branch below.
+     * If the server's own redirect chain strips the query string once it's
+     * processed the logout — landing you on a plain /login.aspx with no
+     * act=out left in it, which is normal ASP.NET behaviour and NOT something
+     * this script controls — that clearing code never ran. The flag then sat
+     * at '1' in localStorage INDEFINITELY, silently defeating both guards
+     * below for every subsequent logout, deliberate or accidental: the click
+     * guard (line ~131) and the arrival-bounce (line ~140) both treat a set
+     * flag as "let it through, someone already decided this". One stuck flag
+     * from a single sleep/mod/watch-triggered logout — or even a single
+     * ordinary click on the site's own Logout link — could silently disable
+     * the entire protection from then on, which is exactly the shape of "we
+     * added a guard for this and it isn't working" reported live. Reading it
+     * once, up front, and clearing it immediately closes that gap regardless
+     * of what the rest of this page's URL looks like. */
+    const hadLogoutIntent = localStorage.getItem('cbLogoutIntent') === '1';
+    if (hadLogoutIntent) localStorage.removeItem('cbLogoutIntent');
+
     /* Catch the CLICK, not just the arrival — added 2000.310. By the time the
      * browser has already loaded login.aspx?act=out, the ASP.NET handler has
      * almost certainly signed the session out server-side already, so bouncing
@@ -112,7 +132,10 @@
      * this runs ahead of the link's own default navigation AND ahead of any
      * bubble-phase handler on the link itself (e.g. an onclick doing the same
      * thing another way) — stopPropagation() here keeps the event from ever
-     * reaching the target, not just cancels navigation. */
+     * reaching the target, not just cancels navigation.
+     * Uses a per-click re-read of localStorage (not the hadLogoutIntent captured
+     * above), since a click can happen long after this IIFE's initial run and a
+     * later doLogout() may have set the flag again since. */
     document.addEventListener('click', function (e) {
       const link = e.target && e.target.closest && e.target.closest('a[href*="act=out" i]');
       if (!link) return;
@@ -125,10 +148,7 @@
     }, true);
 
     if (!window.location.search.includes('act=out')) return;
-    // A deliberate logout (e.g. sleep-mode sign-out) sets this flag first, so
-    // only accidental/stray logout URLs get bounced back to the game.
-    if (localStorage.getItem('cbLogoutIntent') === '1') {
-      localStorage.removeItem('cbLogoutIntent');
+    if (hadLogoutIntent) {
       console.log('[JB] Intentional logout — allowing');
       return;
     }
@@ -147,7 +167,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.325';
+  const APP_VERSION = '2000.326';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
