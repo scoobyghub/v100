@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.326
+// @version      2000.327
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -36,7 +36,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.326
+/*  Jarvis Bot 2000.327
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -167,7 +167,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.326';
+  const APP_VERSION = '2000.327';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -1356,6 +1356,9 @@
     modBreakMin:    GM_getValue('cbModBreakMin', 60),   // minutes
     modBreakMax:    GM_getValue('cbModBreakMax', 120),
     modBreakLogout: GM_getValue('cbModBreakLogout', true),
+    /* Per-player mod reaction (2000.327) — see PLAYER PERSONALITY. On by
+     * default: the uniform reaction it replaces is itself the tell. */
+    modVary:        GM_getValue('cbModVary', true),
     /* Hold HQ (panic) — hide inside your network HQ so you can't be shot.
      * Capped, and it switches ITSELF off at the cap: this is a panic button, not
      * a way of life, and forgetting it was on would cost you a whole day. */
@@ -3543,7 +3546,15 @@
   // to a due action) because the reasons are unrelated and both must be able to
   // hold jail independently.
   function modJailBlocked() {
-    if (!cfg.modWatchOn || !cfg.noJailOnMod) return false;
+    if (!cfg.modWatchOn) return false;
+    if (cfg.modVary && modVaryApplies()) {
+      const r = modReactLive();
+      if (!r) return false;
+      if (r.style === 'stop') return true;
+      if (r.style === 'slow') return Date.now() - (st.lastJail || 0) < r.slowMs;
+      return false;                                      // ignore / break
+    }
+    if (!cfg.noJailOnMod) return false;
     return modsOnline().length > 0;
   }
 
@@ -3612,10 +3623,12 @@
       const fresh = names.filter(n => !was.includes(n));
       if (fresh.length) {
         console.log(`${APP_TAG}[MOD] Staff online: ${names.join(', ')}`);
-        if (cfg.modBreakOn) startModBreak(names);
+        if (cfg.modVary && modVaryApplies()) planModReaction(names);
+        else if (cfg.modBreakOn) startModBreak(names);
         else tgMsg('modOnline', `👮 <b>Staff online</b> — ${esc(names.join(', '))}\n${st.player||'?'}${cfg.noJailOnMod ? ' | jail paused' : ''}`);
       } else if (was.length && !names.length) {
         console.log(`${APP_TAG}[MOD] Staff offline — all clear`);
+        modReactOnOffline();
         tgMsg('modOnline', `✅ <b>Staff offline</b>\n${st.player||'?'} | all clear`);
       }
     } catch (e) {
@@ -3632,6 +3645,179 @@
   }
 
   function modWatchStop() { if (_modTimer) clearInterval(_modTimer); _modTimer = null; }
+
+  /* === PLAYER PERSONALITY (2000.327) ===
+   *
+   * Five players, one script, one config — so every account reacted to a mod
+   * IDENTICALLY: they all read the same players page on the same 60s clock, saw
+   * the same orange name, and stopped jail (or logged out for 1-2h) within a
+   * minute of each other, then all came back within a minute of the mod leaving.
+   * A block of accounts going quiet together and resuming together is a far
+   * louder tell than anything any one of them was doing.
+   *
+   * Each player now carries a stable personality, seeded from the PLAYER NAME
+   * (not the device, so it follows the account and survives a reinstall). It
+   * shapes two things:
+   *
+   *  1. THE MOD REACTION. Per appearance, each player rolls its own response from
+   *     its own weights — carry on, slow jail down, stop jail, or (only if the
+   *     break switch is on) take the break — after its own lag. If the mod has
+   *     gone before the lag runs out it never reacts at all; it comes back on its
+   *     own resume delay, not on the mod's exit; and it "gets bored" after its own
+   *     patience even if the mod stays. Only the reactions you have switched on
+   *     can be drawn: with "No Jail on Mod" off it can never stop jail, with the
+   *     break off it can never take one.
+   *     This is CHEAPER in XP than what it replaces, not dearer — most draws
+   *     cost little or nothing, where before every account stopped for the whole
+   *     visit.
+   *
+   *  2. THE CADENCE JITTER. Every action fires at cooldown + a random gap; that
+   *     gap was 0.5–4.5s uniform on every account. Each player now has its own
+   *     window and skew, averaging out at roughly the same throughput (1.4–3.4s
+   *     mean against 2.5s). Never before the cooldown — the floor is unchanged.
+   *
+   * FAIL-OPEN IS PRESERVED. A reaction only bites while a FRESH reading shows
+   * staff online, or inside the resume tail that an OBSERVED departure started.
+   * A stale reading suppresses nothing, exactly as before (see MOD_STALE_MS).
+   */
+  function _seededRng(seed) {                    // mulberry32
+    let a = seed >>> 0;
+    return () => {
+      a = (a + 0x6D2B79F5) >>> 0;
+      let t = a;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  /* Cached on the function rather than in a `let`, so a call that happens
+   * before this line has been evaluated cannot hit the temporal dead zone. */
+  function playerTraits() {
+    const name = String((typeof st !== 'undefined' && st && st.player) || '').toLowerCase();
+    const c = playerTraits._c;
+    if (c && c.name === name) return c.t;
+    let t;
+    if (!name) {
+      // Player not known yet — the pre-327 behaviour, neutral weights.
+      t = { jitLo: 500, jitHi: 4500, jitSkew: 1,
+            wIgnore: 0.3, wSlow: 0.4, wStop: 0.3, wBreak: 0.05,
+            lagLo: 1, lagHi: 6, resLo: 2, resHi: 10, patience: 45, slowSec: 20 };
+    } else {
+      const rnd = _seededRng(parseInt(contentHash('jb-persona:' + name), 16));
+      const r = (lo, hi) => lo + rnd() * (hi - lo);
+      const lagLo = r(0, 3), resLo = r(1, 4);
+      t = {
+        jitLo:   Math.round(r(300, 1200)),       // ms over the cooldown
+        jitHi:   Math.round(r(2500, 5500)),
+        jitSkew: r(0.6, 1.8),                    // >1 leans early, <1 leans late
+        wIgnore: r(0.15, 0.5),
+        wSlow:   r(0.2, 0.6),
+        wStop:   r(0.1, 0.5),
+        wBreak:  r(0.02, 0.15),                  // expensive and loud — kept rare
+        lagLo, lagHi: lagLo + r(3, 10),          // minutes before reacting
+        resLo, resHi: resLo + r(3, 12),          // minutes after they leave
+        patience: Math.round(r(20, 90)),         // minutes before shrugging it off
+        slowSec:  Math.round(r(12, 40))          // jail spacing while 'slow'
+      };
+    }
+    playerTraits._c = { name, t };
+    return t;
+  }
+
+  // Varying only makes sense if some reaction is switched on at all; with both
+  // off, a mod appearance is alert-only, as it always was.
+  function modVaryApplies() { return !!(cfg.noJailOnMod || cfg.modBreakOn); }
+
+  const LS_MOD_REACT = 'cbModReact';
+  const MOD_REACT_LABEL = { ignore: 'carrying on', slow: 'slowing jail', stop: 'stopping jail', break: 'taking a break' };
+
+  function modReactState() {
+    try { const r = JSON.parse(localStorage.getItem(LS_MOD_REACT) || 'null'); return r && typeof r === 'object' ? r : null; }
+    catch(_) { return null; }
+  }
+  function modReactSave(r) { if (r) localStorage.setItem(LS_MOD_REACT, JSON.stringify(r)); else localStorage.removeItem(LS_MOD_REACT); }
+
+  // A reaction that has fully run its course is dead weight; drop it.
+  function modReactExpired(r, now) {
+    if (!r) return true;
+    if (r.endAt && now >= r.endAt) return true;
+    if (now - (r.at || 0) > 6 * 3600000) return true;    // belt and braces
+    return false;
+  }
+
+  function planModReaction(names) {
+    const now = Date.now();
+    const cur = modReactState();
+    // One per visit. A reaction past its patience may be re-rolled — that also
+    // covers a departure we missed while the reading was stale.
+    if (cur && !modReactExpired(cur, now) && !cur.endAt && now < cur.stopAt) return;
+    const t = playerTraits();
+    const opts = [['ignore', t.wIgnore], ['slow', t.wSlow]];
+    if (cfg.noJailOnMod) opts.push(['stop', t.wStop]);
+    if (cfg.modBreakOn)  opts.push(['break', t.wBreak]);
+    const sum = opts.reduce((s, o) => s + o[1], 0);
+    let x = Math.random() * sum, style = opts[0][0];
+    for (const [k, w] of opts) { if ((x -= w) <= 0) { style = k; break; } }
+    const lagMin = t.lagLo + Math.random() * (t.lagHi - t.lagLo);
+    const r = {
+      at: now, style, names,
+      startAt: now + Math.round(lagMin * 60000),
+      stopAt:  now + Math.round((lagMin + t.patience * (0.7 + Math.random() * 0.6)) * 60000),
+      slowMs:  Math.round(t.slowSec * (0.8 + Math.random() * 0.4) * 1000),
+      endAt: 0, fired: false
+    };
+    modReactSave(r);
+    const what = style === 'ignore' ? 'carrying on' : `${MOD_REACT_LABEL[style]} in ${Math.round(lagMin)}m`;
+    console.log(`${APP_TAG}[MOD] Reaction for ${st.player||'?'}: ${what}`);
+    tgMsg('modOnline', `👮 <b>Staff online</b> — ${esc(names.join(', '))}\n${st.player||'?'} | ${what}`);
+  }
+
+  // Staff observed leaving: never-started reactions are dropped, running ones
+  // wind down on this player's own resume delay rather than the mod's exit.
+  function modReactOnOffline() {
+    const r = modReactState(), now = Date.now();
+    if (!r || r.endAt) return;
+    if (now < r.startAt || r.style === 'ignore') { modReactSave(null); return; }
+    const t = playerTraits();
+    const mins = t.resLo + Math.random() * (t.resHi - t.resLo);
+    r.endAt = now + Math.round(mins * 60000);
+    modReactSave(r);
+    console.log(`${APP_TAG}[MOD] Staff gone — ${st.player||'?'} back to normal in ${Math.round(mins)}m`);
+  }
+
+  /* The reaction in force right now, or null. Bites only between its lag and
+   * its patience, and only while a FRESH reading shows staff — or inside a
+   * resume tail an observed departure started. Otherwise fail open. */
+  function modReactLive() {
+    const r = modReactState(), now = Date.now();
+    if (!r) return null;
+    if (modReactExpired(r, now)) { modReactSave(null); return null; }
+    if (now < r.startAt || now >= r.stopAt) return null;
+    if (!r.endAt && !modsOnline().length) return null;   // stale → suppress nothing
+    return r;
+  }
+
+  // Called each loop tick: the break style starts when its lag runs out, not
+  // when the mod appears, so five accounts don't log out in the same minute.
+  function modReactTick() {
+    if (!cfg.modWatchOn || !cfg.modVary || !cfg.modBreakOn) return;
+    const r = modReactLive();
+    if (r && r.style === 'break' && !r.fired) {
+      r.fired = true; modReactSave(r);
+      startModBreak(modsOnline().length ? modsOnline() : (r.names || ['staff']));
+    }
+  }
+
+  function modReactSummary() {
+    const r = modReactState(), now = Date.now();
+    if (!r || modReactExpired(r, now)) return '';
+    if (r.style === 'ignore') return 'carrying on';
+    if (now < r.startAt) return `${MOD_REACT_LABEL[r.style]} in ${Math.ceil((r.startAt - now) / 60000)}m`;
+    if (now >= r.stopAt) return 'shrugged it off';
+    if (r.endAt) return `${MOD_REACT_LABEL[r.style]} · normal in ${Math.ceil((r.endAt - now) / 60000)}m`;
+    return MOD_REACT_LABEL[r.style];
+  }
 
   /* === SCRIPT CHECK MONITOR === */
 
@@ -6550,8 +6736,14 @@
    *
    * rndDelay() — the per-click micro-delay — is untouched and still applies.
    */
+  /* The gap over the cooldown is per PLAYER since 2000.327 — see PLAYER
+   * PERSONALITY. Was a flat 0.5–4.5s uniform on every account, which is one more
+   * way five accounts look like one. Throughput is roughly unchanged (mean
+   * 1.4–3.4s against 2.5s) and the cooldown floor is untouched. */
   function fastCooldownMs(intervalSec) {
-    return Math.max(0, intervalSec * 1000) + 500 + Math.random() * 4000;  // +0.5–4.5s
+    const t = playerTraits();
+    const gap = t.jitLo + (t.jitHi - t.jitLo) * Math.pow(Math.random(), t.jitSkew);
+    return Math.max(0, intervalSec * 1000) + gap;
   }
 
   /* The actions the cadence applies to. 2000.285 exempted jail alone from the
@@ -9470,6 +9662,8 @@
             </div>
             <label class="jb-switch jb-mb" title="Log out for the duration as well, instead of idling on the page. Auto-login is suppressed for the same period so it can't sign straight back in."><input type="checkbox" id="jb-mod-break-logout" ${cfg.modBreakLogout?'checked':''}> 🚪 Log out for the break</label>
             <div class="jb-sub jb-mb" style="color:var(--jb-text-ter);font-size:9px">Staff are detected by <b>the game's own highlight</b> on the players page (the orange name), so this covers every moderator rather than a list of names we'd have to keep up to date. <b>Marc is ignored</b> — the owner's account is highlighted essentially always, and counting it would leave this permanently triggered. A failed or stale check suppresses <b>nothing</b>: it fails open deliberately, because a silent all-day halt caused by a network blip is far worse than one unsuppressed bust. Jail shows <b>⏸M</b> in the status line while held.</div>
+            <label class="jb-switch jb-mb" title="Each player reacts in its own way, after its own delay, and comes back on its own delay — so your accounts don't all stop and restart together. Only reactions you have switched on (No Jail on Mod, the break) can be drawn; carrying on and slowing jail are always possible."><input type="checkbox" id="jb-mod-vary" ${cfg.modVary?'checked':''}> 🎭 Vary the reaction per player</label>
+            <div class="jb-sub jb-mb" id="jb-mod-persona" style="color:var(--jb-text-ter);font-size:9px"></div>
             <div class="jb-sub jb-mb" id="jb-mod-status">Not checked yet</div>
             <hr class="jb-sep">
             <div class="jb-sect-title">Hold HQ (panic)</div>
@@ -10744,6 +10938,13 @@
       }); }
     { const bl = _shadow.querySelector('#jb-mod-break-logout');
       if (bl) bl.addEventListener('change', e => { cfg.modBreakLogout = e.target.checked; GM_setValue('cbModBreakLogout', cfg.modBreakLogout); }); }
+    { const mv = _shadow.querySelector('#jb-mod-vary');
+      if (mv) mv.addEventListener('change', e => {
+        cfg.modVary = e.target.checked; GM_setValue('cbModVary', cfg.modVary);
+        // A pending per-player reaction must not outlive the switch.
+        if (!cfg.modVary) localStorage.removeItem(LS_MOD_REACT);
+        setStatus(cfg.modVary ? '🎭 Mod reaction varies per player' : '🎭 Mod reaction uniform');
+      }); }
 
     // Per-message Telegram toggles
     _shadow.querySelectorAll('.jb-tgmsg-cb').forEach(cb => {
@@ -10878,13 +11079,28 @@
               ms.textContent = `⚠️ Last check ${fmtAgo(s.at)} — stale, suppressing nothing`;
               ms.style.color = 'var(--jb-warning)';
             } else if (on.length) {
-              ms.textContent = `👮 Online: ${on.join(', ')}${modBreakActive() ? ` · break ${modBreakRemainingMin()}m` : (cfg.noJailOnMod ? ' · jail held' : '')}`;
+              const rx = (cfg.modVary && modVaryApplies()) ? modReactSummary() : '';
+              ms.textContent = `👮 Online: ${on.join(', ')}${modBreakActive() ? ` · break ${modBreakRemainingMin()}m` : rx ? ` · ${rx}` : (cfg.noJailOnMod ? ' · jail held' : '')}`;
               ms.style.color = 'var(--jb-danger)';
             } else {
-              ms.textContent = `✅ No staff online (checked ${fmtAgo(s.at)})`;
+              const rx = (cfg.modVary && modVaryApplies()) ? modReactSummary() : '';
+              ms.textContent = `✅ No staff online (checked ${fmtAgo(s.at)})${rx ? ` · ${rx}` : ''}`;
               ms.style.color = 'var(--jb-success)';
             }
           }
+        }
+        /* This player's personality, so you can see the five really differ. */
+        const mp = _shadow.querySelector('#jb-mod-persona');
+        if (mp) {
+          const t = playerTraits();
+          const ws = [['carry on', t.wIgnore], ['slow jail', t.wSlow]];
+          if (cfg.noJailOnMod) ws.push(['stop jail', t.wStop]);
+          if (cfg.modBreakOn)  ws.push(['break', t.wBreak]);
+          const sum = ws.reduce((a, w) => a + w[1], 0);
+          const mix = ws.map(([k, w]) => `${k} ${Math.round(100 * w / sum)}%`).join(' · ');
+          mp.textContent = !st.player ? 'Personality: waiting for the player name'
+            : !modVaryApplies() ? `${st.player}: alert only — switch on No Jail on Mod or the break to react`
+            : `${st.player}: ${mix} · reacts after ${t.lagLo.toFixed(0)}–${t.lagHi.toFixed(0)}m · back ${t.resLo.toFixed(0)}–${t.resHi.toFixed(0)}m after they leave · gives up after ~${t.patience}m · slow jail every ~${t.slowSec}s · action gap ${(t.jitLo/1000).toFixed(1)}–${(t.jitHi/1000).toFixed(1)}s`;
         }
       } catch(_){}
     }, 5000);
@@ -14176,6 +14392,7 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
         schedLoop(30000); return;
       }
       coffeeJustEnded(); lunchJustEnded(); // clear ended breaks
+      try { modReactTick(); } catch(_) {}   // a lagged per-player mod break (2000.327)
       /* Mod-online break. Sits with the other breaks rather than using `paused`,
        * so it expires by itself and the health bypass above still protects you —
        * being off the game for an hour shouldn't mean dying in it. */
