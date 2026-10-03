@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.327
+// @version      2000.328
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -36,7 +36,7 @@
 // @downloadURL  https://raw.githubusercontent.com/scoobyghub/v100/refs/heads/main/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.327
+/*  Jarvis Bot 2000.328
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -152,6 +152,32 @@
       console.log('[JB] Intentional logout — allowing');
       return;
     }
+    /* NEVER BOUNCE A SESSION THE SERVER HAS ALREADY ENDED (2000.328).
+     *
+     * The bounce below only makes sense if the session might still be alive.
+     * When it is not, /authenticated/crimes.aspx sends us straight back to
+     * login.aspx?act=out&auto=true, we bounce again, and that repeats for
+     * ever. Auto-login never runs because the redirect fires first. Reported
+     * live as a logout loop on that exact URL.
+     *
+     * Two exits, both letting the login page do its job:
+     *  · auto=true — the GAME logged us out (expiry, signed in elsewhere),
+     *    not a click. Nothing to undo.
+     *  · we already bounced in the last 60s and are back here — whatever the
+     *    URL says, the session is dead, and a second bounce can only loop.
+     * Either way the login handler then signs back in as usual. */
+    if (/[?&]auto=true\b/i.test(window.location.search)) {
+      console.warn('[JB] Game ended the session itself (auto=true) — not bouncing, letting login run');
+      return;
+    }
+    const BOUNCE_KEY = 'cbLogoutBounceTs';
+    const lastBounce = parseInt(localStorage.getItem(BOUNCE_KEY) || '0', 10);
+    if (lastBounce && Date.now() - lastBounce < 60000) {
+      localStorage.removeItem(BOUNCE_KEY);
+      console.warn('[JB] Back on the logout page within 60s of a bounce — session is dead, letting login run');
+      return;
+    }
+    localStorage.setItem(BOUNCE_KEY, String(Date.now()));
     // crimes.aspx rather than default.aspx (2000.323, by request) — it's the
     // one page every other "go somewhere safe" path in this script already
     // uses, so landing here after a bounced logout is the same as landing
@@ -167,7 +193,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.327';
+  const APP_VERSION = '2000.328';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
