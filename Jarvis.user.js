@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.329
+// @version      2000.331
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -36,7 +36,7 @@
 // @downloadURL  https://gist.githubusercontent.com/scoobyghub/32b6a0336551df6e3b3a036e39155fdc/raw/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.329
+/*  Jarvis Bot 2000.331
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -102,98 +102,13 @@
     } catch (e) {}
 })();
 
-(function blockLogoutRedirect() {
-  try {
-    /* THE FLAG MUST BE CONSUMED UNCONDITIONALLY, ON EVERY PAGE LOAD — not only
-     * ones whose URL still contains act=out (2000.326 fix). The old code only
-     * cleared cbLogoutIntent inside the "URL still has act=out" branch below.
-     * If the server's own redirect chain strips the query string once it's
-     * processed the logout — landing you on a plain /login.aspx with no
-     * act=out left in it, which is normal ASP.NET behaviour and NOT something
-     * this script controls — that clearing code never ran. The flag then sat
-     * at '1' in localStorage INDEFINITELY, silently defeating both guards
-     * below for every subsequent logout, deliberate or accidental: the click
-     * guard (line ~131) and the arrival-bounce (line ~140) both treat a set
-     * flag as "let it through, someone already decided this". One stuck flag
-     * from a single sleep/mod/watch-triggered logout — or even a single
-     * ordinary click on the site's own Logout link — could silently disable
-     * the entire protection from then on, which is exactly the shape of "we
-     * added a guard for this and it isn't working" reported live. Reading it
-     * once, up front, and clearing it immediately closes that gap regardless
-     * of what the rest of this page's URL looks like. */
-    const hadLogoutIntent = localStorage.getItem('cbLogoutIntent') === '1';
-    if (hadLogoutIntent) localStorage.removeItem('cbLogoutIntent');
-
-    /* Catch the CLICK, not just the arrival — added 2000.310. By the time the
-     * browser has already loaded login.aspx?act=out, the ASP.NET handler has
-     * almost certainly signed the session out server-side already, so bouncing
-     * back home below is a backstop, not a real fix; it leaves you looking at
-     * default.aspx while actually logged out. Capture-phase on the document so
-     * this runs ahead of the link's own default navigation AND ahead of any
-     * bubble-phase handler on the link itself (e.g. an onclick doing the same
-     * thing another way) — stopPropagation() here keeps the event from ever
-     * reaching the target, not just cancels navigation.
-     * Uses a per-click re-read of localStorage (not the hadLogoutIntent captured
-     * above), since a click can happen long after this IIFE's initial run and a
-     * later doLogout() may have set the flag again since. */
-    document.addEventListener('click', function (e) {
-      const link = e.target && e.target.closest && e.target.closest('a[href*="act=out" i]');
-      if (!link) return;
-      // A deliberate logout (doLogout()/sleep-mode sign-out) sets this flag
-      // first, so only an accidental/stray click is blocked.
-      if (localStorage.getItem('cbLogoutIntent') === '1') return;
-      e.preventDefault();
-      e.stopPropagation();
-      console.warn('[JB] Blocked click on logout link:', link.href);
-    }, true);
-
-    if (!window.location.search.includes('act=out')) return;
-    if (hadLogoutIntent) {
-      console.log('[JB] Intentional logout — allowing');
-      return;
-    }
-    /* NEVER BOUNCE A SESSION THE SERVER HAS ALREADY ENDED (2000.328).
-     *
-     * The bounce below only makes sense if the session might still be alive.
-     * When it is not, /authenticated/crimes.aspx sends us straight back to
-     * login.aspx?act=out&auto=true, we bounce again, and that repeats for
-     * ever. Auto-login never runs because the redirect fires first. Reported
-     * live as a logout loop on that exact URL.
-     *
-     * Two exits, both letting the login page do its job:
-     *  · auto=true — the GAME logged us out (expiry, signed in elsewhere),
-     *    not a click. Nothing to undo.
-     *  · we already bounced in the last 60s and are back here — whatever the
-     *    URL says, the session is dead, and a second bounce can only loop.
-     * Either way the login handler then signs back in as usual. */
-    if (/[?&]auto=true\b/i.test(window.location.search)) {
-      console.warn('[JB] Game ended the session itself (auto=true) — not bouncing, letting login run');
-      return;
-    }
-    const BOUNCE_KEY = 'cbLogoutBounceTs';
-    const lastBounce = parseInt(localStorage.getItem(BOUNCE_KEY) || '0', 10);
-    if (lastBounce && Date.now() - lastBounce < 60000) {
-      localStorage.removeItem(BOUNCE_KEY);
-      console.warn('[JB] Back on the logout page within 60s of a bounce — session is dead, letting login run');
-      return;
-    }
-    localStorage.setItem(BOUNCE_KEY, String(Date.now()));
-    // crimes.aspx rather than default.aspx (2000.323, by request) — it's the
-    // one page every other "go somewhere safe" path in this script already
-    // uses, so landing here after a bounced logout is the same as landing
-    // here after anything else, not a special case to reason about.
-    console.log('[JB] Logout URL intercepted — redirecting to crimes.aspx');
-    window.location.replace('/authenticated/crimes.aspx');
-  } catch (_) {}
-})();
-
 (function () {
   'use strict';
 
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.329';
+  const APP_VERSION = '2000.331';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -1049,8 +964,17 @@
       return btn && !btn.disabled && u && u.value.length > 0 && p && p.value.length > 0;
     }
 
+    /* The stored defaults are 'username' / 'password' (see LOGIN). This only
+     * tested the older 'your_*_here' placeholders, so a fresh install typed the
+     * literal word "username" into the form and tried to log in with it. */
+    function credsMissing() {
+      const u = String(LOGIN.user || '').trim(), pw = String(LOGIN.pass || '');
+      return !u || !pw || u === 'your_username_here' || pw === 'your_password_here' ||
+             (u === 'username' && pw === 'password');
+    }
+
     function fillCreds() {
-      if (LOGIN.user === 'your_username_here' || LOGIN.pass === 'your_password_here') {
+      if (credsMissing()) {
         showOverlay('⚠️ Set credentials in settings'); return false;
       }
       const u = document.getElementById(UID);
@@ -1060,7 +984,7 @@
     }
 
     function canAuto() {
-      if (LOGIN.user === 'your_username_here' || LOGIN.pass === 'your_password_here') return false;
+      if (credsMissing()) return false;
       if (!LOGIN.autoSubmit) { showOverlay('Credentials filled.\nSolve captcha manually.'); return false; }
       return true;
     }
@@ -1215,7 +1139,7 @@
       const owUntil = GM_getValue('cbOwLogoutUntil', 0);
       if (owUntil && Date.now() < owUntil) {
         const remMin = Math.ceil((owUntil - Date.now()) / 60000);
-        showOverlay(`🚪 Watched player online\\nAuto-login paused (${remMin}m left)`);
+        showOverlay(`🚪 Watched player online\nAuto-login paused (${remMin}m left)`);
         console.log('[JB Login] Watch-logout active — skipping auto-login for', remMin, 'min');
         setTimeout(() => location.reload(), 60000);
         return;
@@ -2474,22 +2398,19 @@
 
   /* === SESSION LOGOUT ===
    * Ends the session properly (real logout link, or the act=out URL) instead of
-   * leaving it open to time out. Sets cbLogoutIntent first so the
-   * blockLogoutRedirect guard at the top lets this one through. Used by both
-   * scheduled sleep and the online-watch logout action.
+   * leaving it open to time out. Used by both scheduled sleep and the
+   * online-watch logout action.
    */
   function doLogout(reason) {
     try {
       try { tabs.release(); } catch(_) {}
       try { stopKaWorker(); stopKaAudio(); releaseWakeLock(); } catch(_) {}
-      localStorage.setItem('cbLogoutIntent', '1');
       const link = document.querySelector('a[href*="act=out" i]');
       const url  = link ? link.href : '/authenticated/default.aspx?act=out';
       console.log('[JB][LOGOUT]', reason || 'logout', '→', url);
       window.location.href = url;
     } catch (e) {
       console.warn('[JB][LOGOUT] failed:', e.message);
-      try { localStorage.removeItem('cbLogoutIntent'); } catch(_) {}
     }
   }
 
@@ -2509,7 +2430,7 @@
       // No parking: hold on the login page for the configured window instead.
       GM_setValue('cbOwLogoutUntil', Date.now() + mins * 60000);
     }
-    if (ow.telegram) tgMsg('online', `🚪 <b>Logging out</b> — ${esc(name)} online\\n${st.player||'?'} | ${ow.logoutPark ? 'parked off-site' : 'back in ' + mins + 'm'}`);
+    if (ow.telegram) tgMsg('online', `🚪 <b>Logging out</b> — ${esc(name)} online\n${st.player||'?'} | ${ow.logoutPark ? 'parked off-site' : 'back in ' + mins + 'm'}`);
     setTimeout(() => doLogout('watched player online: ' + name), 2000);
   }
 
@@ -2564,6 +2485,9 @@
   }
 
   let paused = false;
+  // Held while the Settings window is open — separate from `paused` so closing
+  // Settings can never release a staff-check / anti-bot / watch-stop pause.
+  let _uiPaused = false;
 
   /* === HARD HALT (the ALL switch) ===
    *
@@ -2866,7 +2790,7 @@
     if (_shadow) {
       const el = _shadow.querySelector('#jb-status');
       const ji = st.inJail ? '🔒' : '✅';
-      const pi = st.pending ? `<br>Pending: ${st.pending}` : '';
+      const pi = st.pending ? `<br>Pending: ${esc(st.pending)}` : '';
       if (el) el.innerHTML = `${esc(msg)}<br>Player: ${esc(st.player)}<br>Jail: ${ji}${pi}<br>Crime: ${fmtAgo(st.lastCrime)}<br>GTA: ${fmtAgo(st.lastGta)}<br>Booze: ${fmtAgo(st.lastBooze)}`;
     }
     console.log(APP_TAG, msg);
@@ -2875,19 +2799,26 @@
   /* === TELEGRAM CHECKS === */
 
   const TG_SEND_TIMEOUT = 15000;
-  let _lastHealthAlert = 0;
+  /* The throttle was a plain variable with a 10s gap — and a page lives a few
+   * seconds here, so it reset on every navigation and a low-health spell sent
+   * a Telegram on practically every page load. Persisted now, and 5 minutes. */
+  const LOW_HP_ALERT_GAP_MS = 5 * 60 * 1000;
 
   function checkLowHp() {
     if (!tg.enabled) return false;
     const hp = getHp();
     const now = Date.now();
     if (hp < cfg.minHealth) {
-      if (now - _lastHealthAlert >= 10000) {
-        _lastHealthAlert = now;
+      const last = parseInt(localStorage.getItem('cbLowHpAlertAt') || '0', 10) || 0;
+      if (now - last >= LOW_HP_ALERT_GAP_MS) {
+        localStorage.setItem('cbLowHpAlertAt', String(now));
         tgMsg('health', `🏥 <b>LOW HEALTH</b>\n${st.player||'?'} | ${hp}% (min: ${cfg.minHealth}%)\n${st.health ? '💊 Auto-buy ON' : '⚠️ Auto-buy OFF'}`);
         return true;
       }
-    } else { _lastHealthAlert = 0; }
+    } else if (document.querySelector('#ctl00_userInfo_lblhealth')) {
+      // Only a REAL reading clears it — getHp() answers 100 when there is no status bar.
+      localStorage.removeItem('cbLowHpAlertAt');
+    }
     return false;
   }
 
@@ -3977,6 +3908,7 @@
       const r = await fetch(url, { method:'GET', headers:{'Cache-Control':'no-cache'}, credentials:'same-origin' });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const doc = new DOMParser().parseFromString(await r.text(), 'text/html');
+      if (isLoginDoc(doc)) return null;   // session gone — has neither heading, so it would read as Running
       return parseOcDtmDoc(doc, 'DTM', 'Start a Drugs Transportation Mission');
     } catch(e) { console.error(APP_TAG,'DTM timer err',e); return null; }
   }
@@ -3987,6 +3919,7 @@
       const r = await fetch(url, { method:'GET', headers:{'Cache-Control':'no-cache'}, credentials:'same-origin' });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const doc = new DOMParser().parseFromString(await r.text(), 'text/html');
+      if (isLoginDoc(doc)) return null;
       return parseOcDtmDoc(doc, 'OC', 'Start an Organized Crime');
     } catch(e) { console.error(APP_TAG,'OC timer err',e); return null; }
   }
@@ -4238,7 +4171,7 @@
         const dm = txt.match(/(\d{2})-(\d{2})-(\d{4})\s+(\d{2}):(\d{2}):(\d{2})/);
         if (dm) {
           const [,dd,mm,yy,H,M,S] = dm;
-          const ts = Date.UTC(+yy, +mm-1, +dd, +H, +M, +S);
+          const ts = amsterdamWallclockToTs(+yy, +mm, +dd, +H, +M, +S);   // game clock, not UTC
           localStorage.setItem(LS_PROT_END, String(ts));
           localStorage.setItem(LS_PROT_ST, 'active');
           return;
@@ -4961,6 +4894,10 @@
       const grid = doc.querySelector('#ctl00_main_gridMail');
       if (!grid) return;
       const rows = [...grid.querySelectorAll('tr')].slice(1);
+      /* The new-mail watermark as it stood BEFORE this poll. Rows are newest
+       * first, and comparing each against a watermark the first row had already
+       * raised meant two mails arriving inside one poll only ever alerted once. */
+      const mailBase = GM_getValue('cbLastNotifiedId', null);
 
       for (const r of rows) {
         const link = [...r.querySelectorAll('a[href*="mailbox.aspx"]')].find(a => /[?&]id=\d+/i.test(a.getAttribute('href')||''));
@@ -5227,7 +5164,7 @@
 
         // Regular mail notification
         if (tg.enabled && tg.messages) {
-          const lastNot = GM_getValue('cbLastNotifiedId', null);
+          const lastNot = mailBase !== null ? mailBase : GM_getValue('cbLastNotifiedId', null);
           if (lastNot === null) {
             let maxId = 0;
             for (const row of rows) {
@@ -5235,11 +5172,11 @@
               if (rl) { const rid = parseInt(parseMailId(rl.getAttribute('href')||''),10)||0; if (rid > maxId) maxId = rid; }
             }
             GM_setValue('cbLastNotifiedId', maxId);
-            break;
+            continue;   // was `break`, which also skipped invites further down the inbox
           }
-          const nId = parseInt(mailId);
+          const nId = parseInt(mailId, 10) || 0;
           if (nId > lastNot) {
-            GM_setValue('cbLastNotifiedId', nId);
+            if (nId > (Number(GM_getValue('cbLastNotifiedId', 0)) || 0)) GM_setValue('cbLastNotifiedId', nId);
             const ts = parseTmnDate(rowTxt);
             if (isOlderThan(ts, 5*60*1000)) continue;
             try {
@@ -7701,7 +7638,7 @@
     if (modJailBlocked()) return;
     if (jailLimitReached()) {
       // Safety: should already be off, but double-check
-      if (st.jail) { st.jail = false; saveSt(); }
+      if (st.jail) { st.jail = false; saveSt(); repaintRibbon(); }
       return;
     }
     const now = Date.now();
@@ -7983,6 +7920,7 @@
 
   function disableCrusher(reason) {
     st.crusherOwned = false; st.crusher = false; saveSt();
+    try { repaintRibbon(); } catch(_){}
     localStorage.removeItem(LS_CRUSH_NAME); localStorage.removeItem(LS_CRUSH_LOOP);
     tgMsg('crusher', `⚙️ <b>Crusher Off</b>\n${st.player||'?'} | ${reason}`);
   }
@@ -8037,7 +7975,7 @@
               if (isErr && st.crusherOwned !== true) {
                 const cnt = parseInt(localStorage.getItem(LS_CRUSH_LOOP)||'0',10)+1;
                 localStorage.setItem(LS_CRUSH_LOOP, String(cnt));
-                if (cnt >= CRUSH_LOOP_MAX) { disableCrusher(`${CRUSH_LOOP_MAX} fails`); localStorage.removeItem(LS_CRUSH_NAME); return; }
+                if (cnt >= CRUSH_LOOP_MAX) { disableCrusher(`${CRUSH_LOOP_MAX} fails`); localStorage.removeItem(LS_CRUSH_NAME); st.acting = false; st.action = ''; st.lastGarage = now; GM_setValue('cbActStart',0); saveSt(); return; }
               } else { localStorage.removeItem(LS_CRUSH_LOOP); if(st.crusherOwned!==true){st.crusherOwned=true;saveSt();} }
             } else { localStorage.removeItem(LS_CRUSH_LOOP); if(st.crusherOwned!==true){st.crusherOwned=true;saveSt();} }
             localStorage.removeItem(LS_CRUSH_NAME);
@@ -8158,8 +8096,24 @@
     return m ? parseFloat(m[1].replace(/,/g, '')) : null;
   }
 
-  // Owned already? The buy link is absent once you have it — see doScrap.
-  function armVehDone() { return GM_getValue('cbArmVehDone', false); }
+  /* Armoured Vehicle protection is bought ONCE PER PLAYER, ever (2000.331, by
+   * request). Keyed by player name, so a different account logging in on the
+   * same browser still gets its own one purchase, and a player who has had it
+   * is never charged again — even if the buy link turns up on the page later.
+   * Until the player name is known we report "done", so nothing is ever bought
+   * on behalf of an unknown account. The old device-wide cbArmVehDone flag is
+   * carried over to whichever player is seen first. */
+  function armVehKey() { return 'cbArmVehDone_' + String(st.player || '').trim().toLowerCase(); }
+  function armVehDone() {
+    if (!String(st.player || '').trim()) return true;
+    if (GM_getValue(armVehKey(), false)) return true;
+    if (GM_getValue('cbArmVehDone', false)) {          // pre-331 flag — migrate once
+      GM_setValue(armVehKey(), true); GM_deleteValue('cbArmVehDone');
+      return true;
+    }
+    return false;
+  }
+  function markArmVehDone() { if (String(st.player || '').trim()) GM_setValue(armVehKey(), true); }
 
   function scrapDue() {
     /* The Armoured Vehicle protection is bought ON the scrap page, so this used
@@ -8224,11 +8178,12 @@
     if (!protLink && fmjLink && !armVehDone()) {
       /* Store page rendered, FMJ link present, protection link gone — it is
        * already owned. Record that so "protection only" stops bringing us back. */
-      GM_setValue('cbArmVehDone', true);
+      markArmVehDone();
       console.log(APP_TAG, '[SCRAP] Armoured Vehicle protection already owned — not checking again');
     }
 
-    if (protLink && cfg.scrapProt) {
+    // !armVehDone(): one purchase per player, ever — see armVehDone.
+    if (protLink && cfg.scrapProt && !armVehDone()) {
       if (scrap < SCRAP_COST) {
         console.log(APP_TAG, `[SCRAP] Armoured Vehicle needs ${SCRAP_COST} scrap, balance is ${scrap} — waiting`);
         done(SCRAP_IDLE_MS, `♻️ Need ${SCRAP_COST} scrap for the vehicle`);
@@ -8236,7 +8191,7 @@
       }
       console.log(APP_TAG, `[SCRAP] Buying Armoured Vehicle protection (${SCRAP_COST} scrap, balance ${scrap})`);
       tgMsg('crusher', `🛡️ <b>Armoured Vehicle</b>\n${st.player||'?'} | protection bought (${SCRAP_COST} scrap)`);
-      GM_setValue('cbArmVehDone', true);
+      markArmVehDone();
       setScrapNext(8000);
       await humanWait([2200, 2600]);   // stay clear of the ~2s page limiter
       scrapPostBack('ctl00$main$lbBuyArmVehProtection');
@@ -8313,7 +8268,7 @@
     console.log(`${APP_TAG}[HQ] Hold HQ off — ${why}`);
     tgMsg('holdHq', `🏠 <b>Hold HQ off</b>\n${st.player||'?'} | ${esc(why)}`);
     try { const cb = _shadow && _shadow.querySelector('#jb-holdhq-on'); if (cb) cb.checked = false; } catch(_){}
-    try { updateHqUI(); } catch(_){}
+    try { updateHqUI(); repaintRibbon(); } catch(_){}
   }
 
   function updateHqUI() {
@@ -9066,45 +9021,50 @@
         transition: background .15s;
       }
       .jb-hbtn:hover { background: rgba(255,255,255,.3); }
-      .jb-ribbon {
-        background: var(--jb-ribbon-bg); border-bottom: 1px solid var(--jb-ribbon-border);
-        padding: 4px 8px; display: flex; gap: 6px; flex-wrap: wrap;
+      /* ONE SWITCH DESIGN ON THE FRONT PANEL (2000.331).
+       *
+       * The panel had grown four different toggle looks: coloured ribbon
+       * buttons, pills with a hidden checkbox, pills with a visible native
+       * checkbox plus an underlined link, and the slider switch Settings uses.
+       * Every toggle is now the slider (.jb-switch), laid out two to a row in
+       * named groups, and a feature with its own window gets a separate ⚙
+       * button beside its switch — so "turn it on" and "configure it" are two
+       * different targets that can't be mistaken for each other. Every control
+       * id is unchanged, so all the existing handlers still bind. */
+      .jb-tgrid { display: grid; grid-template-columns: 1fr 1fr; gap: 1px 10px; }
+      .jb-tog { display: flex; align-items: center; gap: 3px; min-width: 0; }
+      .jb-tog .jb-switch { flex: 1 1 auto; min-width: 0; }
+      .jb-tog .jb-switch .jb-tl { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .jb-tog.jb-wide { grid-column: 1 / -1; }
+      .jb-cfg {
+        flex: 0 0 auto; width: 18px; height: 18px; padding: 0; line-height: 16px;
+        background: transparent; color: var(--jb-text-sec); border: 1px solid var(--jb-border);
+        border-radius: 3px; cursor: pointer; font-size: 10px; font-family: inherit;
+        transition: background .15s, color .15s, border-color .15s;
       }
-      .jb-ribbon-btn {
-        background: var(--jb-ribbon-on); color: var(--jb-ribbon-on-text); border: none; border-radius: 2px;
-        padding: 3px 8px; font-size: 10px; font-weight: 600; cursor: pointer;
-        font-family: inherit; transition: background .15s, color .15s;
+      .jb-cfg:hover { background: var(--jb-accent); color: #fff; border-color: var(--jb-accent); }
+      .jb-switch input[type="checkbox"]:disabled { opacity: .4; cursor: not-allowed; }
+      .jb-switch:has(input:disabled) { cursor: not-allowed; color: var(--jb-text-ter); }
+      /* The power switch: wider, so it reads as THE switch rather than one more toggle. */
+      .jb-power {
+        display: flex; align-items: center; justify-content: space-between; gap: 8px;
+        margin-top: 4px; padding: 4px 8px; border-radius: 3px;
+        background: var(--jb-surface-alt); border: 1px solid var(--jb-border);
       }
-      .jb-ribbon-btn:hover { filter: brightness(1.15); }
-      .jb-ribbon-btn.off { background: var(--jb-ribbon-off); color: var(--jb-ribbon-off-text); }
-      /* .jb-ribbon-btn built from a wrapped checkbox instead of a plain <button> —
-       * Crusher/Props/Hover in the ribbon itself, and the whole front-panel
-       * quick-toggle row below it (2000.31x, replacing an earlier coloured-pill
-       * attempt the user wasn't keen on). Same solid on/off fill as the plain
-       * ribbon buttons, driven by :has() instead of the .off class/inline style
-       * those use — the two mechanisms don't conflict since a plain <button> has
-       * no checkbox descendant for :has() to match. The checkbox itself is
-       * visually hidden (still present, still what every existing change-handler
-       * reads/toggles — zero JS changes needed) since the whole pill's fill IS
-       * the on/off indicator, same as the plain ribbon buttons which have no
-       * separate toggle graphic either. */
-      .jb-ribbon-btn:has(input[type="checkbox"]:not(:checked)) { background: var(--jb-ribbon-off); color: var(--jb-ribbon-off-text); }
-      .jb-ribbon-btn:has(input[type="checkbox"]:disabled) { opacity: .45; cursor: not-allowed; filter: none; }
-      .jb-ribbon-btn input[type="checkbox"] { position: absolute; opacity: 0; width: 1px; height: 1px; pointer-events: none; }
-      /* The four <div>-wrapped items (Create DTM/Whitelist/Create OC/Watch) get
-       * a REAL, visible, directly clickable checkbox instead (2000.319) — no
-       * <label> forwarding is possible there (the embedded link needs its own
-       * separate click target from the toggle), and the delegated-click-to-
-       * hidden-checkbox approach tried in 2000.316/318 gave them a hit area of
-       * "whatever sliver of background isn't covered by the text", which was
-       * too small to reliably hit — and needed a fragile re-entrancy guard to
-       * avoid a synthetic-click feedback loop. A real, native checkbox has
-       * neither problem: its own click target, no forwarding code at all. */
-      div.jb-ribbon-btn input[type="checkbox"] {
-        position: static; opacity: 1; width: 13px; height: 13px; pointer-events: auto;
-        margin: 0 4px 0 0; vertical-align: middle; accent-color: var(--jb-ribbon-on);
-      }
-      .jb-body { padding: 8px 10px; max-height: 420px; overflow-y: auto; }
+      .jb-power .jb-switch input[type="checkbox"] { width: 34px; height: 18px; border-radius: 9px; }
+      .jb-power .jb-switch input[type="checkbox"]::after { width: 14px; height: 14px; }
+      .jb-power .jb-switch input[type="checkbox"]:checked::after { transform: translateX(16px); }
+      /* Foldable groups. A folded group shows how many of its switches are on,
+       * so you can see the state of the whole panel without opening anything. */
+      .jb-fold { cursor: pointer; display: flex; justify-content: space-between; align-items: center; user-select: none; }
+      .jb-fold:hover { color: var(--jb-accent-hover); }
+      .jb-fold .jb-caret { display: inline-block; width: 10px; transition: transform .15s; }
+      .jb-sect.folded .jb-caret { transform: rotate(-90deg); }
+      .jb-sect.folded .jb-fold-body { display: none; }
+      .jb-sect.folded .jb-sect-title { margin-bottom: 0; }
+      .jb-oncount { font-size: 9px; font-weight: 600; letter-spacing: 0; text-transform: none; color: var(--jb-text-ter); }
+      .jb-oncount.on { color: var(--jb-success); }
+      .jb-body { padding: 8px 10px; max-height: 460px; overflow-y: auto; }
       .jb-body::-webkit-scrollbar { width: 6px; }
       .jb-body::-webkit-scrollbar-thumb { background: var(--jb-border-strong); border-radius: 3px; }
       .jb-sect { margin-bottom: 8px; }
@@ -9114,12 +9074,6 @@
         border-bottom: 1px solid var(--jb-border); padding-bottom: 2px;
       }
       .jb-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 12px; }
-      /* Front-panel quick-toggle row only (Settings' own .jb-grid checkbox lists —
-       * Telegram messages, SG push fields, etc. — keep the plain .jb-switch look,
-       * which reads better for a long vertical list) — just the flex-wrap layout;
-       * the button look itself now comes from .jb-ribbon-btn above. */
-      .jb-quickgrid { display: flex; flex-wrap: wrap; gap: 4px; }
-      .jb-quickgrid .jb-ribbon-btn { font-size: 10px; padding: 3px 7px; }
       .jb-switch {
         display: flex; align-items: center; gap: 6px; padding: 2px 0;
         cursor: pointer; user-select: none; font-size: 11px;
@@ -9201,6 +9155,25 @@
       }
       .jb-pane { display: none; }
       .jb-pane.active { display: block; }
+      /* Settings search — finds a setting by name across all five tabs, so you
+       * don't have to remember which tab something was filed under. */
+      .jb-find { position: relative; flex: 1 1 100%; }
+      .jb-find input { width: 100%; }
+      .jb-find-res {
+        display: none; position: absolute; left: 0; right: 0; top: 100%; margin-top: 2px;
+        background: var(--jb-surface); border: 1px solid var(--jb-border-strong); border-radius: 3px;
+        box-shadow: var(--jb-shadow); max-height: 220px; overflow-y: auto; z-index: 3;
+      }
+      .jb-find-res.open { display: block; }
+      .jb-find-item {
+        display: flex; justify-content: space-between; gap: 6px; padding: 4px 8px;
+        font-size: 11px; cursor: pointer; border-bottom: 1px solid var(--jb-border);
+      }
+      .jb-find-item:last-child { border-bottom: none; }
+      .jb-find-item:hover, .jb-find-item.sel { background: var(--jb-accent-light); }
+      .jb-find-item .jb-find-tab { color: var(--jb-text-ter); font-size: 9px; white-space: nowrap; }
+      @keyframes jbFlash { 0%,100% { background: transparent; } 30% { background: var(--jb-accent-light); } }
+      .jb-flash { animation: jbFlash 1.4s ease 2; border-radius: 3px; }
 
       /* Text size. Much of the panel carries INLINE font-size (9-11px) written
          straight into the markup, so a plain font-size bump on .jb-root moves
@@ -9211,7 +9184,7 @@
       .jb-root.jb-lg .jb-sub, .jb-root.jb-lg .jb-switch,
       .jb-root.jb-lg .jb-timer-grid, .jb-root.jb-lg .jb-input,
       .jb-root.jb-lg label.jb-label, .jb-root.jb-lg .jb-btn,
-      .jb-root.jb-lg .jb-ribbon-btn, .jb-root.jb-lg .jb-tab,
+      .jb-root.jb-lg .jb-oncount, .jb-root.jb-lg .jb-tab,
       .jb-root.jb-lg .jb-sect-title, .jb-root.jb-lg .jb-footer,
       .jb-root.jb-lg [style*="font-size:9px"], .jb-root.jb-lg [style*="font-size:10px"],
       .jb-root.jb-lg [style*="font-size:11px"] { font-size: 12px !important; }
@@ -9221,7 +9194,7 @@
       .jb-root.jb-xl .jb-sub, .jb-root.jb-xl .jb-switch,
       .jb-root.jb-xl .jb-timer-grid, .jb-root.jb-xl .jb-input,
       .jb-root.jb-xl label.jb-label, .jb-root.jb-xl .jb-btn,
-      .jb-root.jb-xl .jb-ribbon-btn, .jb-root.jb-xl .jb-tab,
+      .jb-root.jb-xl .jb-oncount, .jb-root.jb-xl .jb-tab,
       .jb-root.jb-xl .jb-sect-title, .jb-root.jb-xl .jb-footer,
       .jb-root.jb-xl [style*="font-size:9px"], .jb-root.jb-xl [style*="font-size:10px"],
       .jb-root.jb-xl [style*="font-size:11px"] { font-size: 14px !important; }
@@ -9238,6 +9211,21 @@
     `;
     _shadow.appendChild(style);
 
+    /* Front-panel building blocks — see "ONE SWITCH DESIGN" in the CSS above.
+     * tog(): one switch, optionally with a ⚙ button that opens its window.
+     * grp(): a named, foldable group of switches. */
+    const tog = (id, label, o = {}) =>
+      `<div class="jb-tog${o.wide ? ' jb-wide' : ''}">` +
+        `<label class="jb-switch" title="${esc(o.title || '')}"><input type="checkbox" id="${id}" ${o.on ? 'checked' : ''}> ` +
+        `<span class="jb-tl">${label}</span>${o.extra || ''}</label>` +
+        (o.cfg ? `<button class="jb-cfg" id="${o.cfg}" title="${esc(o.cfgTitle || 'Open its settings')}">⚙</button>` : '') +
+      `</div>`;
+    const grp = (key, title, body) =>
+      `<div class="jb-sect" data-fold="${key}">` +
+        `<div class="jb-sect-title jb-fold"><span><span class="jb-caret">▾</span> ${title}</span><span class="jb-oncount"></span></div>` +
+        `<div class="jb-fold-body"><div class="jb-tgrid">${body}</div></div>` +
+      `</div>`;
+
     const root = document.createElement('div');
     root.className = 'jb-root';
     root.innerHTML = `
@@ -9252,37 +9240,63 @@
       </div>
 
       <div id="jb-panel-body">
-        <div class="jb-ribbon">
-          <button class="jb-ribbon-btn ${st.crime?'':'off'}" id="jb-r-crime">Crime</button>
-          <button class="jb-ribbon-btn ${st.gta?'':'off'}" id="jb-r-gta">GTA</button>
-          <button class="jb-ribbon-btn ${st.booze?'':'off'}" id="jb-r-booze">Booze</button>
-          <button class="jb-ribbon-btn ${st.jail?'':'off'}" id="jb-r-jail">Jail</button>
-          <button class="jb-ribbon-btn ${st.health?'':'off'}" id="jb-r-health">Health</button>
-          <button class="jb-ribbon-btn ${st.garage?'':'off'}" id="jb-r-garage">Garage</button>
-          <button class="jb-ribbon-btn ${st.autoOC?'':'off'}" id="jb-r-oc" title="Auto-ACCEPT organised crime invites sent to you">OC</button>
-          <button class="jb-ribbon-btn ${st.autoDTM?'':'off'}" id="jb-r-dtm" title="Auto-ACCEPT DTM invites sent to you (not the same as Create DTM)">DTM</button>
-          <label class="jb-ribbon-btn" title="Crusher for owned cars"><input type="checkbox" id="jb-crusher"> Crusher</label>
-          <label class="jb-ribbon-btn" title="Property drop watch"><input type="checkbox" id="jb-prop-on"> Props</label>
-          <label class="jb-ribbon-btn" title="Player hover tooltip (reload to apply)"><input type="checkbox" id="jb-hover-on"> Hover</label>
-        </div>
-
         <div class="jb-body">
           <div class="jb-sect">
-            <div class="jb-sect-title">Status</div>
-            <div class="jb-grid" style="grid-template-columns: 1fr 1fr;">
-              <div class="jb-flex"><span class="jb-timer-label">Player:</span> <span id="jb-player-badge">${esc(st.player||'—')}</span></div>
+            <div class="jb-grid" style="grid-template-columns: 1fr auto;">
+              <div class="jb-flex" style="min-width:0"><span class="jb-timer-label">Player:</span> <span id="jb-player-badge" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(st.player||'—')}</span></div>
               <div class="jb-flex"><span class="jb-timer-label">Mod:</span><span id="jb-mod-light" title="Staff watch" style="display:inline-flex;align-items:center"><span class="jb-status-dot" id="jb-mod-light-dot" style="color:var(--jb-text-ter)"></span></span></div>
-              <div class="jb-flex">
-                <label class="jb-switch"><input type="checkbox" id="jb-all-toggle"> <span style="font-weight:600" id="jb-all-label">ALL</span></label>
-              </div>
-              <div class="jb-flex" style="justify-content:flex-end; min-width:0;">
-                <label class="jb-switch" title="Stop attempting jail busts while staff are online. Jail runs every few seconds by default, so it is by far the noisiest thing Jarvis does — nothing else is suppressed."><input type="checkbox" id="jb-mod-nojail" ${cfg.noJailOnMod?'checked':''}> ⛓️ No Jail on Mod</label>
-              </div>
+            </div>
+            <div class="jb-power">
+              <label class="jb-switch"><input type="checkbox" id="jb-all-toggle"> <span style="font-weight:700;font-size:12px" id="jb-all-label">ALL</span></label>
+              <span class="jb-sub" style="text-align:right">power — off stops everything</span>
             </div>
           </div>
 
-          <div class="jb-sect">
-            <div class="jb-sect-title">Timers</div>
+          ${grp('actions', 'Actions',
+            tog('jb-r-crime',  '👜 Crime',  { on: st.crime }) +
+            tog('jb-r-gta',    '🏎️ GTA',    { on: st.gta }) +
+            tog('jb-r-booze',  '🍺 Booze',  { on: st.booze }) +
+            tog('jb-r-jail',   '⛓️ Jail',   { on: st.jail }) +
+            tog('jb-r-health', '💊 Health', { on: st.health, title: 'Keep health topped up to the target in Settings → Assets.' }) +
+            tog('jb-r-garage', '🏪 Garage', { on: st.garage, title: 'Sell, crush and repair stolen cars on a timer — per-car rules in Settings → Assets.' }) +
+            tog('jb-crusher',  '♻️ Crusher', { title: 'Send crushable cars to your crusher instead of selling them. Greyed out if you do not own one.' })
+          )}
+
+          ${grp('ocdtm', 'OC &amp; DTM',
+            tog('jb-r-oc',  '📨 OC invites',  { on: st.autoOC,  title: 'Auto-ACCEPT organised crime invites other people send you.' }) +
+            tog('jb-r-dtm', '📨 DTM invites', { on: st.autoDTM, title: 'Auto-ACCEPT DTM invites other people send you. Not the same as Create DTM.' }) +
+            tog('jb-create-oc',  '🏢 Create OC',  { cfg: 'jb-oc-link',  cfgTitle: 'OC team, type, schedule and repeat',
+                                                   title: 'START an OC yourself as leader, inviting the team set in its ⚙ window.' }) +
+            tog('jb-create-dtm', '🚚 Create DTM', { cfg: 'jb-dtm-link', cfgTitle: 'DTM partner, schedule, repeat and kick rules',
+                                                   title: 'START a DTM yourself and invite a partner — set them in its ⚙ window.' }) +
+            tog('jb-auto-oclist',  '📋 OC List',  { on: st.autoOcList,  title: 'ADVERTISE yourself on the OC list (ocads.aspx) when an OC is ready, so others can invite you.' }) +
+            tog('jb-auto-dtmlist', '📋 DTM List', { on: st.autoDtmList, title: 'ADVERTISE yourself on the DTM list (ocads.aspx) when a DTM is ready, so others can invite you.' }) +
+            tog('jb-wl-on', '🛂 Whitelist', { cfg: 'jb-wl-link', cfgTitle: 'Whitelist, blacklist and allied/safe-only filters',
+                                             title: 'Only accept invites from the players on your whitelist. The blacklist always applies.' }) +
+            tog('jb-notify-ready', '🔔 Ready alerts', { title: 'Telegram ping when an OC or DTM comes off cooldown, plus the repeat reminders while it sits unused. Only the OC/DTM ready pings — every other alert lives in Settings → Alerts, and script checks are never gated by it.' })
+          )}
+
+          ${grp('safety', 'Travel &amp; safety',
+            tog('jb-auto-travel', '✈️ Auto Travel', { on: st.autoTravel, title: 'Fly to the hot city by private jet whenever the jet is ready.' }) +
+            tog('jb-holdhq-on',   '🏠 Hold HQ',     { on: cfg.holdHqOn, title: "PANIC: hide inside your network HQ so you can't be shot. Pauses everything else, re-enters until the cap, then switches itself off. Never enters a damaged HQ — if it's destroyed while you're inside, you die." }) +
+            tog('jb-mod-nojail',  '👮 No jail on mod', { on: cfg.noJailOnMod, wide: true,
+                                                     title: 'Stop attempting jail busts while staff are online. Jail is by far the noisiest thing Jarvis does — nothing else is suppressed. Needs "Watch for staff online" in Settings → Human.' })
+          )}
+
+          ${grp('extras', 'Watch &amp; extras',
+            tog('jb-ow-on',   '🟢 Watch', { cfg: 'jb-ow-link', cfgTitle: 'Watched players, groups and per-player actions',
+                                           title: 'Master switch for Online Watch — off means neither group can fire. Groups 1 and 2 have their own switches in its ⚙ window.' }) +
+            tog('jb-prop-on', '🏚️ Props', { title: 'Property drop watch' }) +
+            tog('jb-hover-on','🔍 Hover', { title: 'Player hover tooltip (switching off needs a reload)' }) +
+            tog('jb-sg-on',   '🎨 SG lists', { title: 'Colour player links from your Starvinggeeks lists — watched (orange), safe (green), allied (blue). Read-only: three GETs, nothing is ever sent.',
+                                              extra: ' <span id="jb-sg-status" style="font-size:9px;letter-spacing:0.02em;flex:0 0 auto">—</span>' }) +
+            tog('jb-sgpush-on',  '📤 SG Push', { on: sgPush.on, title: 'Send the fields ticked in Settings → System → Starvinggeeks Data Push (all off by default) to starvinggeeks.net every few minutes. This switch alone sends nothing without at least one field ticked there.' }) +
+            tog('jb-tablet-mode','📱 Tablet',  { on: cfg.tabletMode, title: 'Ultra-low-resource preset for an old/low-RAM device. Pushes panel refresh, background polls and the XP backstop to their slowest settings, and switches off Hover, SG lists, Props, Silent audio and the Worker ticker. Switching this back off restores exactly what you had before.' })
+          )}
+
+          <div class="jb-sect" data-fold="timers">
+            <div class="jb-sect-title jb-fold"><span><span class="jb-caret">▾</span> Timers</span><span></span></div>
+            <div class="jb-fold-body">
             <div class="jb-timer-grid">
               <span class="jb-timer-label">HP:</span>
               <span class="jb-timer-val" id="jb-hp">${_timerCache.hp||'—'}</span>
@@ -9297,13 +9311,15 @@
               <span class="jb-timer-label">Hot:</span>
               <span class="jb-timer-val" id="jb-hot-display" style="font-size:10px">${getHot()||'—'}</span>
             </div>
+            </div>
           </div>
 
-          <div class="jb-sect">
-            <div class="jb-sect-title" style="display:flex;justify-content:space-between;align-items:center">
-              <span>Experience</span>
-              <span id="jb-xp-charts-link" style="cursor:pointer;text-decoration:underline;color:var(--jb-accent);font-size:10px;font-weight:500">📈 Charts</span>
+          <div class="jb-sect" data-fold="xp">
+            <div class="jb-sect-title jb-fold">
+              <span><span class="jb-caret">▾</span> Experience</span>
+              <span id="jb-xp-charts-link" style="cursor:pointer;text-decoration:underline;color:var(--jb-accent);font-size:10px;font-weight:500;text-transform:none;letter-spacing:0">📈 Charts</span>
             </div>
+            <div class="jb-fold-body">
             <div class="jb-timer-grid">
               <span class="jb-timer-label">Rank:</span>
               <span class="jb-timer-val" id="jb-rank-name" style="font-size:11px">—</span>
@@ -9325,22 +9341,6 @@
                 <div id="jb-rank-bar" style="height:100%;width:0%;background:var(--jb-accent);border-radius:3px;transition:width .3s"></div>
               </div>
             </div>
-          </div>
-
-          <div class="jb-sect">
-            <div class="jb-grid jb-quickgrid">
-              <div class="jb-ribbon-btn" title="START a DTM yourself and invite a partner. Click the text to set the partner, schedule and repeat."><input type="checkbox" id="jb-create-dtm"> <span id="jb-dtm-link" style="cursor:pointer;text-decoration:underline">Create DTM</span></div>
-              <div class="jb-ribbon-btn"><input type="checkbox" id="jb-wl-on"> <span id="jb-wl-link" style="cursor:pointer;text-decoration:underline">Whitelist</span></div>
-              <div class="jb-ribbon-btn"><input type="checkbox" id="jb-create-oc"> <span id="jb-oc-link" style="cursor:pointer;text-decoration:underline">Create OC</span></div>
-              <div class="jb-ribbon-btn" title="Master switch for Online Watch — off means neither group can fire. Enable/disable Group 1 and Group 2 individually inside the Watch window."><input type="checkbox" id="jb-ow-on"> <span id="jb-ow-link" style="cursor:pointer;text-decoration:underline">🟢 Watch</span></div>
-              <label class="jb-ribbon-btn" title="Colour player links from your Starvinggeeks lists — watched (orange), safe (green), allied (blue). Read-only: three GETs, nothing is ever sent."><input type="checkbox" id="jb-sg-on"> 🎨 SG lists <span id="jb-sg-status" style="font-size:9px;letter-spacing:0.02em">—</span></label>
-              <label class="jb-ribbon-btn" title="Send the fields ticked in Settings → System → Advanced (username/city/rank/cash/health/ammo/credits/status/session — all off by default) to starvinggeeks.net every few minutes. This switch alone sends nothing without at least one field ticked there."><input type="checkbox" id="jb-sgpush-on" ${sgPush.on?'checked':''}> 📤 SG Push</label>
-              <label class="jb-ribbon-btn" title="Ultra-low-resource preset for an old/low-RAM device (e.g. a tablet in Firefox that keeps running out of memory). Pushes panel refresh, background polls and the XP backstop to their slowest settings, and switches off Hover, SG lists, Props, Silent audio and the Worker ticker. Switching this back off restores exactly what you had running before."><input type="checkbox" id="jb-tablet-mode" ${cfg.tabletMode?'checked':''}> 📱 Tablet</label>
-              <label class="jb-ribbon-btn" title="Telegram ping when an OC or DTM comes off cooldown, plus the repeat reminders while it is still sitting there unused. This is ONLY the OC/DTM ready pings — every other alert lives in Settings → Alerts, and script checks are never gated by it."><input type="checkbox" id="jb-notify-ready"> 🔔 OC/DTM alerts</label>
-              <label class="jb-ribbon-btn"><input type="checkbox" id="jb-auto-travel" ${st.autoTravel?'checked':''}> ✈️ Auto Travel</label>
-              <label class="jb-ribbon-btn" title="ADVERTISE yourself on the DTM list (ocads.aspx) when a DTM is ready, so others can invite you"><input type="checkbox" id="jb-auto-dtmlist" ${st.autoDtmList?'checked':''}> 📋 DTM List</label>
-              <label class="jb-ribbon-btn" title="ADVERTISE yourself on the OC list (ocads.aspx) when an OC is ready, so others can invite you"><input type="checkbox" id="jb-auto-oclist" ${st.autoOcList?'checked':''}> 📋 OC List</label>
-              <label class="jb-ribbon-btn" title="PANIC: hide inside your network HQ so you can't be shot. Pauses everything else, re-enters until the cap, then switches itself off. Never enters a damaged HQ — if it's destroyed while you're inside, you die."><input type="checkbox" id="jb-holdhq-on" ${cfg.holdHqOn?'checked':''}> 🏠 Hold HQ</label>
             </div>
           </div>
         </div>
@@ -9382,6 +9382,10 @@
               <button class="jb-tab" data-tab="alerts">🔔 Alerts</button>
               <button class="jb-tab" data-tab="human">🕵️ Human</button>
               <button class="jb-tab" data-tab="system">⚙️ System</button>
+              <div class="jb-find">
+                <input class="jb-input" id="jb-find" type="search" placeholder="🔎 Find a setting…  (e.g. jail, telegram, heal)" autocomplete="off">
+                <div class="jb-find-res" id="jb-find-res"></div>
+              </div>
             </div>
             <div class="jb-pane" data-pane="actions">
             <div class="jb-sect-title">Action selection</div>
@@ -10041,35 +10045,71 @@
     const gtaEl = _shadow.querySelector('#jb-gta-opts');
     gtaEl.innerHTML = GTAS.map(g => `<label class="jb-switch"><input type="checkbox" class="jb-gta-cb" value="${g.id}" ${st.gtas.includes(g.id)?'checked':''}> ${g.name}</label>`).join('');
 
-    // Ribbon toggles — use CSS vars for theme-aware colours
+    // Action switches (were the coloured ribbon buttons until 2000.331 — same ids).
     const ribbonMap = { 'jb-r-crime':'crime','jb-r-gta':'gta','jb-r-booze':'booze','jb-r-jail':'jail','jb-r-health':'health','jb-r-garage':'garage','jb-r-oc':'autoOC','jb-r-dtm':'autoDTM' };
-    /* Published so code outside buildUI can repaint the ribbon when it flips an
-     * action programmatically. The daily limits, the no-XP limiter and the jail
-     * cap all switch actions off by themselves; before this the buttons kept
-     * showing the old colour until the next page load, so the panel disagreed
-     * with what Jarvis was actually doing. */
+    /* Every front-panel switch backed by `st`, so one call can bring them all
+     * back in line with what Jarvis is actually doing. */
+    const ST_SWITCHES = { ...ribbonMap,
+      'jb-crusher':'crusher', 'jb-create-oc':'createOC', 'jb-create-dtm':'createDTM',
+      'jb-auto-travel':'autoTravel', 'jb-auto-dtmlist':'autoDtmList', 'jb-auto-oclist':'autoOcList',
+      'jb-wl-on':'whitelist', 'jb-notify-ready':'notifyReady' };
+    /* Published so code outside buildUI can resync the panel when it flips a
+     * switch programmatically. The daily limits, the no-XP limiter, the jail cap,
+     * a finished OC/DTM run and a crusher that turns out not to be owned all
+     * switch things off by themselves; before this the panel kept showing the old
+     * state until the next page load, so it disagreed with what Jarvis was doing. */
     repaintRibbon = () => {
-      for (const [id, key] of Object.entries(ribbonMap)) {
-        const btn = _shadow && _shadow.querySelector(`#${id}`);
-        if (!btn) continue;
-        btn.style.background = st[key] ? 'var(--jb-ribbon-on)' : 'var(--jb-ribbon-off)';
-        btn.style.color = st[key] ? 'var(--jb-ribbon-on-text)' : 'var(--jb-ribbon-off-text)';
+      if (!_shadow) return;
+      for (const [id, key] of Object.entries(ST_SWITCHES)) {
+        const cb = _shadow.querySelector(`#${id}`);
+        if (cb && cb.checked !== !!st[key]) cb.checked = !!st[key];
       }
+      const hq = _shadow.querySelector('#jb-holdhq-on');
+      if (hq && hq.checked !== !!cfg.holdHqOn) hq.checked = !!cfg.holdHqOn;
+      const cr = _shadow.querySelector('#jb-crusher');
+      if (cr) cr.disabled = st.crusherOwned === false;
+      try { updateFoldCounts(); } catch(_){}
     };
     for (const [id, key] of Object.entries(ribbonMap)) {
-      const btn = _shadow.querySelector(`#${id}`);
-      // Set initial colours from theme
-      if (btn) {
-        btn.style.background = st[key] ? 'var(--jb-ribbon-on)' : 'var(--jb-ribbon-off)';
-        btn.style.color = st[key] ? 'var(--jb-ribbon-on-text)' : 'var(--jb-ribbon-off-text)';
-      }
-      btn.addEventListener('click', e => {
-        st[key] = !st[key]; saveSt();
-        e.target.style.background = st[key] ? 'var(--jb-ribbon-on)' : 'var(--jb-ribbon-off)';
-        e.target.style.color = st[key] ? 'var(--jb-ribbon-on-text)' : 'var(--jb-ribbon-off-text)';
+      const cb = _shadow.querySelector(`#${id}`);
+      if (!cb) continue;
+      cb.checked = !!st[key];
+      cb.addEventListener('change', e => {
+        st[key] = e.target.checked; saveSt();
         setStatus(`${key} ${st[key]?'ON':'OFF'}`);
       });
     }
+
+    /* Foldable groups. The fold state is remembered per group; a folded group
+     * still shows how many of its switches are on. */
+    const FOLD_KEY = 'cbPanelFold';
+    let _fold = {};
+    try { _fold = GM_getValue(FOLD_KEY, {}) || {}; } catch(_) { _fold = {}; }
+    function updateFoldCounts() {
+      _shadow.querySelectorAll('.jb-sect[data-fold]').forEach(sec => {
+        const cnt = sec.querySelector('.jb-oncount');
+        if (!cnt) return;
+        const cbs = [...sec.querySelectorAll('.jb-tgrid input[type="checkbox"]')];
+        if (!cbs.length) return;
+        const on = cbs.filter(c => c.checked && !c.disabled).length;
+        cnt.textContent = `${on}/${cbs.length} on`;
+        cnt.classList.toggle('on', on > 0);
+      });
+    }
+    _shadow.querySelectorAll('.jb-sect[data-fold]').forEach(sec => {
+      const key = sec.getAttribute('data-fold');
+      if (_fold[key]) sec.classList.add('folded');
+      const head = sec.querySelector('.jb-fold');
+      if (head) head.addEventListener('click', e => {
+        if (e.target.closest('#jb-xp-charts-link')) return;   // the Charts link is its own target
+        sec.classList.toggle('folded');
+        _fold[key] = sec.classList.contains('folded');
+        GM_setValue(FOLD_KEY, _fold);
+      });
+    });
+    // Any switch on the panel keeps the counts honest — one listener covers them all.
+    { const pb = _shadow.querySelector('#jb-panel-body');
+      if (pb) pb.addEventListener('change', () => { try { updateFoldCounts(); } catch(_){} }); }
 
     // ALL toggle
     const allCb = _shadow.querySelector('#jb-all-toggle');
@@ -10346,16 +10386,31 @@
     // Settings modal
     const modal = _shadow.querySelector('#jb-settings-modal');
     const backdrop = _shadow.querySelector('#jb-backdrop');
+    /* Settings holds the loop with its OWN flag (2000.331). It used to set and
+     * clear the shared `paused` — so closing Settings during a staff check, an
+     * anti-bot hold or a watch "stop & wait" silently resumed automation. */
     function openModal() {
-      paused = true; modal.classList.add('open'); backdrop.style.display = 'block';
+      _uiPaused = true; modal.classList.add('open'); backdrop.style.display = 'block';
       const rk = _shadow.querySelector('#jb-daily-rank');
       if (rk) rk.textContent = rankState.name || 'your current rank';
       try { renderDailyResearch(); } catch(_){}
     }
-    function closeModal() { modal.classList.remove('open'); backdrop.style.display = 'none'; paused = false; saveSt(); }
+    function closeModal() { modal.classList.remove('open'); backdrop.style.display = 'none'; _uiPaused = false; saveSt(); }
+    // Close whatever is open. The sub-windows share this backdrop, and clicking it
+    // used to close only Settings — leaving a sub-window up with no backdrop.
+    function closeAllModals() {
+      const wasSettings = modal.classList.contains('open');
+      _shadow.querySelectorAll('.jb-modal.open').forEach(m => m.classList.remove('open'));
+      backdrop.style.display = 'none';
+      if (wasSettings) { _uiPaused = false; saveSt(); }
+      const fr = _shadow.querySelector('#jb-find-res'); if (fr) fr.classList.remove('open');
+    }
     _shadow.querySelector('#jb-settings-btn').addEventListener('click', openModal);
     _shadow.querySelector('#jb-modal-close').addEventListener('click', closeModal);
-    backdrop.addEventListener('click', closeModal);
+    backdrop.addEventListener('click', closeAllModals);
+    document.addEventListener('keydown', e => {
+      if (e.key === 'Escape' && _shadow.querySelector('.jb-modal.open')) closeAllModals();
+    });
 
     /* Settings tabs. Remembers the last tab you were on, because settings visits
      * come in runs — you rarely open it once. Scrolls back to the top on switch
@@ -10375,6 +10430,75 @@
     _shadow.querySelectorAll('.jb-tab').forEach(t =>
       t.addEventListener('click', () => showTab(t.getAttribute('data-tab'))));
     showTab(GM_getValue('cbSettingsTab', 'actions'));
+
+    /* FIND A SETTING (2000.331). Settings has five tabs and well over a hundred
+     * controls, and which tab something lives in is not always obvious (is the
+     * mod break under Human or Alerts?). Indexes every section title and switch /
+     * field label across all panes; picking a result opens its tab, scrolls to
+     * it and flashes it. Arrow keys + Enter work too. */
+    { const findIn = _shadow.querySelector('#jb-find'), findRes = _shadow.querySelector('#jb-find-res');
+      const TAB_NAME = {};
+      _shadow.querySelectorAll('.jb-tab').forEach(t => { TAB_NAME[t.getAttribute('data-tab')] = (t.textContent || '').trim(); });
+      let index = null, hits = [], sel = -1;
+      const clean = s => String(s || '').replace(/\s+/g, ' ').trim();
+      function buildIndex() {
+        const out = [];
+        _shadow.querySelectorAll('#jb-settings-body .jb-pane').forEach(p => {
+          const tab = p.getAttribute('data-pane');
+          let section = '';
+          p.querySelectorAll('.jb-sect-title, label.jb-switch, .jb-row, label.jb-label').forEach(el => {
+            if (el.classList.contains('jb-sect-title')) { section = clean(el.textContent); out.push({ el, tab, text: section, section: '' }); return; }
+            if (el.matches('label.jb-label') && el.closest('.jb-row')) return;   // the row already covers it
+            const text = clean(el.matches('.jb-row') ? (el.querySelector('label') || el).textContent : el.textContent);
+            if (text && text.length < 90) out.push({ el, tab, text, section });
+          });
+        });
+        return out;
+      }
+      function render() {
+        findRes.innerHTML = '';
+        if (!hits.length) { findRes.innerHTML = '<div class="jb-find-item" style="cursor:default;color:var(--jb-text-ter)">Nothing matches</div>'; findRes.classList.add('open'); return; }
+        hits.slice(0, 12).forEach((h, i) => {
+          const d = document.createElement('div');
+          d.className = 'jb-find-item' + (i === sel ? ' sel' : '');
+          d.innerHTML = `<span>${esc(h.text)}</span><span class="jb-find-tab">${esc(TAB_NAME[h.tab] || h.tab)}${h.section ? ' › ' + esc(h.section) : ''}</span>`;
+          d.addEventListener('mousedown', e => { e.preventDefault(); go(h); });
+          findRes.appendChild(d);
+        });
+        findRes.classList.add('open');
+      }
+      function go(h) {
+        showTab(h.tab);
+        findRes.classList.remove('open');
+        const sc = _shadow.querySelector('#jb-settings-modal .jb-modal-content');
+        if (sc) {
+          const top = h.el.getBoundingClientRect().top - sc.getBoundingClientRect().top + sc.scrollTop - 70;
+          sc.scrollTop = Math.max(0, top);
+        }
+        h.el.classList.remove('jb-flash'); void h.el.offsetWidth; h.el.classList.add('jb-flash');
+        setTimeout(() => h.el.classList.remove('jb-flash'), 3000);
+      }
+      if (findIn && findRes) {
+        findIn.addEventListener('input', () => {
+          const q = clean(findIn.value).toLowerCase();
+          if (!q) { findRes.classList.remove('open'); hits = []; return; }
+          if (!index) index = buildIndex();
+          const words = q.split(' ');
+          hits = index.filter(h => { const t = (h.text + ' ' + h.section).toLowerCase(); return words.every(w => t.includes(w)); });
+          // Section titles and labels that START with the query first.
+          hits.sort((a, b) => (b.text.toLowerCase().startsWith(q) - a.text.toLowerCase().startsWith(q)));
+          sel = hits.length ? 0 : -1;
+          render();
+        });
+        findIn.addEventListener('keydown', e => {
+          if (e.key === 'ArrowDown' && hits.length) { sel = Math.min(sel + 1, Math.min(hits.length, 12) - 1); render(); e.preventDefault(); }
+          else if (e.key === 'ArrowUp' && hits.length) { sel = Math.max(sel - 1, 0); render(); e.preventDefault(); }
+          else if (e.key === 'Enter' && hits[sel]) { go(hits[sel]); e.preventDefault(); }
+          else if (e.key === 'Escape') { findIn.value = ''; findRes.classList.remove('open'); e.stopPropagation(); }
+        });
+        findIn.addEventListener('blur', () => setTimeout(() => findRes.classList.remove('open'), 150));
+      }
+    }
 
     // Settings inputs
     _shadow.querySelector('#jb-login-user').addEventListener('input', e => { LOGIN.user = e.target.value.trim(); GM_setValue('cbLoginUser', LOGIN.user); });
@@ -10475,12 +10599,12 @@
       st.gtas = [..._shadow.querySelectorAll('.jb-gta-cb:checked')].map(c => parseInt(c.value)); saveSt();
     }));
 
-    _shadow.querySelector('#jb-crime-int').addEventListener('change', e => { cfg.crimeInt = Math.max(1,Math.min(999,parseInt(e.target.value))); GM_setValue('cbCrimeInt',cfg.crimeInt); });
-    _shadow.querySelector('#jb-gta-int').addEventListener('change', e => { cfg.gtaInt = Math.max(1,Math.min(999,parseInt(e.target.value))); GM_setValue('cbGtaInt',cfg.gtaInt); });
-    _shadow.querySelector('#jb-booze-int').addEventListener('change', e => { cfg.boozeInt = Math.max(1,Math.min(999,parseInt(e.target.value))); GM_setValue('cbBoozeInt',cfg.boozeInt); });
-    _shadow.querySelector('#jb-booze-buy').addEventListener('change', e => { cfg.boozeBuy = Math.max(1,Math.min(300,parseInt(e.target.value))); GM_setValue('cbBoozeBuy',cfg.boozeBuy); });
-    _shadow.querySelector('#jb-booze-sell').addEventListener('change', e => { cfg.boozeSell = Math.max(1,Math.min(300,parseInt(e.target.value))); GM_setValue('cbBoozeSell',cfg.boozeSell); });
-    _shadow.querySelector('#jb-jail-int').addEventListener('change', e => { cfg.jailInt = Math.max(1,Math.min(999,parseInt(e.target.value))); GM_setValue('cbJailInt',cfg.jailInt); });
+    _shadow.querySelector('#jb-crime-int').addEventListener('change', e => { cfg.crimeInt = Math.max(1,Math.min(999,parseInt(e.target.value,10)||125)); e.target.value = cfg.crimeInt; GM_setValue('cbCrimeInt',cfg.crimeInt); });
+    _shadow.querySelector('#jb-gta-int').addEventListener('change', e => { cfg.gtaInt = Math.max(1,Math.min(999,parseInt(e.target.value,10)||245)); e.target.value = cfg.gtaInt; GM_setValue('cbGtaInt',cfg.gtaInt); });
+    _shadow.querySelector('#jb-booze-int').addEventListener('change', e => { cfg.boozeInt = Math.max(1,Math.min(999,parseInt(e.target.value,10)||120)); e.target.value = cfg.boozeInt; GM_setValue('cbBoozeInt',cfg.boozeInt); });
+    _shadow.querySelector('#jb-booze-buy').addEventListener('change', e => { cfg.boozeBuy = Math.max(1,Math.min(300,parseInt(e.target.value,10)||5)); e.target.value = cfg.boozeBuy; GM_setValue('cbBoozeBuy',cfg.boozeBuy); });
+    _shadow.querySelector('#jb-booze-sell').addEventListener('change', e => { cfg.boozeSell = Math.max(1,Math.min(300,parseInt(e.target.value,10)||1)); e.target.value = cfg.boozeSell; GM_setValue('cbBoozeSell',cfg.boozeSell); });
+    _shadow.querySelector('#jb-jail-int').addEventListener('change', e => { cfg.jailInt = Math.max(1,Math.min(999,parseInt(e.target.value,10)||3)); e.target.value = cfg.jailInt; GM_setValue('cbJailInt',cfg.jailInt); });
     _shadow.querySelector('#jb-jail-limit').addEventListener('change', e => {
       cfg.jailDailyLimit = Math.max(50, Math.min(4000, parseInt(e.target.value)||2000));
       e.target.value = cfg.jailDailyLimit;
@@ -10489,7 +10613,7 @@
       if (GM_getValue('cbJailAutoOff', false) && getJailCount() < cfg.jailDailyLimit) {
         GM_setValue('cbJailAutoOff', false);
         st.jail = GM_getValue('cbJailWasOn', true); saveSt();
-        syncAll();
+        syncAll(); repaintRibbon();
       }
       updateJailCountUI();
       const sEl = _shadow.querySelector('#jb-jail-count-settings');
@@ -10720,16 +10844,16 @@
       GM_setValue('cbJailCountDay', gameDayStr());
       if (GM_getValue('cbJailAutoOff', false)) {
         GM_setValue('cbJailAutoOff', false);
-        st.jail = GM_getValue('cbJailWasOn', true); saveSt(); syncAll();
+        st.jail = GM_getValue('cbJailWasOn', true); saveSt(); syncAll(); repaintRibbon();
       }
       updateJailCountUI();
       const sEl = _shadow.querySelector('#jb-jail-count-settings');
       if (sEl) sEl.textContent = `0/${cfg.jailDailyLimit}`;
       setStatus('⛓️ Jail counter reset');
     });
-    _shadow.querySelector('#jb-min-hp').addEventListener('change', e => { cfg.minHealth = Math.max(1,Math.min(99,parseInt(e.target.value))); GM_setValue('cbMinHealth',cfg.minHealth); });
-    _shadow.querySelector('#jb-target-hp').addEventListener('change', e => { cfg.targetHealth = Math.max(10,Math.min(100,parseInt(e.target.value))); GM_setValue('cbTargetHealth',cfg.targetHealth); });
-    _shadow.querySelector('#jb-garage-int').addEventListener('change', e => { const m = Math.max(1,Math.min(120,parseInt(e.target.value))); cfg.garageInt = m*60; GM_setValue('cbGarageInt',cfg.garageInt); });
+    _shadow.querySelector('#jb-min-hp').addEventListener('change', e => { cfg.minHealth = Math.max(1,Math.min(99,parseInt(e.target.value,10)||90)); e.target.value = cfg.minHealth; GM_setValue('cbMinHealth',cfg.minHealth); });
+    _shadow.querySelector('#jb-target-hp').addEventListener('change', e => { cfg.targetHealth = Math.max(10,Math.min(100,parseInt(e.target.value,10)||100)); e.target.value = cfg.targetHealth; GM_setValue('cbTargetHealth',cfg.targetHealth); });
+    _shadow.querySelector('#jb-garage-int').addEventListener('change', e => { const m = Math.max(1,Math.min(120,parseInt(e.target.value,10)||5)); e.target.value = m; cfg.garageInt = m*60; GM_setValue('cbGarageInt',cfg.garageInt); });
 
     _shadow.querySelector('#jb-crush-reset').addEventListener('click', () => {
       st.crusherOwned = null; saveSt(); localStorage.removeItem(LS_CRUSH_LOOP);
@@ -11091,6 +11215,8 @@
       try { updateDailyCountUI(); } catch(_){}
       try { updateDtmKickUI(); } catch(_){}
       try { updateHqUI(); } catch(_){}
+      // Catches any switch flipped by code that has no hook into the panel.
+      try { repaintRibbon(); } catch(_){}
       /* Staff readout. Deliberately distinguishes "nobody on" from "we don't
        * know" — a stale reading suppresses nothing, so saying "all clear" when
        * the check is actually failing would be a lie you'd act on. */
@@ -11559,7 +11685,7 @@
     const GROUP = 'input[type=radio][name="ctl00$main$citieslist"]';
     for (let n = r.parentElement, up = 0; n && up < 6; n = n.parentElement, up++) {
       if (n.querySelectorAll(GROUP).length !== 1) break;   // shared — names several cities
-      const t = (n.textContent || '').replace(/s+/g, ' ').trim();
+      const t = (n.textContent || '').replace(/\s+/g, ' ').trim();   // was /s+/ — it stripped the letter s
       if (t) return t;
     }
     return '';
@@ -11920,6 +12046,15 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
                    document.querySelector('input[value="Add me!"]') ||
                    [...document.querySelectorAll('input[type="submit"]')].find(b => /add me/i.test(b.value||''));
 
+    /* ALREADY LISTED (2000.331). The same control then reads "Remove me!", and
+     * clicking it takes the ad DOWN — so every 30 minutes while a DTM sat ready
+     * this alternately removed and re-added you. */
+    if (addBtn && /remove\s*me/i.test(addBtn.value || '')) {
+      console.log('[JB][DTMLIST] Already listed — leaving the ad up');
+      localStorage.setItem(LS_DTM_LIST_DONE, String(Date.now()));
+      return false;
+    }
+
     if (addBtn && !addBtn.disabled) {
       console.log('[JB][DTMLIST] Clicking Add me! button');
       st.acting = true; st.action = 'dtmlist';
@@ -11950,8 +12085,10 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
         setStatus('📋 Already on DTM list');
       } else if (bodyTxt.includes('cooldown') || bodyTxt.includes('wait')) {
         console.log('[JB][DTMLIST] DTM on cooldown');
+        localStorage.setItem(LS_DTM_LIST_DONE, String(Date.now() - 25 * 60 * 1000));   // retry in ~5m, not every tick
       } else {
         console.log('[JB][DTMLIST] Add button not available');
+        localStorage.setItem(LS_DTM_LIST_DONE, String(Date.now() - 25 * 60 * 1000));   // retry in ~5m, not every tick
       }
       // Navigate away
       setTimeout(() => {
@@ -12008,6 +12145,13 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
     const addBtn = document.getElementById('ctl00_main_btnAddOC') ||
                    [...document.querySelectorAll('input[type="submit"]')].find(b => /btnAddOC/i.test(b.name || ''));
 
+    // Already listed — see the same check in doAutoAddDtmList.
+    if (addBtn && /remove\s*me/i.test(addBtn.value || '')) {
+      console.log('[JB][OCLIST] Already listed — leaving the ad up');
+      localStorage.setItem(LS_OC_LIST_DONE, String(Date.now()));
+      return false;
+    }
+
     if (addBtn && !addBtn.disabled) {
       console.log('[JB][OCLIST] Clicking Add me! button');
       st.acting = true; st.action = 'oclist';
@@ -12041,7 +12185,9 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
         setStatus('📋 Already on OC list');
       } else if (bodyTxt.includes('cooldown') || bodyTxt.includes('wait')) {
         console.log('[JB][OCLIST] OC on cooldown');
+        localStorage.setItem(LS_OC_LIST_DONE, String(Date.now() - 25 * 60 * 1000));   // retry in ~5m, not every tick
       } else {
+        localStorage.setItem(LS_OC_LIST_DONE, String(Date.now() - 25 * 60 * 1000));
         console.log('[JB][OCLIST] Add button not available — dumping submit inputs for diagnosis:',
           [...document.querySelectorAll('input[type="submit"]')].map(b => `${b.name}="${b.value}"`));
       }
@@ -12630,7 +12776,7 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
         t: Date.now(), gained: 0, action: 'rankup', icon: '⭐',
         total: xpState.total, rankUp: true, label: `${fromName} → ${toName}`
       });
-      if (xpState.history.length > 40) xpState.history.pop();
+      while (xpState.history.length > XP_HISTORY_CAP) xpState.history.pop();
       saveXpState();
     } catch(_){}
     tgMsg('rankup', `⭐ <b>RANK UP</b>\n${st.player||'?'} | ${esc(fromName)} → <b>${esc(toName)}</b>`);
@@ -14006,6 +14152,7 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
          * stored choice has to go or step 1 would re-invite the same person. */
         dtmMarkTried(seatedName);
         localStorage.removeItem(LS_DTM_CHOSEN);
+        localStorage.setItem('cbCreateDtmStartedAt', String(Date.now()));   // see the re-invite note below
         localStorage.setItem(LS_CREATE_DTM_STEP, '1');
         localStorage.setItem(LS_CREATE_DTM_STATE, 'setup');
         localStorage.setItem(LS_CREATE_DTM_NEXT, String(Date.now() + 5000));
@@ -14044,6 +14191,10 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
       return false;   // hand control back to normal automation
     }
     localStorage.setItem('cbDtmReinvites', String(tries));
+    /* A fresh invite gets a fresh 10-minute window. Each wait is 3½–4½ minutes,
+     * so the hard abort in handleCreateDTM used to fire after the second one and
+     * the 3 (or 6, from the list) re-invites this allows could never all happen. */
+    localStorage.setItem('cbCreateDtmStartedAt', String(Date.now()));
 
     console.log(`${APP_TAG}[DTM] ${who} didn't accept in ${Math.round(to/60000)}m — re-inviting (${tries}/${maxTries})`);
     tgMsg('dtmCreate', `⌛ <b>DTM invite expired</b>\n${st.player||'?'} | ${esc(who)} never accepted — ${fromList?'trying someone else':'re-inviting'} (${tries}/${maxTries})`);
@@ -14366,7 +14517,7 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
      * simply being open. */
     try { checkLowHp(); } catch(e) { console.warn(APP_TAG, '[HEAL] low-hp alert', e); }
 
-    if (paused) { schedLoop(1800+Math.floor(Math.random()*1400)); return; }
+    if (paused || _uiPaused) { schedLoop(1800+Math.floor(Math.random()*1400)); return; }
 
     // If HP is critically low, let the LEGACY (navigating) health path run even
     // during a break — the background path has already had its chance above.
