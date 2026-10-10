@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.331
+// @version      2000.332
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -36,7 +36,7 @@
 // @downloadURL  https://gist.githubusercontent.com/scoobyghub/32b6a0336551df6e3b3a036e39155fdc/raw/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.331
+/*  Jarvis Bot 2000.332
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -108,7 +108,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.331';
+  const APP_VERSION = '2000.332';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -2791,7 +2791,11 @@
       const el = _shadow.querySelector('#jb-status');
       const ji = st.inJail ? '🔒' : '✅';
       const pi = st.pending ? `<br>Pending: ${esc(st.pending)}` : '';
-      if (el) el.innerHTML = `${esc(msg)}<br>Player: ${esc(st.player)}<br>Jail: ${ji}${pi}<br>Crime: ${fmtAgo(st.lastCrime)}<br>GTA: ${fmtAgo(st.lastGta)}<br>Booze: ${fmtAgo(st.lastBooze)}`;
+      /* Two lines (2000.332) — it was six, and the player name is already on the
+       * power row. Last-done times are short: "4m", "35s", "—" for never. */
+      const ago = ts => { if (!ts) return '—'; const d = Math.max(0, Date.now() - ts) / 1000;
+        return d < 60 ? Math.floor(d) + 's' : d < 3600 ? Math.floor(d / 60) + 'm' : Math.floor(d / 3600) + 'h'; };
+      if (el) el.innerHTML = `${esc(msg)}<br>Jail ${ji}${pi ? ' · ' + pi.replace('<br>', '') : ''} · Crime ${ago(st.lastCrime)} · GTA ${ago(st.lastGta)} · Booze ${ago(st.lastBooze)}`;
     }
     console.log(APP_TAG, msg);
   }
@@ -9031,13 +9035,19 @@
        * button beside its switch — so "turn it on" and "configure it" are two
        * different targets that can't be mistaken for each other. Every control
        * id is unchanged, so all the existing handlers still bind. */
-      .jb-tgrid { display: grid; grid-template-columns: 1fr 1fr; gap: 1px 10px; }
-      .jb-tog { display: flex; align-items: center; gap: 3px; min-width: 0; }
+      .jb-tgrid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 8px; }
+      .jb-tog { display: flex; align-items: center; gap: 3px; min-width: 0; min-height: 17px; }
+      /* COMPACT (2000.332): the panel switches are a size down from Settings'
+       * ones, so the whole panel fits on screen without scrolling. */
+      .jb-tgrid .jb-switch { gap: 5px; padding: 0; font-size: 11px; }
+      .jb-tgrid .jb-switch input[type="checkbox"] { width: 22px; height: 12px; border-radius: 6px; }
+      .jb-tgrid .jb-switch input[type="checkbox"]::after { top: 2px; left: 2px; width: 8px; height: 8px; }
+      .jb-tgrid .jb-switch input[type="checkbox"]:checked::after { transform: translateX(10px); }
       .jb-tog .jb-switch { flex: 1 1 auto; min-width: 0; }
       .jb-tog .jb-switch .jb-tl { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
       .jb-tog.jb-wide { grid-column: 1 / -1; }
       .jb-cfg {
-        flex: 0 0 auto; width: 18px; height: 18px; padding: 0; line-height: 16px;
+        flex: 0 0 auto; width: 16px; height: 16px; padding: 0; line-height: 14px;
         background: transparent; color: var(--jb-text-sec); border: 1px solid var(--jb-border);
         border-radius: 3px; cursor: pointer; font-size: 10px; font-family: inherit;
         transition: background .15s, color .15s, border-color .15s;
@@ -9048,9 +9058,10 @@
       /* The power switch: wider, so it reads as THE switch rather than one more toggle. */
       .jb-power {
         display: flex; align-items: center; justify-content: space-between; gap: 8px;
-        margin-top: 4px; padding: 4px 8px; border-radius: 3px;
+        padding: 3px 8px; border-radius: 3px; margin-bottom: 6px;
         background: var(--jb-surface-alt); border: 1px solid var(--jb-border);
       }
+      .jb-power-info { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 11px; }
       .jb-power .jb-switch input[type="checkbox"] { width: 34px; height: 18px; border-radius: 9px; }
       .jb-power .jb-switch input[type="checkbox"]::after { width: 14px; height: 14px; }
       .jb-power .jb-switch input[type="checkbox"]:checked::after { transform: translateX(16px); }
@@ -9064,14 +9075,15 @@
       .jb-sect.folded .jb-sect-title { margin-bottom: 0; }
       .jb-oncount { font-size: 9px; font-weight: 600; letter-spacing: 0; text-transform: none; color: var(--jb-text-ter); }
       .jb-oncount.on { color: var(--jb-success); }
-      .jb-body { padding: 8px 10px; max-height: 460px; overflow-y: auto; }
+      /* Sized to the window, so it only scrolls when the screen really is too short. */
+      .jb-body { padding: 6px 8px; max-height: calc(100vh - 150px); overflow-y: auto; }
       .jb-body::-webkit-scrollbar { width: 6px; }
       .jb-body::-webkit-scrollbar-thumb { background: var(--jb-border-strong); border-radius: 3px; }
-      .jb-sect { margin-bottom: 8px; }
+      .jb-sect { margin-bottom: 5px; }
       .jb-sect-title {
-        font-size: 11px; font-weight: 600; color: var(--jb-accent);
-        text-transform: uppercase; letter-spacing: .5px; margin-bottom: 4px;
-        border-bottom: 1px solid var(--jb-border); padding-bottom: 2px;
+        font-size: 10px; font-weight: 600; color: var(--jb-accent);
+        text-transform: uppercase; letter-spacing: .5px; margin-bottom: 2px;
+        border-bottom: 1px solid var(--jb-border); padding-bottom: 1px;
       }
       .jb-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 12px; }
       .jb-switch {
@@ -9090,15 +9102,15 @@
       .jb-switch input[type="checkbox"]:checked { background: var(--jb-switch-on); }
       .jb-switch input[type="checkbox"]:checked::after { transform: translateX(14px); }
       .jb-timer-grid {
-        display: grid; grid-template-columns: 48px 1fr 48px 1fr; gap: 2px 4px;
-        font-size: 11px; align-items: center;
+        display: grid; grid-template-columns: 48px 1fr 48px 1fr; gap: 0 4px;
+        font-size: 11px; align-items: center; line-height: 1.35;
       }
       .jb-timer-label { color: var(--jb-text-sec); font-weight: 500; }
       .jb-timer-val { font-weight: 600; min-width: 60px; }
       .jb-footer {
         background: var(--jb-surface-alt); border-top: 1px solid var(--jb-border);
-        padding: 6px 10px; font-size: 10px; color: var(--jb-text-sec);
-        min-height: 100px; max-height: 100px; overflow: hidden; line-height: 1.5;
+        padding: 3px 10px; font-size: 10px; color: var(--jb-text-sec);
+        min-height: 34px; max-height: 34px; overflow: hidden; line-height: 1.45;
       }
       .jb-modal-bg {
         position: fixed; inset: 0; background: rgba(0,0,0,.5);
@@ -9200,7 +9212,7 @@
       .jb-root.jb-xl [style*="font-size:11px"] { font-size: 14px !important; }
       .jb-root.jb-xl .jb-timer-grid { grid-template-columns: 64px 1fr 64px 1fr; }
       .jb-root.jb-xl .jb-input-sm { width: 84px; }
-      .jb-root.jb-xl .jb-footer { min-height: 120px; max-height: 120px; }
+      .jb-root.jb-xl .jb-footer { min-height: 44px; max-height: 44px; }
       .jb-sep { border: none; border-top: 1px solid var(--jb-border); margin: 8px 0; }
       .jb-sub { font-size: 10px; color: var(--jb-text-ter); }
       .jb-row { display: flex; gap: 6px; align-items: center; margin-bottom: 4px; }
@@ -9241,14 +9253,61 @@
 
       <div id="jb-panel-body">
         <div class="jb-body">
-          <div class="jb-sect">
-            <div class="jb-grid" style="grid-template-columns: 1fr auto;">
-              <div class="jb-flex" style="min-width:0"><span class="jb-timer-label">Player:</span> <span id="jb-player-badge" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(st.player||'—')}</span></div>
-              <div class="jb-flex"><span class="jb-timer-label">Mod:</span><span id="jb-mod-light" title="Staff watch" style="display:inline-flex;align-items:center"><span class="jb-status-dot" id="jb-mod-light-dot" style="color:var(--jb-text-ter)"></span></span></div>
+          <div class="jb-power" title="Power — unticking stops everything">
+            <label class="jb-switch"><input type="checkbox" id="jb-all-toggle"> <span style="font-weight:700;font-size:12px" id="jb-all-label">ALL</span></label>
+            <div class="jb-power-info">
+              <span id="jb-player-badge" style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:110px">${esc(st.player||'—')}</span>
+              <span class="jb-flex" style="gap:3px"><span class="jb-timer-label">Mod</span><span id="jb-mod-light" title="Staff watch" style="display:inline-flex;align-items:center"><span class="jb-status-dot" id="jb-mod-light-dot" style="color:var(--jb-text-ter)"></span></span></span>
             </div>
-            <div class="jb-power">
-              <label class="jb-switch"><input type="checkbox" id="jb-all-toggle"> <span style="font-weight:700;font-size:12px" id="jb-all-label">ALL</span></label>
-              <span class="jb-sub" style="text-align:right">power — off stops everything</span>
+          </div>
+
+          <div class="jb-sect" data-fold="timers">
+            <div class="jb-sect-title jb-fold"><span><span class="jb-caret">▾</span> Timers</span><span></span></div>
+            <div class="jb-fold-body">
+            <div class="jb-timer-grid">
+              <span class="jb-timer-label">HP:</span>
+              <span class="jb-timer-val" id="jb-hp">${_timerCache.hp||'—'}</span>
+              <span class="jb-timer-label">Travel:</span>
+              <span class="jb-timer-val" id="jb-travel">${_timerCache.travel||'—'}</span>
+              <span class="jb-timer-label">OC:</span>
+              <span class="jb-timer-val" id="jb-oc">${_timerCache.oc||'—'}</span>
+              <span class="jb-timer-label">DTM:</span>
+              <span class="jb-timer-val" id="jb-dtm">${_timerCache.dtm||'—'}</span>
+              <span class="jb-timer-label">Prot:</span>
+              <span class="jb-timer-val" id="jb-prot">${_timerCache.prot||'—'}</span>
+              <span class="jb-timer-label">Hot:</span>
+              <span class="jb-timer-val" id="jb-hot-display" style="font-size:10px">${getHot()||'—'}</span>
+            </div>
+            </div>
+          </div>
+
+          <div class="jb-sect" data-fold="xp">
+            <div class="jb-sect-title jb-fold">
+              <span><span class="jb-caret">▾</span> Experience</span>
+              <span id="jb-xp-charts-link" style="cursor:pointer;text-decoration:underline;color:var(--jb-accent);font-size:10px;font-weight:500;text-transform:none;letter-spacing:0">📈 Charts</span>
+            </div>
+            <div class="jb-fold-body">
+            <div class="jb-timer-grid">
+              <span class="jb-timer-label">Rank:</span>
+              <span class="jb-timer-val" id="jb-rank-name" style="font-size:11px">—</span>
+              <span class="jb-timer-label">Total:</span>
+              <span class="jb-timer-val" id="jb-xp-total">—</span>
+              <span class="jb-timer-label">Session:</span>
+              <span class="jb-timer-val" id="jb-xp-session">—</span>
+              <span class="jb-timer-label">Rate:</span>
+              <span class="jb-timer-val" id="jb-xp-rate">—</span>
+              <span class="jb-timer-label">Last:</span>
+              <span class="jb-timer-val" id="jb-xp-last" style="font-size:10px">—</span>
+            </div>
+            <div style="margin-top:2px">
+              <div style="display:flex;justify-content:space-between;font-size:9px;color:var(--jb-text-ter);margin-bottom:1px">
+                <span id="jb-rank-pct">—</span>
+                <span id="jb-rank-tonext"></span>
+              </div>
+              <div style="background:var(--jb-border);border-radius:3px;height:5px;overflow:hidden">
+                <div id="jb-rank-bar" style="height:100%;width:0%;background:var(--jb-accent);border-radius:3px;transition:width .3s"></div>
+              </div>
+            </div>
             </div>
           </div>
 
@@ -9293,60 +9352,10 @@
             tog('jb-sgpush-on',  '📤 SG Push', { on: sgPush.on, title: 'Send the fields ticked in Settings → System → Starvinggeeks Data Push (all off by default) to starvinggeeks.net every few minutes. This switch alone sends nothing without at least one field ticked there.' }) +
             tog('jb-tablet-mode','📱 Tablet',  { on: cfg.tabletMode, title: 'Ultra-low-resource preset for an old/low-RAM device. Pushes panel refresh, background polls and the XP backstop to their slowest settings, and switches off Hover, SG lists, Props, Silent audio and the Worker ticker. Switching this back off restores exactly what you had before.' })
           )}
-
-          <div class="jb-sect" data-fold="timers">
-            <div class="jb-sect-title jb-fold"><span><span class="jb-caret">▾</span> Timers</span><span></span></div>
-            <div class="jb-fold-body">
-            <div class="jb-timer-grid">
-              <span class="jb-timer-label">HP:</span>
-              <span class="jb-timer-val" id="jb-hp">${_timerCache.hp||'—'}</span>
-              <span class="jb-timer-label">Travel:</span>
-              <span class="jb-timer-val" id="jb-travel">${_timerCache.travel||'—'}</span>
-              <span class="jb-timer-label">OC:</span>
-              <span class="jb-timer-val" id="jb-oc">${_timerCache.oc||'—'}</span>
-              <span class="jb-timer-label">DTM:</span>
-              <span class="jb-timer-val" id="jb-dtm">${_timerCache.dtm||'—'}</span>
-              <span class="jb-timer-label">Prot:</span>
-              <span class="jb-timer-val" id="jb-prot">${_timerCache.prot||'—'}</span>
-              <span class="jb-timer-label">Hot:</span>
-              <span class="jb-timer-val" id="jb-hot-display" style="font-size:10px">${getHot()||'—'}</span>
-            </div>
-            </div>
-          </div>
-
-          <div class="jb-sect" data-fold="xp">
-            <div class="jb-sect-title jb-fold">
-              <span><span class="jb-caret">▾</span> Experience</span>
-              <span id="jb-xp-charts-link" style="cursor:pointer;text-decoration:underline;color:var(--jb-accent);font-size:10px;font-weight:500;text-transform:none;letter-spacing:0">📈 Charts</span>
-            </div>
-            <div class="jb-fold-body">
-            <div class="jb-timer-grid">
-              <span class="jb-timer-label">Rank:</span>
-              <span class="jb-timer-val" id="jb-rank-name" style="font-size:11px">—</span>
-              <span class="jb-timer-label">Total:</span>
-              <span class="jb-timer-val" id="jb-xp-total">—</span>
-              <span class="jb-timer-label">Session:</span>
-              <span class="jb-timer-val" id="jb-xp-session">—</span>
-              <span class="jb-timer-label">Rate:</span>
-              <span class="jb-timer-val" id="jb-xp-rate">—</span>
-              <span class="jb-timer-label">Last:</span>
-              <span class="jb-timer-val" id="jb-xp-last" style="font-size:10px">—</span>
-            </div>
-            <div style="margin-top:5px">
-              <div style="display:flex;justify-content:space-between;font-size:9px;color:var(--jb-text-ter);margin-bottom:2px">
-                <span id="jb-rank-pct">—</span>
-                <span id="jb-rank-tonext"></span>
-              </div>
-              <div style="background:var(--jb-border);border-radius:3px;height:7px;overflow:hidden">
-                <div id="jb-rank-bar" style="height:100%;width:0%;background:var(--jb-accent);border-radius:3px;transition:width .3s"></div>
-              </div>
-            </div>
-            </div>
-          </div>
         </div>
       </div>
 
-      <div class="jb-jail-counter" id="jb-jail-counter-row" style="display:flex;justify-content:space-between;align-items:center;padding:3px 10px;font-size:10px;border-top:1px solid var(--jb-border);color:var(--jb-text-ter)">
+      <div class="jb-jail-counter" id="jb-jail-counter-row" style="display:flex;justify-content:space-between;align-items:center;padding:2px 10px;font-size:10px;border-top:1px solid var(--jb-border);color:var(--jb-text-ter)">
         <span>⛓️ Jail attempts today:</span>
         <span><span id="jb-jail-hold" style="color:var(--jb-warning)"></span><span id="jb-jail-count" style="font-weight:600">0/2000</span></span>
       </div>
