@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.333
+// @version      2000.334
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -36,7 +36,7 @@
 // @downloadURL  https://gist.githubusercontent.com/scoobyghub/32b6a0336551df6e3b3a036e39155fdc/raw/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.333
+/*  Jarvis Bot 2000.334
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -108,7 +108,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.333';
+  const APP_VERSION = '2000.334';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -7228,7 +7228,10 @@
       const qty = boozeBuyQty();
       c.inp.value = qty;
       try { c.inp.dispatchEvent(new Event('input',{bubbles:true})); c.inp.dispatchEvent(new Event('change',{bubbles:true})); } catch(_){}
-      snapshotXP('booze', 'booze-buy'); c.btn.click(); incDailyCount('booze');   // earns nothing
+      /* QUIET, like jail (2000.334). A buy earns nothing, but snapshotXP() made it
+       * CLAIM the next reading — and that reading carries every jail bust since
+       * the last one, so jail's XP was being banked as booze. */
+      snapshotXPQuiet('booze-buy'); c.btn.click(); incDailyCount('booze');   // earns nothing
       localStorage.removeItem('cbBoozeBroke');
       st.lastBooze = now; markActed('booze', cfg.boozeInt); st.refresh = true; donePending('booze'); saveSt();
       setTimeout(() => { st.acting = false; st.action = ''; GM_setValue('cbActStart',0); }, 400 + Math.floor(Math.random()*300));
@@ -7526,6 +7529,25 @@
     return `${h}h ${m % 60}m`;
   }
 
+  /* Rank progress for the panel and the charts: from the exact XP total when we
+   * have one (xpRankProgress — what the header % and the stats page use), else
+   * from the game's own rank-bar % via resolveRank(). */
+  function rankFromXp(r) {
+    const rp = xpState.total > 0 ? xpRankProgress(xpState.total) : null;
+    if (rp) {
+      if (!rp.next) return { pct: 100, max: true, line: `${rp.rank} — max rank`, exact: true };
+      const i = RANKS.findIndex(x => x[0] === rp.next);
+      const span = i > 0 ? RANKS[i][1] - RANKS[i - 1][1] : 0;
+      const into = span ? parseFloat((span - rp.toNext).toFixed(2)) : null;
+      return { pct: rp.pct, max: false, exact: true, toNext: rp.toNext, next: rp.next,
+               line: into != null ? `${into}/${span} XP · ${rp.toNext} to ${rp.next}` : `${rp.toNext} XP to ${rp.next}` };
+    }
+    const pct = r && r.pct > 0 ? r.pct : 0;
+    const line = (r && r.toNext != null)
+      ? `${r.withinXp}/${(r.withinXp + r.toNext).toFixed(r.confident?2:1)} XP${r.confident?'':' ~'}` : '';
+    return { pct, max: false, exact: false, line, toNext: r ? r.toNext : null };
+  }
+
   // Front-panel summary line (cheap; runs on each xp read + timer tick)
   function updateXpUI() {
     try { updateHeaderRankBar(); } catch(_){}
@@ -7549,17 +7571,21 @@
 
     // Rank line + progress bar (from the status bar, enriched by perRankReq)
     const r = resolveRank();
+    /* THE BAR WAS EMPTY WITHOUT THE BOUGHT RANK BAR (2000.334). r.pct comes from
+     * the game's #lblRankbarPerc, which only renders once the rank bar has been
+     * bought in the Credits Store — so for everyone else it was 0 and the bar
+     * sat empty, while the header % and the stats page (which work from the
+     * exact XP total) read fine. Same source as those now; the game's own % is
+     * the fallback for when we have no XP total yet. */
+    const xr = rankFromXp(r);
     const nameEl = _shadow.querySelector('#jb-rank-name');
     const pctEl  = _shadow.querySelector('#jb-rank-pct');
     const nextEl = _shadow.querySelector('#jb-rank-tonext');
     const barEl  = _shadow.querySelector('#jb-rank-bar');
     if (nameEl) nameEl.textContent = r.name || '—';
-    if (pctEl)  pctEl.textContent = r.pct > 0 ? `${r.pct.toFixed(1)}% to next` : '—';
-    if (nextEl) {
-      if (r.toNext != null) nextEl.textContent = `${r.withinXp}/${(r.withinXp + r.toNext).toFixed(r.confident?2:1)} XP${r.confident?'':' ~'}`;
-      else nextEl.textContent = '';
-    }
-    if (barEl) barEl.style.width = `${Math.max(0, Math.min(100, r.pct))}%`;
+    if (pctEl)  pctEl.textContent = xr.pct > 0 ? (xr.max ? 'max rank' : `${xr.pct.toFixed(1)}% to next`) : '—';
+    if (nextEl) nextEl.textContent = xr.line || '';
+    if (barEl) barEl.style.width = `${Math.max(0, Math.min(100, xr.pct))}%`;
 
     // If the charts modal is open, refresh it live too
     const m = _shadow.querySelector('#jb-xp-modal');
@@ -7581,7 +7607,8 @@
     const rankHost = _shadow.querySelector('#jb-xp-rank');
     if (rankHost) {
       const r = resolveRank();
-      const pct = Math.max(0, Math.min(100, r.pct || 0));
+      const xr = rankFromXp(r);   // see rankFromXp — same source as the panel bar
+      const pct = Math.max(0, Math.min(100, xr.pct || 0));
       const absLine = (r.toNext != null)
         ? `<div style="font-size:10px;color:var(--jb-text-sec);margin-top:3px">${r.withinXp} / ${(r.withinXp + r.toNext).toFixed(r.confident?2:1)} XP this rank · <b>${r.toNext}${r.confident?'':'~'}</b> to next${r.confident?'':' <span style="color:var(--jb-text-ter)">(approx)</span>'}</div>`
         : `<div style="font-size:10px;color:var(--jb-text-ter);margin-top:3px">Collecting XP data to estimate XP-to-next…</div>`;
@@ -7599,7 +7626,7 @@
       rankHost.innerHTML =
         `<div style="display:flex;justify-content:space-between;align-items:baseline">
            <span style="font-weight:600">${r.name || '—'}</span>
-           <span style="font-size:10px;color:var(--jb-text-sec)">${r.pct>0?pct.toFixed(1)+'% to next':''}</span>
+           <span style="font-size:10px;color:var(--jb-text-sec)">${xr.max ? 'max rank' : pct>0 ? pct.toFixed(1)+'% to next' : ''}</span>
          </div>
          <div style="background:var(--jb-border);border-radius:3px;height:8px;overflow:hidden;margin-top:4px">
            <div style="height:100%;width:${pct}%;background:var(--jb-accent);border-radius:3px"></div>
@@ -13334,15 +13361,33 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
     if (bundled) xpState.bundledReads = (xpState.bundledReads || 0) + 1;
     else         xpState.cleanReads   = (xpState.cleanReads   || 0) + 1;
 
-    if (typeof xpState.perAction[action] !== 'number') xpState.perAction[action] = 0;
-    xpState.perAction[action] = parseFloat((xpState.perAction[action] + gained).toFixed(4));
-
-    const entry = { t: Date.now(), gained, action, icon: ACTION_ICON[action] || '⚡', total: xp, src: source };
-    if (bundled) { entry.n = covered.length; entry.mix = xpMixSummary(covered); }
-    if (inferred) entry.inf = true;
     // Busts caught in this reading, kept so a later OC/DTM notification can
     // subtract their share at the learned rate rather than guessing.
     const jn = covered.filter(e => e.a === 'jail').length;
+
+    /* GIVE JAIL ITS SHARE OF A CLAIMED READING (2000.334). Jail busts every few
+     * seconds and never claims, so the reading an action claims also holds every
+     * bust since the previous reading — and all of it was credited to the
+     * action. Booze, which fires twice per cycle and earns little, was inflated
+     * most. With a learned per-bust rate (jailAvgXp, from jail-only readings) we
+     * hand jn × rate back to jail — the same split the OC/DTM payout
+     * reconciliation already does. No learned rate yet → no split, as before. */
+    let actionGain = gained, jailShare = 0;
+    if (!inferred && action !== 'jail' && jn > 0) {
+      const avg = jailAvgXp();
+      if (avg > 0) {
+        jailShare = parseFloat(Math.min(gained, jn * avg).toFixed(4));
+        actionGain = parseFloat((gained - jailShare).toFixed(4));
+      }
+    }
+    if (typeof xpState.perAction[action] !== 'number') xpState.perAction[action] = 0;
+    xpState.perAction[action] = parseFloat((xpState.perAction[action] + actionGain).toFixed(4));
+    if (jailShare > 0) xpState.perAction.jail = parseFloat(((xpState.perAction.jail || 0) + jailShare).toFixed(4));
+
+    const entry = { t: Date.now(), gained: actionGain, action, icon: ACTION_ICON[action] || '⚡', total: xp, src: source };
+    if (jailShare > 0) entry.split = jailShare;
+    if (bundled) { entry.n = covered.length; entry.mix = xpMixSummary(covered); }
+    if (inferred) entry.inf = true;
     if (jn) entry.jn = jn;
     xpState.history.unshift(entry);
     if (xpState.history.length > XP_HISTORY_CAP) xpState.history.pop();
