@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.332
+// @version      2000.333
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -36,7 +36,7 @@
 // @downloadURL  https://gist.githubusercontent.com/scoobyghub/32b6a0336551df6e3b3a036e39155fdc/raw/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.332
+/*  Jarvis Bot 2000.333
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -108,7 +108,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.332';
+  const APP_VERSION = '2000.333';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -6196,6 +6196,7 @@
     else console.warn(APP_TAG, '[SG] All three list fetches failed — will retry shortly');
     _sgFetching = false;
     try { colourPlayerLinks(); } catch(_){}
+    try { renderSgStatusUI(); } catch(_){}
   }
 
   // Precedence follows the reference implementation: watched > safe > allied.
@@ -6239,6 +6240,113 @@
     el.title = s.state === 'fresh' ? 'Starvinggeeks lists are fresh' :
       s.state === 'stale' ? 'Starvinggeeks lists are stale — gating will fail open, not block' :
       s.state === 'waiting' ? 'Waiting for the first SG list fetch' : 'SG lists are off';
+  }
+
+  /* === SG ACCESS LIGHT — YOUR IP, AND WHETHER STARVINGGEEKS LETS IT IN (2000.333) ===
+   *
+   * The SG endpoints are IP-allowlisted. When your IP drops off the list (a new
+   * IP from the ISP, or the access window lapsing) the three list fetches simply
+   * fail, Jarvis keeps the last copy it had, and the lists go quietly out of date
+   * — which is what "the SG list is often out of date" was. Nothing on the panel
+   * said why.
+   *
+   * Ported from the reference's verifyAccess() / getAccessStatusDisplay():
+   * starvinggeeks.net/helper/ renders your IP in its <h2> and an #AccessStatus
+   * element that reads Granted (class status-granted) or not. Checked every 5
+   * minutes while SG lists or SG Push are on.
+   *
+   * THE LIGHT: green = access GRANTED on a check within the last 10 minutes;
+   * red = denied, the check failed, or the last good check is older than that;
+   * grey = never checked. Click the row to open the helper page (to renew your
+   * access) — it then re-checks and refreshes the lists by itself.
+   *
+   * Read-only, like the lists: one GET of a page, nothing is ever sent. When
+   * access comes back after being denied, the lists are re-fetched at once
+   * instead of waiting out the 5-minute freshness window. */
+  const SG_ACCESS_URL      = 'https://starvinggeeks.net/helper/';
+  const SG_ACCESS_EVERY_MS = 5 * 60 * 1000;    // the reference's ACCESS_CHECK_INTERVAL
+  const SG_ACCESS_FRESH_MS = 10 * 60 * 1000;   // older than this and the light goes red
+  const LS_SG_ACCESS       = 'cbSgAccess';     // { ip, granted, status, at, ok }
+  let _sgAccessBusy = false;
+
+  function sgAccessState() {
+    try { const a = JSON.parse(localStorage.getItem(LS_SG_ACCESS) || 'null'); return a && typeof a === 'object' ? a : null; }
+    catch(_) { return null; }
+  }
+
+  function sgAccessWanted() { return !!(sgCfg.on || (typeof sgPush !== 'undefined' && sgPush.on)); }
+
+  function checkSgAccess(force) {
+    if (!sgAccessWanted() || _sgAccessBusy) return;
+    const lastTry = parseInt(localStorage.getItem('cbSgAccessTry') || '0', 10) || 0;
+    if (!force && Date.now() - lastTry < SG_ACCESS_EVERY_MS) return;
+    localStorage.setItem('cbSgAccessTry', String(Date.now()));
+    _sgAccessBusy = true;
+    const prev = sgAccessState();
+    const finish = rec => {
+      _sgAccessBusy = false;
+      try { localStorage.setItem(LS_SG_ACCESS, JSON.stringify(rec)); } catch(_){}
+      if (rec.ok && rec.granted && !(prev && prev.ok && prev.granted)) {
+        console.log(`${APP_TAG}[SG] Access GRANTED for ${rec.ip} — refreshing the lists now`);
+        try { fetchSgLists(true); } catch(_){}
+      } else if (rec.ok && !rec.granted && (!prev || prev.granted !== false)) {
+        console.warn(`${APP_TAG}[SG] Access DENIED for ${rec.ip} (${rec.status}) — the SG lists cannot update until it is granted again`);
+      }
+      try { renderSgAccessUI(); } catch(_){}
+    };
+    GM_xmlhttpRequest({
+      method: 'GET', url: SG_ACCESS_URL + '?_=' + Date.now(), timeout: 15000,
+      headers: { 'Cache-Control': 'no-cache' },
+      onload: r => {
+        if (r.status < 200 || r.status >= 300) {
+          return finish({ ...(prev || {}), ok: false, err: 'HTTP ' + r.status, at: (prev && prev.at) || 0, triedAt: Date.now() });
+        }
+        try {
+          const doc = new DOMParser().parseFromString(r.responseText || '', 'text/html');
+          const h2 = doc.querySelector('h2');
+          const ip = h2 ? (h2.textContent || '').replace(/IP\s*:?/i, '').trim() : '';
+          const el = doc.querySelector('#AccessStatus');
+          const status = el ? (el.textContent || '').trim() : 'Unknown';
+          const granted = !!el && (el.classList.contains('status-granted') || /^granted$/i.test(status));
+          finish({ ok: true, ip: ip || 'Unknown', granted, status, at: Date.now(), triedAt: Date.now() });
+        } catch (e) {
+          finish({ ...(prev || {}), ok: false, err: 'unreadable page', at: (prev && prev.at) || 0, triedAt: Date.now() });
+        }
+      },
+      onerror:   () => finish({ ...(prev || {}), ok: false, err: 'network', at: (prev && prev.at) || 0, triedAt: Date.now() }),
+      ontimeout: () => finish({ ...(prev || {}), ok: false, err: 'timeout', at: (prev && prev.at) || 0, triedAt: Date.now() })
+    });
+  }
+
+  function renderSgAccessUI() {
+    if (!_shadow) return;
+    const row = _shadow.querySelector('#jb-ip-row');
+    if (!row) return;
+    if (!sgAccessWanted()) { row.style.display = 'none'; return; }
+    row.style.display = 'flex';
+    const a = sgAccessState();
+    const ipEl = _shadow.querySelector('#jb-ip'), dot = _shadow.querySelector('#jb-ip-dot'), ageEl = _shadow.querySelector('#jb-ip-age');
+    let colour = 'var(--jb-text-ter)', tip = 'Not checked yet', age = '';
+    if (a && a.at) {
+      const mins = Math.floor((Date.now() - a.at) / 60000);
+      age = mins < 1 ? 'now' : mins + 'm';
+      const fresh = (Date.now() - a.at) <= SG_ACCESS_FRESH_MS;
+      if (a.granted && fresh && a.ok !== false) {
+        colour = 'var(--jb-success)';
+        tip = `Starvinggeeks access GRANTED for ${a.ip} (checked ${age === 'now' ? 'just now' : age + ' ago'}). Click to open the helper page.`;
+      } else {
+        colour = 'var(--jb-danger)';
+        tip = !a.granted ? `Starvinggeeks access DENIED for ${a.ip} (${a.status}) — the SG lists cannot update. Click to open the helper page and renew it.`
+            : a.ok === false ? `Last access check failed (${a.err || 'error'}) — last good one ${age === 'now' ? 'just now' : age + ' ago'}. Click to open the helper page.`
+            : `Last access check was ${age === 'now' ? 'just now' : age + ' ago'} — too old to trust. Click to open the helper page.`;
+      }
+    } else if (a && a.ok === false) {
+      colour = 'var(--jb-danger)'; tip = `Access check failed (${a.err || 'error'}). Click to open the helper page.`;
+    }
+    if (ipEl) ipEl.textContent = (a && a.ip) ? a.ip : 'IP —';
+    if (ageEl) ageEl.textContent = age;
+    if (dot) { dot.style.color = colour; dot.style.background = colour; }
+    row.title = tip;
   }
 
   function colourPlayerLinks(root) {
@@ -9062,6 +9170,12 @@
         background: var(--jb-surface-alt); border: 1px solid var(--jb-border);
       }
       .jb-power-info { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 11px; }
+      .jb-power { flex-wrap: wrap; row-gap: 1px; }
+      .jb-power-ip {
+        flex: 1 1 100%; display: flex; align-items: center; justify-content: flex-end; gap: 4px;
+        font-size: 10px; color: var(--jb-text-sec); cursor: pointer;
+      }
+      .jb-power-ip:hover { color: var(--jb-accent); }
       .jb-power .jb-switch input[type="checkbox"] { width: 34px; height: 18px; border-radius: 9px; }
       .jb-power .jb-switch input[type="checkbox"]::after { width: 14px; height: 14px; }
       .jb-power .jb-switch input[type="checkbox"]:checked::after { transform: translateX(16px); }
@@ -9258,6 +9372,12 @@
             <div class="jb-power-info">
               <span id="jb-player-badge" style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:110px">${esc(st.player||'—')}</span>
               <span class="jb-flex" style="gap:3px"><span class="jb-timer-label">Mod</span><span id="jb-mod-light" title="Staff watch" style="display:inline-flex;align-items:center"><span class="jb-status-dot" id="jb-mod-light-dot" style="color:var(--jb-text-ter)"></span></span></span>
+            </div>
+            <div class="jb-power-ip" id="jb-ip-row" style="display:none" title="Starvinggeeks access">
+              <span>🌐</span><span id="jb-ip">IP —</span>
+              <span class="jb-status-dot" id="jb-ip-dot" style="color:var(--jb-text-ter)"></span>
+              <span id="jb-ip-age" style="color:var(--jb-text-ter)"></span>
+              <span style="color:var(--jb-text-ter)">· SG</span>
             </div>
           </div>
 
@@ -10274,17 +10394,37 @@
       if (scb) { scb.checked = sgCfg.on;
         scb.addEventListener('change', e => {
           sgCfg.on = e.target.checked; saveSgCfg();
-          if (sgCfg.on) { try { initSgLists(); fetchSgLists(true); } catch(_){} setStatus('🎨 SG lists on'); }
+          if (sgCfg.on) { try { initSgLists(); fetchSgLists(true); checkSgAccess(true); } catch(_){} setStatus('🎨 SG lists on'); }
           else {
             try { renderSgStatusUI(); } catch(_){ }
             setStatus('🎨 SG lists off — reload to clear colours');
           }
-          try { renderSgStatusUI(); } catch(_){ }
+          try { renderSgStatusUI(); renderSgAccessUI(); } catch(_){ }
         }); } }
 
+    { const ipr = _shadow.querySelector('#jb-ip-row');
+      if (ipr) ipr.addEventListener('click', () => {
+        // Renewing access happens on the site itself; open it, then re-check
+        // shortly after so the light (and the lists) follow without a reload.
+        try { window.open(SG_ACCESS_URL, '_blank', 'noopener'); } catch(_){}
+        setTimeout(() => { try { checkSgAccess(true); } catch(_){} }, 15000);
+        setStatus('🌐 Opened the Starvinggeeks helper — re-checking access in 15s');
+      }); }
+    { const sgs = _shadow.querySelector('#jb-sg-status');
+      if (sgs) {
+        sgs.style.cursor = 'pointer';
+        sgs.title = 'Click to refresh the SG lists now';
+        sgs.addEventListener('click', e => {
+          e.preventDefault(); e.stopPropagation();   // it sits inside the switch's label
+          if (!sgCfg.on) return;
+          try { checkSgAccess(true); fetchSgLists(true); } catch(_){}
+          setStatus('🎨 Refreshing the SG lists…');
+        });
+      } }
     { const spb = _shadow.querySelector('#jb-sgpush-on');
       if (spb) spb.addEventListener('change', e => {
         sgPush.on = e.target.checked; saveSgPush();
+        try { renderSgAccessUI(); if (sgPush.on) checkSgAccess(true); } catch(_){}
         setStatus('📤 Starvinggeeks push ' + (sgPush.on ? 'ON' : 'OFF'));
       }); }
 
@@ -11226,6 +11366,7 @@
       try { updateHqUI(); } catch(_){}
       // Catches any switch flipped by code that has no hook into the panel.
       try { repaintRibbon(); } catch(_){}
+      try { renderSgStatusUI(); renderSgAccessUI(); } catch(_){}
       /* Staff readout. Deliberately distinguishes "nobody on" from "we don't
        * know" — a stale reading suppresses nothing, so saying "all clear" when
        * the check is actually failing would be a lie you'd act on. */
@@ -11536,6 +11677,7 @@
     try { updateDtmKickUI(); } catch(_){}
     try { updateHqUI(); } catch(_){}
     try { updateSmartPreview(); } catch(_){}
+    try { renderSgStatusUI(); renderSgAccessUI(); } catch(_){}
 
     // Drag — grab from anywhere on the panel except interactive controls
     let locked = GM_getValue('cbLocked', true);
@@ -14763,6 +14905,12 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
     try { maybeWatchScan(); } catch(_){}   // online / mod / property — see maybeWatchScan
     try { doForumRefresh(); } catch(_){}   // fire-and-forget; never gates the loop
     try { maybeSgPush(); } catch(_){}      // fire-and-forget; off by default, see maybeSgPush()
+    /* SG lists + access (2000.333). The lists were fetched only by initSgLists,
+     * once per page load — a page that sat still (jail off, Away) never refreshed
+     * them. Both self-throttle (5 min fresh / 30s retry; 5 min access), so calling
+     * them every tick costs nothing. */
+    try { if (sgCfg.on) fetchSgLists(); } catch(_){}
+    try { checkSgAccess(); } catch(_){}
     try { maybeFleetCheckin(); } catch(_){} // fire-and-forget; off by default, see maybeFleetCheckin()
     try { maybeKaySync(); } catch(_){}      // fire-and-forget; off by default, see maybeKaySync()
     try { maybeForceStatRefresh(); } catch(_){}
