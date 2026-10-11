@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.335
+// @version      2000.336
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -36,7 +36,7 @@
 // @downloadURL  https://gist.githubusercontent.com/scoobyghub/32b6a0336551df6e3b3a036e39155fdc/raw/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.335
+/*  Jarvis Bot 2000.336
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -108,7 +108,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.335';
+  const APP_VERSION = '2000.336';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -2416,6 +2416,41 @@
 
   function doSleepLogout() { doLogout('sleep window'); }
 
+  /* === THE SERVER ENDED THE SESSION — NOTICE IT (2000.336) ===
+   *
+   * Reported: looking at a player's profile, the page sits there doing nothing,
+   * and the first click lands on the logout and then the login screen. The
+   * session had already ended server-side; Jarvis only finds out when IT loads a
+   * page, and on a page you're reading by hand it doesn't.
+   *
+   * Its background checks DID find out — the mail poll, the timer fetches and
+   * the keep-alive all got the login page back — and every one of them quietly
+   * ignored it. The keep-alive was worse than silent: fetch() follows the
+   * redirect, the login page answers 200, and it logged "Ping OK".
+   *
+   * So any background check that comes back with the login page (by URL, or the
+   * login form itself in the body) now sends the tab to /login.aspx, where
+   * auto-login signs straight back in. Once a minute at most, never while
+   * halted (a halt is meant to let the session lapse), and only from the
+   * master tab — the only one that runs these checks. */
+  function respIsLogin(url) { return /\/login\.aspx/i.test(String(url || '')); }
+  function docIsLoginForm(doc) {
+    try { return !!(doc && doc.querySelector('#ctl00_main_txtPassword, input[name="ctl00$main$txtPassword"]')); }
+    catch (_) { return false; }
+  }
+  function noteSessionLost(src) {
+    try {
+      if (isHalted()) return;
+      if (/\/login\.aspx/i.test(location.pathname)) return;
+      const last = parseInt(localStorage.getItem('cbSessionLostAt') || '0', 10) || 0;
+      if (Date.now() - last < 60000) return;
+      localStorage.setItem('cbSessionLostAt', String(Date.now()));
+      console.warn(`${APP_TAG}[SESSION] ${src} came back with the login page — the server has ended the session. Going to the login page so auto-login can sign back in.`);
+      try { setStatus('🔐 Session ended — going to the login page'); } catch(_){}
+      setTimeout(() => { window.location.href = '/login.aspx'; }, 800);
+    } catch (_) {}
+  }
+
   // Triggered by the online-watch when a listed player comes online, if the
   // logout action is enabled. Sets a suppression window so auto-login stays off
   // for the configured number of minutes rather than signing straight back in.
@@ -3145,6 +3180,7 @@
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const html = await r.text();
         const doc = new DOMParser().parseFromString(html, 'text/html');
+        if (respIsLogin(r.url) || docIsLoginForm(doc)) noteSessionLost('players page');
         if (isLoginDoc(doc)) throw new Error('Logged out');
         return { doc, url: window.location.origin + p };
       } catch(e) { lastErr = e; }
@@ -3912,6 +3948,7 @@
       const r = await fetch(url, { method:'GET', headers:{'Cache-Control':'no-cache'}, credentials:'same-origin' });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const doc = new DOMParser().parseFromString(await r.text(), 'text/html');
+      if (respIsLogin(r.url) || docIsLoginForm(doc)) noteSessionLost('DTM timer');
       if (isLoginDoc(doc)) return null;   // session gone — has neither heading, so it would read as Running
       return parseOcDtmDoc(doc, 'DTM', 'Start a Drugs Transportation Mission');
     } catch(e) { console.error(APP_TAG,'DTM timer err',e); return null; }
@@ -3923,6 +3960,7 @@
       const r = await fetch(url, { method:'GET', headers:{'Cache-Control':'no-cache'}, credentials:'same-origin' });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const doc = new DOMParser().parseFromString(await r.text(), 'text/html');
+      if (respIsLogin(r.url) || docIsLoginForm(doc)) noteSessionLost('OC timer');
       if (isLoginDoc(doc)) return null;
       return parseOcDtmDoc(doc, 'OC', 'Start an Organized Crime');
     } catch(e) { console.error(APP_TAG,'OC timer err',e); return null; }
@@ -3993,6 +4031,7 @@
       dlog('[JB][TRAVEL] Fetching:', url);
       const r = await fetch(url, { method:'GET', headers:{'Cache-Control':'no-cache'}, credentials:'same-origin' });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      if (respIsLogin(r.url)) { noteSessionLost('travel timer'); return; }
       const html = await r.text();
       const doc = new DOMParser().parseFromString(html, 'text/html');
 
@@ -4161,6 +4200,7 @@
       const url = `${window.location.origin}/authenticated/statistics.aspx?p=p&_=${Date.now()}`;
       const r = await fetch(url, { method:'GET', headers:{'Cache-Control':'no-cache'}, credentials:'same-origin' });
       if (!r.ok) return;
+      if (respIsLogin(r.url)) { noteSessionLost('protection check'); return; }
       const doc = new DOMParser().parseFromString(await r.text(), 'text/html');
       const el = doc.getElementById('ctl00_main_lblNewPlayerProtectionEndDate');
       if (el) {
@@ -4750,6 +4790,7 @@
         headers:{'Cache-Control':'no-cache,no-store','Pragma':'no-cache'},
         onload: r => {
           const fin = r.finalUrl||url;
+          if (respIsLogin(fin)) noteSessionLost('mail check');
           if (r.status >= 200 && r.status < 300) res({html:r.responseText, finalUrl:fin, status:r.status});
           else rej(new Error(`HTTP ${r.status} for ${fin}`));
         },
@@ -8951,6 +8992,7 @@
                             { credentials:'same-origin', cache:'no-store' });
       if (!r.ok) throw new Error('HTTP ' + r.status);
       const doc = new DOMParser().parseFromString(await r.text(), 'text/html');
+      if (respIsLogin(r.url) || docIsLoginForm(doc)) noteSessionLost('hot city check');
       if (isLoginDoc(doc)) throw new Error('logged out');
       const city = scrapeHot(doc);
       if (!city) {
@@ -13850,7 +13892,11 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
         credentials: 'include',
         cache: 'no-store'
       }).then(r => {
-        if (r.ok) {
+        // fetch() follows the redirect, so a dead session reads as 200 from the
+        // login page — check WHERE it ended up before calling it OK.
+        if (respIsLogin(r.url)) {
+          noteSessionLost('keep-alive');
+        } else if (r.ok) {
           console.log('[JB][KEEPALIVE] Ping OK');
         } else if (r.status === 302 || r.redirected) {
           console.warn('[JB][KEEPALIVE] Session may have expired (redirect)');
