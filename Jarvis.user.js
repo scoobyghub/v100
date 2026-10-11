@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.334
+// @version      2000.335
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -36,7 +36,7 @@
 // @downloadURL  https://gist.githubusercontent.com/scoobyghub/32b6a0336551df6e3b3a036e39155fdc/raw/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.334
+/*  Jarvis Bot 2000.335
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -108,7 +108,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.334';
+  const APP_VERSION = '2000.335';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -12243,14 +12243,11 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
         localStorage.setItem(LS_DTM_LIST_DONE, String(Date.now()));
         tgMsg('dtmList', `📋 <b>DTM List</b>\n${st.player||'?'} | Added to DTM list in ${getCurCity()}`);
         setStatus('📋 Added to DTM list');
-
-        setTimeout(() => {
-          st.acting = false; st.action = '';
-          GM_setValue('cbActStart', 0);
-          saveSt();
-          // Go back to crimes
-          window.location.href = '/authenticated/crimes.aspx?' + Date.now();
-        }, 1500);
+        /* NO NAVIGATE-AWAY (2000.335). The click is a postback that reloads this
+         * page by itself; navigating 1.5s later CANCELLED it whenever the server was
+         * slower than that, so the ad never went up (or never came down). The
+         * reference fixed the same thing in 4.20.281. st.acting stays held until the
+         * reload — checkStuck() frees it after 15s if the postback never returns. */
       }, 300 + Math.floor(Math.random() * 400));
 
       return true;
@@ -12340,14 +12337,11 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
         localStorage.setItem(LS_OC_LIST_DONE, String(Date.now()));
         tgMsg('ocList', `📋 <b>OC List</b>\n${st.player||'?'} | Added to OC list in ${getCurCity()}`);
         setStatus('📋 Added to OC list');
-
-        setTimeout(() => {
-          st.acting = false; st.action = '';
-          GM_setValue('cbActStart', 0);
-          saveSt();
-          // Go back to crimes
-          window.location.href = '/authenticated/crimes.aspx?' + Date.now();
-        }, 1500);
+        /* NO NAVIGATE-AWAY (2000.335). The click is a postback that reloads this
+         * page by itself; navigating 1.5s later CANCELLED it whenever the server was
+         * slower than that, so the ad never went up (or never came down). The
+         * reference fixed the same thing in 4.20.281. st.acting stays held until the
+         * reload — checkStuck() frees it after 15s if the postback never returns. */
       }, 300 + Math.floor(Math.random() * 400));
 
       return true;
@@ -12425,12 +12419,11 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
     setTimeout(() => {
       btn.click();
       localStorage.removeItem(needKey);
-      setTimeout(() => {
-        st.acting = false; st.action = '';
-        GM_setValue('cbActStart', 0);
-        saveSt();
-        window.location.href = '/authenticated/crimes.aspx?' + Date.now();
-      }, 1500);
+      /* NO NAVIGATE-AWAY (2000.335). The click is a postback that reloads this
+       * page by itself; navigating 1.5s later CANCELLED it whenever the server was
+       * slower than that, so the ad never went up (or never came down). The
+       * reference fixed the same thing in 4.20.281. st.acting stays held until the
+       * reload — checkStuck() frees it after 15s if the postback never returns. */
     }, 300 + Math.floor(Math.random() * 400));
     return true;
   }
@@ -14429,7 +14422,17 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
 
     const next = parseInt(localStorage.getItem(LS_CREATE_DTM_NEXT) || '0', 10);
     // Still waiting for a scheduled retry — hold position on this page, don't fall through
-    if (next > Date.now()) { st.acting = true; st.action = 'dtm-create'; return true; }
+    /* A LONG WAIT MUST NOT FREEZE EVERYTHING ELSE (2000.335). This held position
+     * — st.acting, so no crime, GTA, booze or jail — for the whole of every
+     * wait: 60s after each invite, and up to 15 MINUTES while waiting for
+     * someone to appear on the DTM list. The reference made the same change in
+     * 4.20.281 ("classifieds empty — retry in 3m, doing other actions"). Short
+     * waits (a page settling) still hold; anything longer stands aside, and the
+     * main loop brings us back here when it is due. */
+    if (next > Date.now()) {
+      if (next - Date.now() > 15000) { st.acting = false; st.action = ''; return false; }
+      st.acting = true; st.action = 'dtm-create'; return true;
+    }
 
     const step = getCreateDtmStep();
     const partner = dtmCurrentPartner();   // chosen-from-list if there is one, else the fixed one
