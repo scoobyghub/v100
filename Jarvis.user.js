@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.336
+// @version      2000.337
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -36,7 +36,7 @@
 // @downloadURL  https://gist.githubusercontent.com/scoobyghub/32b6a0336551df6e3b3a036e39155fdc/raw/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.336
+/*  Jarvis Bot 2000.337
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -108,7 +108,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.336';
+  const APP_VERSION = '2000.337';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -2438,17 +2438,54 @@
     try { return !!(doc && doc.querySelector('#ctl00_main_txtPassword, input[name="ctl00$main$txtPassword"]')); }
     catch (_) { return false; }
   }
+  /* VERIFY FIRST, AND NEVER OPEN login.aspx OURSELVES (2000.337).
+   *
+   * 2000.336 jumped straight to /login.aspx on ONE suspicious response. Loading
+   * the login page while still signed in can itself end the session, so any
+   * single misread — one fetch landing oddly, one page carrying an unexpected
+   * field — became a real logout. Reported straight after 336 as "we get logged
+   * out a lot now", and it would also have cut DTM invite accepts off mid-flow.
+   *
+   * Now a hit only starts a CHECK: one plain same-origin GET of an ordinary game
+   * page, with the page's own cookies. Only if that ALSO comes back as the login
+   * page do we act — and then by re-loading the page we are on (as a GET), so it
+   * is the GAME that redirects us to login, exactly as a click would have. A
+   * false alarm changes nothing and is logged with its source, so it can be
+   * traced. Never while halted, never during a deliberate post-click lock, at
+   * most once a minute. */
+  let _sessChecking = false;
   function noteSessionLost(src) {
     try {
-      if (isHalted()) return;
+      if (isHalted() || _sessChecking) return;
       if (/\/login\.aspx/i.test(location.pathname)) return;
+      const lock = parseInt(localStorage.getItem('cbActionLockUntil') || '0', 10) || 0;
+      if (lock > Date.now()) return;            // mid-postback — the page is about to change anyway
       const last = parseInt(localStorage.getItem('cbSessionLostAt') || '0', 10) || 0;
       if (Date.now() - last < 60000) return;
       localStorage.setItem('cbSessionLostAt', String(Date.now()));
-      console.warn(`${APP_TAG}[SESSION] ${src} came back with the login page — the server has ended the session. Going to the login page so auto-login can sign back in.`);
-      try { setStatus('🔐 Session ended — going to the login page'); } catch(_){}
-      setTimeout(() => { window.location.href = '/login.aspx'; }, 800);
-    } catch (_) {}
+      _sessChecking = true;
+      console.warn(`${APP_TAG}[SESSION] ${src} came back with the login page — checking the session before doing anything`);
+      fetch('/authenticated/players.aspx?_=' + Date.now(), { credentials: 'same-origin', cache: 'no-store' })
+        .then(async r => {
+          const doc = new DOMParser().parseFromString(await r.text(), 'text/html');
+          const dead = respIsLogin(r.url) || docIsLoginForm(doc);
+          if (!dead) {
+            console.warn(`${APP_TAG}[SESSION] False alarm from ${src} — the session is fine, staying put`);
+            try {
+              const log = JSON.parse(localStorage.getItem('cbSessionFalseAlarms') || '[]');
+              log.push({ src, at: Date.now() }); while (log.length > 20) log.shift();
+              localStorage.setItem('cbSessionFalseAlarms', JSON.stringify(log));
+            } catch(_){}
+            return;
+          }
+          console.warn(`${APP_TAG}[SESSION] Confirmed: the server has ended the session (${src}). Re-loading this page so the game takes us to login.`);
+          try { setStatus('🔐 Session ended — re-loading so auto-login can sign back in'); } catch(_){}
+          // A GET of where we are — never location.reload(), which would re-post a form.
+          setTimeout(() => { window.location.href = location.pathname + location.search; }, 800);
+        })
+        .catch(() => {})                         // network blip — prove nothing, do nothing
+        .finally(() => { _sessChecking = false; });
+    } catch (_) { _sessChecking = false; }
   }
 
   // Triggered by the online-watch when a listed player comes online, if the
