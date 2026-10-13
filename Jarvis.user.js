@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.340
+// @version      2000.341
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -36,12 +36,53 @@
 // @downloadURL  https://gist.githubusercontent.com/scoobyghub/32b6a0336551df6e3b3a036e39155fdc/raw/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.340
+/*  Jarvis Bot 2000.341
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
  *  Telegram alerts, staff-check detection, auto-login
  */
+
+/* === BOOT WATCH (2000.341) ===
+ * Reported from the Android tablet: "UI not showing or running". On a PC a
+ * start-up error is one F12 away; on the tablet there is no console, so a
+ * script that dies on start-up is simply invisible and there is nothing to
+ * report. This makes the failure show itself ON THE PAGE:
+ *   · a start-up error  → a red box with the version and the error text;
+ *   · no error but the script never finished starting → the same box saying so.
+ * Nothing appears at all when Jarvis starts normally. And if no box EVER
+ * appears while the panel is missing, Tampermonkey is not running the script
+ * on that page (or the script cannot even be parsed) — which is an answer too.
+ * Tap the box to hide it. */
+var __jbBoot = { ok: false, err: null, show: null };
+(function jbBootWatch() {
+    try {
+        if (window.top !== window.self) return;
+        let shown = false;
+        __jbBoot.show = function () {
+            try {
+                if (shown || (__jbBoot.ok && !__jbBoot.err)) return;
+                if (!__jbBoot.err && document.readyState === 'loading') { setTimeout(__jbBoot.show, 2000); return; }
+                shown = true;
+                const ver = (typeof GM_info !== 'undefined' && GM_info && GM_info.script && GM_info.script.version) || '?';
+                const e = __jbBoot.err;
+                const b = document.createElement('div');
+                b.id = 'jb-boot-fail';
+                b.textContent = 'Jarvis ' + ver + (e
+                    ? ' FAILED TO START\n' + (e.message || String(e)) + '\n' + String(e.stack || '').split('\n').slice(0, 4).join('\n')
+                    : ' did not finish starting on this page (no error was caught)') +
+                    '\n' + location.pathname + '\n(tap to hide — send a photo of this)';
+                b.setAttribute('style', 'position:fixed;left:6px;top:6px;z-index:2147483647;max-width:92vw;' +
+                    'background:#a4262c;color:#fff;font:12px/1.4 monospace;padding:8px 10px;border-radius:4px;' +
+                    'white-space:pre-wrap;word-break:break-word;box-shadow:0 2px 10px rgba(0,0,0,.6)');
+                b.addEventListener('click', function () { b.remove(); });
+                (document.body || document.documentElement).appendChild(b);
+                console.error('[JB][BOOT]', b.textContent);
+            } catch (_) {}
+        };
+        setTimeout(__jbBoot.show, 6000);
+    } catch (_) {}
+})();
 
 (function () {
     try {
@@ -102,13 +143,13 @@
     } catch (e) {}
 })();
 
-(function () {
+try { (function () {
   'use strict';
 
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.340';
+  const APP_VERSION = '2000.341';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -754,6 +795,7 @@
   const _search  = window.location.search.toLowerCase();
 
   if (_path.includes('/default.aspx') && _search.includes('show=1')) {
+    __jbBoot.ok = true;
     console.log(APP_TAG, 'Session refresh — redirecting in 6s');
     const ov = document.createElement('div');
     Object.assign(ov.style, {
@@ -778,6 +820,7 @@
   const _isLogin = _path.includes('/login.aspx');
 
   if (_isLogin) {
+    __jbBoot.ok = true;      // the login page is a normal place to be
     diagSnapshotAtLogin();   // what led up to this — see the BLACK-BOX RECORDER
     fireLogoutAlerts();
     earlyLogoutTelegram('login-start');
@@ -15411,7 +15454,14 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
   /* === INIT === */
 
   function init() {
-    if (document.readyState === 'loading') { document.addEventListener('DOMContentLoaded', init); return; }
+    if (document.readyState === 'loading') {
+      // Deferred start — outside the try/catch at the bottom of the file, so it
+      // needs its own, or a failure here would be invisible again.
+      document.addEventListener('DOMContentLoaded', () => {
+        try { init(); } catch (e) { try { __jbBoot.err = e; if (__jbBoot.show) __jbBoot.show(); } catch (_) {} throw e; }
+      });
+      return;
+    }
     /* Scrub any excluded crime out of the stored selection. Nothing can tick one
      * now, but an install that predates the exclusion (or a hand-edited value)
      * could still carry it, and clearing it here means it doesn't linger in
@@ -15486,8 +15536,13 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
     // Halted: the teardown and storage listeners above are registered either way,
     // but the loop must not start. Resuming brings it up via resumeAll().
     if (!isHalted()) setTimeout(() => { st.lastJailCk = 0; runLoop(); }, 1500);
+    __jbBoot.ok = true;   // start-up finished — see BOOT WATCH at the top of the file
   }
 
   init();
 
-})();
+})(); } catch (e) {
+  // Anything thrown while the script starts up lands here instead of vanishing.
+  try { __jbBoot.err = e; if (__jbBoot.show) __jbBoot.show(); } catch (_) {}
+  throw e;
+}
