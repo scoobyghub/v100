@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.337
+// @version      2000.338
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -36,7 +36,7 @@
 // @downloadURL  https://gist.githubusercontent.com/scoobyghub/32b6a0336551df6e3b3a036e39155fdc/raw/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.337
+/*  Jarvis Bot 2000.338
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -108,7 +108,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.337';
+  const APP_VERSION = '2000.338';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -778,6 +778,7 @@
   const _isLogin = _path.includes('/login.aspx');
 
   if (_isLogin) {
+    diagSnapshotAtLogin();   // what led up to this — see the BLACK-BOX RECORDER
     fireLogoutAlerts();
     earlyLogoutTelegram('login-start');
     if (document.readyState === 'loading')
@@ -2508,7 +2509,7 @@
 
   // Pause the automation and wait for a manual decision (stays logged in).
   function watchStop(name) {
-    paused = true;
+    paused = true; _pauseWhy = `watched player ${name} came online (stop & wait)`;
     setStatus(`⏸ Stopped — ${name} online`);
     owBrowserNotify(`${APP_NAME}: stopped`, `Paused because ${name} is online`);
     if (ow.telegram) tgMsg('online', `⏸ <b>Stopped</b> — ${esc(name)} online\n${st.player||'?'} | script paused, waiting for you`);
@@ -2560,6 +2561,9 @@
   // Held while the Settings window is open — separate from `paused` so closing
   // Settings can never release a staff-check / anti-bot / watch-stop pause.
   let _uiPaused = false;
+  // What set `paused` — shown on the panel and recorded, because a silent pause
+  // looks exactly like "the script has stopped working".
+  let _pauseWhy = '';
 
   /* === HARD HALT (the ALL switch) ===
    *
@@ -2858,7 +2862,91 @@
   // Assigned by buildUI; no-op until then so callers never need to guard.
   let repaintRibbon = () => {};
 
+  /* === BLACK-BOX RECORDER (2000.338) ===
+   *
+   * Reported: every player found sitting on a game page in the morning, script
+   * idle, and the first click went to login — "not run most of the night". By
+   * then the evidence was gone: the status line is overwritten on the next
+   * page, and nothing recorded WHY the loop had been standing still.
+   *
+   * This keeps that evidence, in localStorage, so it survives the re-login:
+   *   · cbDiagLog      — every CHANGE of the status line, with first/last time
+   *                      and a count. Numbers are masked, so a ticking countdown
+   *                      is one entry, and a jail in/out flip-flop is two.
+   *   · cbDiagLastTick — when the main loop last ran.
+   *   · cbDiagLastNav  — the last page Jarvis itself asked for.
+   *   · cbDiagLastLoad — the last page it started up on.
+   *   · cbDiagLogins   — a snapshot of all of the above taken the moment a
+   *                      LOGIN PAGE loads, i.e. exactly what led up to it.
+   * Settings → System → "Copy diagnostics" puts the lot on the clipboard.
+   * Purely local, and it changes no behaviour. */
+  function diagLog(msg) {
+    try {
+      const m = String(msg || '').slice(0, 110);
+      const sig = m.replace(/\d+([.,:]\d+)*/g, '#');
+      let a = JSON.parse(localStorage.getItem('cbDiagLog') || '[]');
+      if (!Array.isArray(a)) a = [];
+      const now = Date.now();
+      const hit = a.slice(-6).find(e => e && e.s === sig);
+      if (hit) { hit.t1 = now; hit.n = (hit.n || 1) + 1; hit.m = m; }
+      else {
+        a.push({ s: sig, m, t0: now, t1: now, n: 1, p: location.pathname.replace(/^\/authenticated\//i, '') + location.search.replace(/[?&]_?=?\d{10,}/g, '') });
+        while (a.length > 60) a.shift();
+      }
+      localStorage.setItem('cbDiagLog', JSON.stringify(a));
+    } catch (_) {}
+  }
+
+  // Called as a LOGIN PAGE loads — before anything else can overwrite the trail.
+  function diagSnapshotAtLogin() {
+    try {
+      const g = k => localStorage.getItem(k);
+      const lastTick = parseInt(g('cbDiagLastTick') || '0', 10) || 0;
+      let snaps = JSON.parse(g('cbDiagLogins') || '[]');
+      if (!Array.isArray(snaps)) snaps = [];
+      // The login page reloads itself (sleep wait, retry loop) — one snapshot per arrival.
+      if (snaps.length && snaps[snaps.length - 1].lastTick === lastTick) return;
+      let log = [];
+      try { log = JSON.parse(g('cbDiagLog') || '[]').slice(-25); } catch (_) {}
+      snaps.push({ at: Date.now(), url: (location.pathname + location.search).slice(0, 160), lastTick,
+                   lastNav: g('cbDiagLastNav'), lastLoad: g('cbDiagLastLoad'), log });
+      while (snaps.length > 4) snaps.shift();
+      localStorage.setItem('cbDiagLogins', JSON.stringify(snaps));
+    } catch (_) {}
+  }
+
+  function diagReport() {
+    const tm = ts => { const n = Number(ts); return n ? new Date(n).toLocaleString('en-GB') : '—'; };
+    const J = (k, d) => { try { const v = JSON.parse(localStorage.getItem(k) || 'null'); return v == null ? d : v; } catch (_) { return d; } };
+    const fmtLog = a => (Array.isArray(a) ? a : []).map(e => `${tm(e.t0)} → ${tm(e.t1)}  ×${e.n}  [${e.p || ''}]  ${e.m}`);
+    const fmtStamp = raw => { try { const o = JSON.parse(raw || 'null'); return o ? `${tm(o.t)}  ${o.u || ''}` : '—'; } catch (_) { return '—'; } };
+    let bs = {}; try { bs = getBreakStatus(); } catch (_) {}
+    const rep = {
+      version: APP_VERSION, player: st.player || '?', now: tm(Date.now()),
+      page: location.pathname + location.search,
+      state: {
+        halted: !!st.halted, paused, pauseWhy: _pauseWhy || '', settingsOpen: _uiPaused,
+        masterTab: tabs.isMaster, inJail: !!st.inJail, acting: !!st.acting, action: st.action || '', pending: st.pending || '',
+        break: bs && bs.active ? bs.msg : 'none', sleepOn: !!breaks.sleepOn, sleepWindow: `${breaks.sleepTime}–${breaks.wakeTime}`, sleepLogout: !!breaks.sleepLogout,
+        modWatch: !!cfg.modWatchOn, modBreak: !!cfg.modBreakOn, holdHq: !!cfg.holdHqOn,
+        on: ['crime','gta','booze','jail','health','garage','autoOC','autoDTM','createOC','createDTM','autoTravel'].filter(k => st[k]).join(', ') || 'nothing'
+      },
+      loopLastRan: tm(localStorage.getItem('cbDiagLastTick')),
+      lastNavigation: fmtStamp(localStorage.getItem('cbDiagLastNav')),
+      lastPageLoad: fmtStamp(localStorage.getItem('cbDiagLastLoad')),
+      statusTrail: fmtLog(J('cbDiagLog', [])),
+      loginArrivals: J('cbDiagLogins', []).map(sn => ({
+        arrivedAtLogin: tm(sn.at), loginUrl: sn.url, loopLastRanBefore: tm(sn.lastTick),
+        lastNavigation: fmtStamp(sn.lastNav), lastPageLoad: fmtStamp(sn.lastLoad), trailBefore: fmtLog(sn.log)
+      })),
+      sessionFalseAlarms: J('cbSessionFalseAlarms', []).map(f => `${tm(f.at)}  ${f.src}`),
+      pendingCriticalAlerts: J('cbCritAlerts', []).map(c => `${c.key}  (${String(c.msg || '').replace(/<[^>]+>/g, '').slice(0, 120)})`)
+    };
+    return JSON.stringify(rep, null, 2);
+  }
+
   function setStatus(msg) {
+    try { diagLog(msg); } catch(_){}
     if (_shadow) {
       const el = _shadow.querySelector('#jb-status');
       const ji = st.inJail ? '🔒' : '✅';
@@ -2982,7 +3070,7 @@
     const body = (panel.innerText || panel.textContent || '').trim();
     if (!ANTIBOT_RE.test(body)) return false;   // a staff question — leave it to checkSqlCheck
 
-    paused = true;
+    paused = true; _pauseWhy = 'anti-bot / soft-ban message on screen';
 
     // Expiry: park it so the pause survives reloads and lifts by itself. Without
     // one we still pause, we just can't say for how long.
@@ -6841,6 +6929,7 @@
     if (st.inJail && !url.includes('jail.aspx')) { setStatus('Blocked — in jail'); return true; }
     if (_navigating) return true; // already navigating — don't stack redirects
     _navigating = true;
+    try { localStorage.setItem('cbDiagLastNav', JSON.stringify({ t: Date.now(), u: String(url).replace(/[?&]_?=?\d{10,}/g, '').slice(0, 120) })); } catch(_){}
     if (st.acting) {
       setTimeout(() => { st.acting = false; st.action = ''; st.refresh = false; GM_setValue('cbActStart',0); saveSt(); window.location.href = url; }, 600 + Math.floor(Math.random()*400));
       return true;
@@ -10064,6 +10153,7 @@
             <div class="jb-row">
               <button class="jb-btn jb-btn-danger" id="jb-reset-all">Reset All</button>
               <button class="jb-btn jb-btn-outline" id="jb-clear-player">Clear Player</button>
+              <button class="jb-btn jb-btn-outline" id="jb-diag-copy" title="Copies what Jarvis has been doing — status changes, when the loop last ran, and what led up to each arrival at the login page. Nothing is sent anywhere; paste it to whoever is helping you.">📋 Copy diagnostics</button>
             </div>
             </div>
           </div>
@@ -11440,6 +11530,17 @@
         setTimeout(() => window.location.reload(), 500);
       }
     });
+    { const dg = _shadow.querySelector('#jb-diag-copy');
+      if (dg) dg.addEventListener('click', async () => {
+        let txt = '';
+        try { txt = diagReport(); } catch (e) { txt = 'diagnostics failed: ' + (e && e.message); }
+        console.log(APP_TAG, '[DIAG]\n' + txt);
+        let ok = false;
+        try { await navigator.clipboard.writeText(txt); ok = true; } catch (_) {
+          try { const ta = document.createElement('textarea'); ta.value = txt; document.body.appendChild(ta); ta.select(); ok = document.execCommand('copy'); ta.remove(); } catch (_2) {}
+        }
+        setStatus(ok ? '📋 Diagnostics copied — paste them into the chat' : '📋 Could not copy — they are in the console (F12)');
+      }); }
     _shadow.querySelector('#jb-clear-player').addEventListener('click', () => {
       if (confirm('Clear player data?')) { st.player = ''; GM_setValue('cbPlayer',''); GM_setValue('cbLastNotifiedId',null); setStatus('Player cleared'); }
     });
@@ -14726,6 +14827,7 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
 
   async function mainLoop() {
     _lastLoopTick = Date.now(); // Watchdog heartbeat
+    try { localStorage.setItem('cbDiagLastTick', String(_lastLoopTick)); } catch(_){}
 
     /* HALTED — hard stop, checked before anything else including the master-tab
      * election. Nothing below this line may run: every branch of the loop either
@@ -14761,7 +14863,7 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
       // Read the stored expiry BEFORE softBanHold(), which clears it once passed —
       // otherwise the "was there a ban?" test below always sees zero.
       const hadBan = parseInt(GM_getValue(LS_SOFTBAN_UNTIL, 0) || 0, 10) > 0;
-      if (softBanHold()) { paused = true; schedLoop(30000); return; }
+      if (softBanHold()) { paused = true; _pauseWhy = 'soft ban — waiting out the stated expiry'; schedLoop(30000); return; }
       if (hadBan) {
         // Window just closed — release the pause we imposed and carry on.
         paused = false;
@@ -14799,7 +14901,11 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
      * simply being open. */
     try { checkLowHp(); } catch(e) { console.warn(APP_TAG, '[HEAL] low-hp alert', e); }
 
-    if (paused || _uiPaused) { schedLoop(1800+Math.floor(Math.random()*1400)); return; }
+    if (paused || _uiPaused) {
+      // Name the reason every tick — the panel used to just sit there.
+      setStatus('⏸ Paused — ' + (paused ? (_pauseWhy || 'waiting for you') : 'Settings is open'));
+      schedLoop(1800+Math.floor(Math.random()*1400)); return;
+    }
 
     // If HP is critically low, let the LEGACY (navigating) health path run even
     // during a break — the background path has already had its chance above.
@@ -14882,10 +14988,10 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
     if (detectAntiBotMsg()) { schedLoop(30000); return; }
     // A soft ban already recorded keeps us parked until its stated expiry, even
     // on pages that don't show the message.
-    if (softBanHold()) { paused = true; schedLoop(30000); return; }
+    if (softBanHold()) { paused = true; _pauseWhy = 'soft ban — waiting out the stated expiry'; schedLoop(30000); return; }
 
     if (checkSqlCheck()) {
-      paused = true; setStatus('⚠️ STAFF CHECK — paused');
+      paused = true; _pauseWhy = 'staff check / Important message on screen — answer it in the game'; setStatus('⚠️ STAFF CHECK — paused');
       schedLoop(10000); return;
     }
 
@@ -15225,6 +15331,7 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
     }
     tabs.check();
     buildUI();
+    try { localStorage.setItem('cbDiagLastLoad', JSON.stringify({ t: Date.now(), u: (location.pathname + location.search).replace(/[?&]_?=?\d{10,}/g, '').slice(0, 120) })); } catch(_){}
     try { updateXpUI(); } catch(_){} // paint saved XP/rank straight away so it doesn't blank on load
 
     /* A halt has to SURVIVE A PAGE LOAD, and this is where that is decided.
