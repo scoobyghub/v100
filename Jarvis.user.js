@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.339
+// @version      2000.340
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -36,7 +36,7 @@
 // @downloadURL  https://gist.githubusercontent.com/scoobyghub/32b6a0336551df6e3b3a036e39155fdc/raw/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.339
+/*  Jarvis Bot 2000.340
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -108,7 +108,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.339';
+  const APP_VERSION = '2000.340';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -11957,6 +11957,33 @@
     let locked = GM_getValue('cbLocked', true);
     let posX = GM_getValue('cbPosX', null), posY = GM_getValue('cbPosY', null);
     if (posX !== null && posY !== null) { host.style.right = 'auto'; host.style.left = posX+'px'; host.style.top = posY+'px'; }
+    /* NEVER OFF-SCREEN (2000.340). The saved position is raw pixels, so a panel
+     * dragged somewhere on one screen shape was simply gone on another — a
+     * rotated tablet, a different zoom, a smaller window — with nothing to bring
+     * it back (reported on the Android device: "UI not showing, might be out of
+     * view"). Pulled back inside the window on load, on resize / rotation, and
+     * after every drag; the corrected position is saved. The whole width and
+     * height are kept in view when they fit; a panel taller than the window is
+     * pinned to the top so the title bar and power switch are always reachable. */
+    function keepOnScreen() {
+      try {
+        const r = host.getBoundingClientRect();
+        const vw = window.innerWidth || document.documentElement.clientWidth || 0;
+        const vh = window.innerHeight || document.documentElement.clientHeight || 0;
+        if (!vw || !vh || !r.width) return;
+        const x = Math.min(Math.max(0, r.left), Math.max(0, vw - r.width));
+        const y = Math.min(Math.max(0, r.top),  Math.max(0, vh - Math.min(r.height || 40, vh)));
+        if (Math.abs(x - r.left) > 1 || Math.abs(y - r.top) > 1) {
+          host.style.right = 'auto'; host.style.left = x + 'px'; host.style.top = y + 'px';
+          GM_setValue('cbPosX', x); GM_setValue('cbPosY', y);
+          console.log(`${APP_TAG} Panel was outside the window — moved back into view`);
+        }
+      } catch (_) {}
+    }
+    setTimeout(keepOnScreen, 0);
+    setTimeout(keepOnScreen, 1500);            // again once the page has settled
+    window.addEventListener('resize', keepOnScreen);
+    window.addEventListener('orientationchange', () => setTimeout(keepOnScreen, 300));
     const lockBtn = _shadow.querySelector('#jb-lock-btn');
     // Elements that must keep their own click/drag behaviour (never start a move).
     const DRAG_IGNORE = 'button, a, input, select, textarea, label, .jb-switch, .jb-hbtn, .jb-ow-act, .jb-modal, .jb-modal-bg, [contenteditable], [role="button"]';
@@ -11972,7 +11999,7 @@
       e.preventDefault();
     });
     document.addEventListener('mousemove', e => { if (!dragging) return; host.style.right='auto'; host.style.left=(hx+e.clientX-dx)+'px'; host.style.top=(hy+e.clientY-dy)+'px'; });
-    document.addEventListener('mouseup', () => { if (!dragging) return; dragging = false; root.style.cursor = locked?'default':'move'; const r = host.getBoundingClientRect(); GM_setValue('cbPosX',r.left); GM_setValue('cbPosY',r.top); });
+    document.addEventListener('mouseup', () => { if (!dragging) return; dragging = false; root.style.cursor = locked?'default':'move'; const r = host.getBoundingClientRect(); GM_setValue('cbPosX',r.left); GM_setValue('cbPosY',r.top); keepOnScreen(); });
 
     /* Touch equivalents of the three listeners above — added for the tablet.
      * Firefox treats touch and mouse as separate event streams, so the mouse
@@ -11993,7 +12020,7 @@
       host.style.right='auto'; host.style.left=(hx+t.clientX-dx)+'px'; host.style.top=(hy+t.clientY-dy)+'px';
       e.preventDefault();
     }, { passive: false });
-    document.addEventListener('touchend', () => { if (!dragging) return; dragging = false; root.style.cursor = locked?'default':'move'; const r = host.getBoundingClientRect(); GM_setValue('cbPosX',r.left); GM_setValue('cbPosY',r.top); });
+    document.addEventListener('touchend', () => { if (!dragging) return; dragging = false; root.style.cursor = locked?'default':'move'; const r = host.getBoundingClientRect(); GM_setValue('cbPosX',r.left); GM_setValue('cbPosY',r.top); keepOnScreen(); });
 
     // Make each modal window draggable by its title bar. Modals are centred via
     // a CSS transform, so on first grab we switch to explicit left/top coords.
