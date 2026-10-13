@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.338
+// @version      2000.339
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -36,7 +36,7 @@
 // @downloadURL  https://gist.githubusercontent.com/scoobyghub/32b6a0336551df6e3b3a036e39155fdc/raw/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.338
+/*  Jarvis Bot 2000.339
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -108,7 +108,7 @@
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.338';
+  const APP_VERSION = '2000.339';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -1082,8 +1082,30 @@
        * this branch runs long before `st` exists.
        */
       if (GM_getValue('cbHalted', false)) {
-        showOverlay('⛔ Jarvis STOPPED\nAuto-login disabled.\nTick ALL on the panel to resume.');
-        console.log('[JB Login] Halted — not logging in');
+        /* STOPPED, AND THE LOGIN PAGE COULD NOT UNDO IT (2000.339). This said "tick
+         * ALL on the panel" — but there is no panel on the login page, so a device
+         * that was stopped (by a stray click, as far as anyone can tell) and then
+         * lost its session was stuck here until someone logged in by hand. It now
+         * says when and how it was stopped, and has its own Resume button. */
+        let info = null;
+        try { info = GM_getValue('cbHaltInfo', null); } catch(_){}
+        const when = info && info.at ? new Date(info.at).toLocaleString('en-GB') : 'unknown time';
+        const why  = info && info.reason ? info.reason : 'the power switch';
+        showOverlay(`⛔ Jarvis STOPPED\nAuto-login is off because Jarvis was\nswitched off (${why})\n${when}`);
+        try {
+          const b = document.createElement('button');
+          b.textContent = '▶ Resume Jarvis and log in';
+          Object.assign(b.style, { display:'block', margin:'8px auto 0', padding:'6px 12px', cursor:'pointer',
+            background:'#107c10', color:'#fff', border:'none', borderRadius:'3px', font:'600 13px Segoe UI,sans-serif' });
+          b.addEventListener('click', () => {
+            GM_setValue('cbHalted', false);
+            GM_setValue('cbResumePending', true);   // the panel restores your switches on the next load
+            location.reload();
+          });
+          overlay.appendChild(b);
+          overlay.style.pointerEvents = 'auto';
+        } catch(_){}
+        console.log('[JB Login] Halted — not logging in (stopped ' + when + ' by ' + why + ')');
         return;
       }
 
@@ -2605,6 +2627,11 @@
   function haltAll(reason) {
     st.halted = true;
     GM_setValue('cbHalted', true);   // written directly too: the login page reads it before st exists
+    /* Record it and SAY SO (2000.339). A stop used to leave no trace at all —
+     * no time, no alert — so a device stopped by accident just sat there until
+     * its session lapsed. The Telegram queue keeps running while halted. */
+    try { GM_setValue('cbHaltInfo', { at: Date.now(), reason: reason || 'unknown', page: location.pathname }); } catch(_){}
+    try { sendTg(`⛔ <b>Jarvis STOPPED</b>\n${st.player||'?'} | ${fmtDate()}\n${esc(reason || 'power switch')} — nothing runs and auto-login is off until it is switched back on`); } catch(_){}
     saveSt();
     try { if (_loopTimer) { clearTimeout(_loopTimer); _loopTimer = null; } _loopDueAt = 0; } catch(_){}
     try { owStop(); } catch(_){}
@@ -2939,6 +2966,7 @@
         arrivedAtLogin: tm(sn.at), loginUrl: sn.url, loopLastRanBefore: tm(sn.lastTick),
         lastNavigation: fmtStamp(sn.lastNav), lastPageLoad: fmtStamp(sn.lastLoad), trailBefore: fmtLog(sn.log)
       })),
+      lastStop: (() => { try { const h = GM_getValue('cbHaltInfo', null); return h ? `${tm(h.at)}  ${h.reason}  on ${h.page || '?'}` : 'never recorded'; } catch (_) { return '?'; } })(),
       sessionFalseAlarms: J('cbSessionFalseAlarms', []).map(f => `${tm(f.at)}  ${f.src}`),
       pendingCriticalAlerts: J('cbCritAlerts', []).map(c => `${c.key}  (${String(c.msg || '').replace(/<[^>]+>/g, '').slice(0, 120)})`)
     };
@@ -10510,9 +10538,48 @@
       return true;
     }
 
+    // Resumed from the login page's button — put the saved switches back, exactly
+    // as ticking the power switch on would have.
+    if (GM_getValue('cbResumePending', false)) {
+      GM_setValue('cbResumePending', false);
+      if (!st.halted && restoreAllFlags()) {
+        if (st.crusherOwned === false) st.crusher = false;
+        saveSt(); repaintRibbon();
+        const sc0 = _shadow.querySelector('#jb-scrap-on'); if (sc0) sc0.checked = cfg.scrapOn;
+        console.log(`${APP_TAG}[HALT] Resumed from the login page — previous selection restored`);
+        try { sendTg(`▶️ <b>Jarvis resumed</b>\n${st.player||'?'} | ${fmtDate()}`); } catch(_){}
+      }
+    }
+
     let _allRestored = false;
-    allCb.addEventListener('change', () => {
+    /* SWITCHING OFF TAKES TWO CLICKS (2000.339). One click on this switch stops
+     * every action, the keep-alive AND auto-login — and 2000.332 moved it to the
+     * top of the panel, right under the title-bar buttons. Devices were found
+     * stopped that nobody had stopped. The first click now only ARMS it for five
+     * seconds ("click again to stop"); switching back ON is still one click. A
+     * change that is not a real user click is refused outright and recorded. */
+    let _allArmUntil = 0, _allArmTimer = null;
+    allCb.addEventListener('change', (ev) => {
       const v = allCb.checked;
+      if (!v) {
+        if (ev && ev.isTrusted === false) {
+          allCb.checked = true;
+          console.warn(`${APP_TAG}[HALT] Ignored a power-off that was not a real click`);
+          try { diagLog('power-off ignored — not a real click'); } catch(_){}
+          return;
+        }
+        if (Date.now() > _allArmUntil) {
+          _allArmUntil = Date.now() + 5000;
+          allCb.checked = true;                    // not yet — stay running
+          allLabel.textContent = 'CLICK AGAIN TO STOP';
+          allLabel.style.color = 'var(--jb-warning)';
+          clearTimeout(_allArmTimer);
+          _allArmTimer = setTimeout(() => { _allArmUntil = 0; syncAll(); }, 5000);
+          setStatus('⚠️ Click the power switch again within 5s to stop everything');
+          return;
+        }
+        _allArmUntil = 0; clearTimeout(_allArmTimer);
+      }
       if (v) {
         /* No snapshot — an install halted before 2000.256, or one that has never
          * been switched off. Leave every flag exactly as it is rather than
