@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.342
+// @version      2000.343
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -36,7 +36,7 @@
 // @downloadURL  https://gist.githubusercontent.com/scoobyghub/32b6a0336551df6e3b3a036e39155fdc/raw/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.342
+/*  Jarvis Bot 2000.343
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -149,7 +149,7 @@ try { (function () {
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.342';
+  const APP_VERSION = '2000.343';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -250,6 +250,7 @@ try { (function () {
     return _curPathLower.includes(p.slice(0, qIdx).toLowerCase()) && _curSearch.includes(p.slice(qIdx));
   })) {
     console.log(APP_TAG, 'Excluded page, skipping:', _curPath);
+    __jbBoot.ok = true;
     return;
   }
 
@@ -10506,6 +10507,13 @@ try { (function () {
     // Any switch on the panel keeps the counts honest — one listener covers them all.
     { const pb = _shadow.querySelector('#jb-panel-body');
       if (pb) pb.addEventListener('change', () => { try { updateFoldCounts(); } catch(_){} }); }
+    /* Drop keyboard focus from a switch once it has been used (2000.343) — see
+     * "A KEY PRESS MUST NOT STOP JARVIS" below. Without this, pressing Space to
+     * scroll the game page flips the last switch you clicked. */
+    root.addEventListener('change', e => {
+      const t = e.target;
+      if (t && t.type === 'checkbox') { try { t.blur(); } catch(_){} }
+    });
 
     // ALL toggle
     const allCb = _shadow.querySelector('#jb-all-toggle');
@@ -10595,33 +10603,30 @@ try { (function () {
     }
 
     let _allRestored = false;
-    /* SWITCHING OFF TAKES TWO CLICKS (2000.339). One click on this switch stops
-     * every action, the keep-alive AND auto-login — and 2000.332 moved it to the
-     * top of the panel, right under the title-bar buttons. Devices were found
-     * stopped that nobody had stopped. The first click now only ARMS it for five
-     * seconds ("click again to stop"); switching back ON is still one click. A
-     * change that is not a real user click is refused outright and recorded. */
-    let _allArmUntil = 0, _allArmTimer = null;
+    /* ONE CLICK STOPS IT (two-click arming from 2000.339 removed in 2000.343, by
+     * request). A change event that is not a real user click is still refused and
+     * recorded — that never blocks a real click or tap. Every stop is still
+     * recorded in cbHaltInfo and sent to Telegram by haltAll(). */
+    /* A KEY PRESS MUST NOT STOP JARVIS (2000.343). Clicking a switch leaves the
+     * browser's keyboard focus on it, and pressing Space (to scroll the page you
+     * are reading) then flips whichever switch last had focus. On the power
+     * switch that silently stops everything — a plausible source of the devices
+     * found stopped that nobody had stopped. Switching OFF is only accepted after
+     * a real pointer press on the switch itself (mouse, touch or pen) in the last
+     * two seconds; one click or tap is all it takes. */
+    let _allPressAt = 0;
+    { const allLbl = allCb.closest('label') || allCb;
+      ['pointerdown', 'mousedown', 'touchstart'].forEach(t =>
+        allLbl.addEventListener(t, () => { _allPressAt = Date.now(); }, { passive: true })); }
     allCb.addEventListener('change', (ev) => {
       const v = allCb.checked;
-      if (!v) {
-        if (ev && ev.isTrusted === false) {
-          allCb.checked = true;
-          console.warn(`${APP_TAG}[HALT] Ignored a power-off that was not a real click`);
-          try { diagLog('power-off ignored — not a real click'); } catch(_){}
-          return;
-        }
-        if (Date.now() > _allArmUntil) {
-          _allArmUntil = Date.now() + 5000;
-          allCb.checked = true;                    // not yet — stay running
-          allLabel.textContent = 'CLICK AGAIN TO STOP';
-          allLabel.style.color = 'var(--jb-warning)';
-          clearTimeout(_allArmTimer);
-          _allArmTimer = setTimeout(() => { _allArmUntil = 0; syncAll(); }, 5000);
-          setStatus('⚠️ Click the power switch again within 5s to stop everything');
-          return;
-        }
-        _allArmUntil = 0; clearTimeout(_allArmTimer);
+      try { allCb.blur(); } catch(_){}
+      if (!v && ((ev && ev.isTrusted === false) || Date.now() - _allPressAt > 2000)) {
+        allCb.checked = true;
+        const why = (ev && ev.isTrusted === false) ? 'not a real click' : 'no click or tap on the switch (keyboard?)';
+        console.warn(`${APP_TAG}[HALT] Ignored a power-off — ${why}`);
+        try { diagLog('power-off ignored — ' + why); } catch(_){}
+        return;
       }
       if (v) {
         /* No snapshot — an install halted before 2000.256, or one that has never
