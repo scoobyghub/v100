@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.343
+// @version      2000.344
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -36,7 +36,7 @@
 // @downloadURL  https://gist.githubusercontent.com/scoobyghub/32b6a0336551df6e3b3a036e39155fdc/raw/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.343
+/*  Jarvis Bot 2000.344
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -149,7 +149,7 @@ try { (function () {
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.343';
+  const APP_VERSION = '2000.344';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -158,12 +158,17 @@ try { (function () {
   let _debug = GM_getValue('cbDebug', false);
   function dlog(...a) { if (_debug) console.log(...a); }
 
-  // Known staff accounts (profile IDs)
+  /* Known staff accounts (profile IDs) — the new round's list, user-supplied
+   * 2026-11-21. "sql" is NOT staff any more (it was id 3); id 3 is now Tester,
+   * and Snail (5) and Geff (6) are added. All six are staff / mods. Used for
+   * staff-mail detection: a mail from any of these is a possible script check. */
   const STAFF_IDS = {
     system: 1,
     marc:   2,
-    sql:    3,
-    stipe:  4
+    tester: 3,
+    stipe:  4,
+    snail:  5,
+    geff:   6
   };
   const STAFF_NAMES = Object.keys(STAFF_IDS);
 
@@ -1312,7 +1317,7 @@ try { (function () {
     // Panel text size: 'n' normal, 'l' large, 'x' largest (also widens the panel).
     uiSize:       GM_getValue('cbUiSize', 'n'),
     timerDispSec: GM_getValue('cbTimerDispSec', 5),    // panel refresh
-    bgPollSec:    GM_getValue('cbBgPollSec', 60),      // OC/DTM/travel background fetches
+    bgPollSec:    GM_getValue('cbBgPollSec', 300),     // OC/DTM/travel background fetches (±20% → 4–6 min)
     /* Tablet mode (2000.309): one front-panel switch that bundles this whole
      * performance section with the costly optional toggles (hover, SG lists,
      * props, silent audio, worker ticker) into their lowest-resource setting,
@@ -1359,15 +1364,19 @@ try { (function () {
     /* BACKSTOP ONLY since 2000.288 — the XP feed is normally read AROUND each
      * earning action, not on this clock. See xpPreReadDueFor(). */
     xpPollSec:     GM_getValue('cbXpPollSec', 300),
+    /* Forced XP reads around each earning action (2000.288 brackets). OFF by
+     * default since 2000.344 to lower server requests — see maybeForceStatRefresh. */
+    xpPerActionOn: GM_getValue('cbXpPerActionOn', false),
     /* Ready reminders: OC/DTM goes ready and then sits there unused because you
      * didn't see the one alert. Re-ping every N minutes while it's STILL ready,
      * capped, and disarming the moment the timer goes back on cooldown. 0 = off. */
     readyRepeatMin: GM_getValue('cbReadyRepeatMin', 15),
     readyRepeatMax: GM_getValue('cbReadyRepeatMax', 4),
-    /* Mod presence. Staff are the four STAFF_IDS accounts; presence comes from the
-     * online watch's own players.aspx parse, so it works whether or not Watch is on. */
+    /* Mod presence. Detected from the game's own #FF9900 staff highlight on
+     * players.aspx (see parseModsFromDoc), not from STAFF_IDS, so it works whether
+     * or not Watch is on and catches staff we have never named. */
     modWatchOn:     GM_getValue('cbModWatchOn', false),
-    modPollSec:     GM_getValue('cbModPollSec', 60),
+    modPollSec:     GM_getValue('cbModPollSec', 300),   // the reference's PLAYERS interval
     noJailOnMod:    GM_getValue('cbNoJailOnMod', false),
     modBreakOn:     GM_getValue('cbModBreakOn', false),
     modBreakMin:    GM_getValue('cbModBreakMin', 60),   // minutes
@@ -1436,9 +1445,9 @@ try { (function () {
     sqlCheck:    GM_getValue('cbNotifySqlCheck', true),
     logout:      GM_getValue('cbNotifyLogout', true),
     lastMsgCheck:GM_getValue('cbLastMsgCheck', 0),
-    // Seconds between background inbox polls. This is the ONLY thing that finds
-    // new mail while Jarvis is sitting idle — see mailIntervalMs() for why.
-    msgCheckInt: GM_getValue('cbMsgCheckInt', 120)
+    // BASE seconds between background inbox polls; each gap is this plus a
+    // random 0–75% (240 → 4–7 min, the reference's own range). See mailGapMs().
+    msgCheckInt: GM_getValue('cbMsgCheckInt', 240)
   };
 
   /* === DISCORD WEBHOOK ===
@@ -1558,6 +1567,34 @@ try { (function () {
   if (!GM_getValue('cbMsgCheckInt120', false)) {
     GM_setValue('cbMsgCheckInt120', true);
     if (Number(tg.msgCheckInt) === 30) { tg.msgCheckInt = 120; GM_setValue('cbMsgCheckInt', 120); }
+  }
+
+  /* 120s -> 240s base, randomised to 4–7 minutes (2000.344).
+   *
+   * The reference moved on: 4.20.281/286 schedule the mailbox at
+   * `240 + random(0..180)` seconds, and 286 additionally skips the fetch
+   * altogether unless the header icon says there is mail waiting. Both are
+   * mirrored here (see mailGapMs / mailIconState). saveTg() writes this value,
+   * so — as with the two moves above — a one-time migration is the only way an
+   * existing install picks it up. */
+  if (!GM_getValue('cbMsgCheckInt240', false)) {
+    GM_setValue('cbMsgCheckInt240', true);
+    if (Number(tg.msgCheckInt) === 120) { tg.msgCheckInt = 240; GM_setValue('cbMsgCheckInt', 240); }
+  }
+
+  /* Background polls 60s -> 300s and staff watch 60s -> 300s (2000.344), the
+   * reference's own figures (COOLDOWN_REFRESH 4–6 min, PLAYERS 300s). Only a value
+   * still sitting on the OLD DEFAULT is moved — anything set deliberately to
+   * something else is left alone. Tablet mode's snapshot is corrected too, or
+   * switching Tablet off would restore the old 60. */
+  if (!GM_getValue('cbPolls300Migrated', false)) {
+    GM_setValue('cbPolls300Migrated', true);
+    if (Number(cfg.bgPollSec) === 60)  { cfg.bgPollSec = 300;  GM_setValue('cbBgPollSec', 300); }
+    if (Number(cfg.modPollSec) === 60) { cfg.modPollSec = 300; GM_setValue('cbModPollSec', 300); }
+    try {
+      const snap = GM_getValue('cbTabletPreMode', null);
+      if (snap && Number(snap.bgPollSec) === 60) { snap.bgPollSec = 300; GM_setValue('cbTabletPreMode', snap); }
+    } catch(_) {}
   }
 
   // Per-message Telegram toggles. Each sendTg now carries a key; if its toggle is
@@ -3072,25 +3109,57 @@ try { (function () {
     return false;
   }
 
-  let _lastMsgCt = 0;
+  /* === IS THERE MAIL WAITING? READ THE HEADER ICON (2000.344) ===
+   *
+   * The reference (4.20.286) stopped fetching the mailbox from other pages unless
+   * the header says there is mail: `<span id="ctl00_imgMessages" class="MsgRl
+   * msgimage nomsg">` — class `nomsg` (or a no_messages.gif background) means
+   * none. Every page load is server-rendered, so with Jarvis navigating every few
+   * seconds the icon is a fresh answer for free, and the background poll can
+   * stand down while it reads empty.
+   *
+   * Returns { known, has, ct }. known=false (no icon on this page) means "can't
+   * tell", and every caller treats that as "go and look" — fail OPEN, because a
+   * missed script-check mail once cost a 12-hour soft ban.
+   *
+   * The old checks (title count, `message<N>` class, page title, gif) are kept:
+   * they were written for an earlier round's markup and cost nothing. Note the
+   * new-round class `msgimage` never matched `message(\d+)`, so before this the
+   * immediate new-mail trigger may simply not have been firing at all. */
+  function mailIconState() {
+    let known = false, has = false, ct = 0;
+    const sp = document.getElementById('ctl00_imgMessages') || document.querySelector('span[id*="imgMessages"]');
+    if (sp) {
+      known = true;
+      const t = sp.getAttribute('title');
+      const c = sp.getAttribute('class') || '';
+      if (t && t !== '0') { ct = parseInt(t, 10) || 0; if (ct > 0) has = true; }
+      if (!has) { const m = c.match(/message(\d+)/); if (m) { ct = parseInt(m[1], 10) || 1; has = true; } }
+      if (!has) {
+        let bg = '';
+        try { bg = getComputedStyle(sp).backgroundImage || ''; } catch(_) {}
+        if (!sp.classList.contains('nomsg') && !/no_messages\.gif/i.test(bg)) { has = true; ct = ct || 1; }
+      }
+    }
+    if (!has) { const m = document.title.match(/(\d+)\s+new\s+mails?/i); if (m) { known = true; has = true; ct = parseInt(m[1], 10) || 1; } }
+    if (!has) { if (document.querySelector('img[src*="new_message_1.gif"]')) { known = true; has = true; ct = 1; } }
+    return { known, has, ct };
+  }
+
+  /* The last count is kept in localStorage, not a page variable. As a page
+   * variable it reset to 0 on every load, so mail sitting unread re-triggered an
+   * immediate inbox fetch on EVERY page load — a page load every few seconds.
+   * Now it fires only when the count actually rises. */
   function checkNewMsgs() {
     if (!tg.enabled && !st.autoOC && !st.autoDTM) return false;
-    let has = false, ct = 0;
-    const sp = document.querySelector('span[id*="imgMessages"]');
-    if (sp) {
-      const t = sp.getAttribute('title');
-      const c = sp.getAttribute('class');
-      if (t && t !== '0') { ct = parseInt(t)||0; if (ct>0) has = true; }
-      if (!has && c) { const m = c.match(/message(\d+)/); if (m) { ct = parseInt(m[1])||1; has = true; } }
-    }
-    if (!has) { const m = document.title.match(/(\d+)\s+new\s+mails?/i); if (m) { has=true; ct=parseInt(m[1]); } }
-    if (!has) { if (document.querySelector('img[src*="new_message_1.gif"]')) { has=true; ct=1; } }
-    if (has && ct > _lastMsgCt) {
-      _lastMsgCt = ct;
+    const { has, ct } = mailIconState();
+    const last = parseInt(localStorage.getItem('cbLastMsgCt') || '0', 10) || 0;
+    if (has && ct > last) {
+      localStorage.setItem('cbLastMsgCt', String(ct));
       localStorage.setItem('cbLastMailTs','0');
       return true;
     }
-    if (has) _lastMsgCt = ct; else _lastMsgCt = 0;
+    localStorage.setItem('cbLastMsgCt', String(has ? ct : 0));
     return false;
   }
 
@@ -3348,16 +3417,19 @@ try { (function () {
   const PLAYERS_TTL_MS = 25000;
   const LS_PLAYERS_CACHE = 'cbPlayersCache';
 
-  function cachedPlayers() {
+  function cachedPlayers(maxAgeMs) {
     try {
       const c = JSON.parse(localStorage.getItem(LS_PLAYERS_CACHE) || 'null');
-      if (!c || (Date.now() - (c.at || 0)) > PLAYERS_TTL_MS) return null;
+      if (!c || (Date.now() - (c.at || 0)) > (maxAgeMs || PLAYERS_TTL_MS)) return null;
       return { players: new Map(c.players || []), mods: c.mods || [], at: c.at, url: 'cached' };
     } catch (_) { return null; }
   }
 
-  async function getPlayers(force) {
-    if (!force) { const c = cachedPlayers(); if (c) return c; }
+  /* maxAgeMs lets a slow consumer accept an older copy. The staff watch runs
+   * every ~5 min, so a copy the online watch fetched up to 90s ago serves it
+   * perfectly well and saves a request (2000.344). */
+  async function getPlayers(force, maxAgeMs) {
+    if (!force) { const c = cachedPlayers(maxAgeMs); if (c) return c; }
     const f = await fetchOwPage();
     const players = parseOwPlayers(f.doc);
     const mods = parseModsFromDoc(f.doc);
@@ -3562,19 +3634,23 @@ try { (function () {
    * loop's ~2-3s cadence instead of stacking. The due time is stamped BEFORE the
    * scan, so a failure or a mid-flight navigation costs one cycle rather than
    * retrying every tick. */
+  /* Each gap is the setting plus a random 0–20%, rolled once (2000.344) — the
+   * same "base + random" shape the reference uses, so the scans are not a fixed
+   * metronome. Never shorter than the setting. */
+  function watchJit(ms) { return Math.round(ms * (1 + Math.random() * 0.2)); }
   function maybeWatchScan() {
     if (isHalted() || paused) return false;
     const now = Date.now();
     if (owEnabled() && now >= watchDueAt('ow')) {
-      watchSetDue('ow', Math.max(OW_MIN_SEC, Number(ow.sec || OW_DEF_SEC)) * 1000);
+      watchSetDue('ow', watchJit(Math.max(OW_MIN_SEC, Number(ow.sec || OW_DEF_SEC)) * 1000));
       owScan('due'); return true;
     }
     if (cfg.modWatchOn && now >= watchDueAt('mod')) {
-      watchSetDue('mod', Math.max(30, Math.min(600, Number(cfg.modPollSec) || 60)) * 1000);
+      watchSetDue('mod', watchJit(Math.max(30, Math.min(600, Number(cfg.modPollSec) || 300)) * 1000));
       modScan(); return true;
     }
     if (propWatch.on && now >= watchDueAt('prop')) {
-      watchSetDue('prop', Math.max(PROP_MIN_SEC, Number(propWatch.sec || PROP_DEF_SEC)) * 1000);
+      watchSetDue('prop', watchJit(Math.max(PROP_MIN_SEC, Number(propWatch.sec || PROP_DEF_SEC)) * 1000));
       propScan('due'); return true;
     }
     return false;
@@ -3700,7 +3776,16 @@ try { (function () {
    * modsOnline). The cost of failing closed — a silent all-day halt you'd only
    * notice hours later — is far worse than the cost of one unsuppressed bust.
    */
-  const MOD_STALE_MS = 5 * 60 * 1000;   // a reading older than this suppresses nothing
+  /* A reading older than this suppresses nothing. Was a flat 5 min, which was
+   * fine at a 60s poll — but at the reference's 300s poll (2000.344) every
+   * reading would go stale before the next one arrived, jail would resume
+   * between scans and each scan would re-announce the same mod. Now tied to the
+   * poll the way the reference ties it: interval (+20% jitter) + 2 minutes,
+   * never under 5 min. 300s → 8 min. */
+  function modStaleMs() {
+    const poll = Math.max(30, Math.min(600, Number(cfg.modPollSec) || 300)) * 1000;
+    return Math.max(5 * 60 * 1000, poll * 1.2 + 120000);
+  }
   const LS_MOD_BREAK_UNTIL = 'cbModBreakUntil';
   const MOD_HILITE_RE = /color:\s*#FF9900/i;
   const MOD_IGNORE = new Set(['marc']);  // owner — permanently highlighted, see above
@@ -3732,7 +3817,7 @@ try { (function () {
   function modsOnline() {
     const s = modState();
     if (!s || !Array.isArray(s.names)) return [];
-    if (Date.now() - (s.at || 0) > MOD_STALE_MS) return [];
+    if (Date.now() - (s.at || 0) > modStaleMs()) return [];
     return s.names;
   }
 
@@ -3790,7 +3875,7 @@ try { (function () {
     if (!cfg.modWatchOn || !tabs.isMaster || _modBusy) return;
     _modBusy = true;
     try {
-      const f = await getPlayers();          // one fetch serves both watches
+      const f = await getPlayers(false, 90000);   // one fetch serves both watches
       const names = f.mods;
       const prev = modState();
       /* A PRIOR READING OLDER THAN MOD_STALE_MS IS NOT KNOWLEDGE (2000.291).
@@ -3808,7 +3893,7 @@ try { (function () {
        *
        * The 'staff offline' branch below reads the same `was`, which is right —
        * with no recent reading we cannot claim they have LEFT either. */
-      const prevFresh = prev && (Date.now() - (prev.at || 0)) <= MOD_STALE_MS;
+      const prevFresh = prev && (Date.now() - (prev.at || 0)) <= modStaleMs();
       const was = (prevFresh && Array.isArray(prev.names)) ? prev.names : [];
       localStorage.setItem('cbModOnline', JSON.stringify({ names, at: Date.now(), ok: true }));
 
@@ -4652,13 +4737,16 @@ try { (function () {
     try { pumpTgQueue(); } catch(_){}
   }
 
-  async function collectTimers() {
+  /* `which` = 'oc' | 'dtm' | undefined (both). Since 2000.344 the background
+   * schedule fetches OC and DTM separately: one sitting on a 2h cooldown no
+   * longer gets re-fetched every time the other one is due — the reference drops
+   * DTM from its refresh the same way when it is far off. */
+  async function collectTimers(which) {
     if (isHalted()) return;
     if (st.inJail || paused) return;
     try {
-      const [d, o] = await Promise.all([fetchDtmTimer(), fetchOcTimer()]);
-      if (d) storeDtm(d);
-      if (o) storeOc(o);
+      if (which !== 'oc')  { const d = await fetchDtmTimer(); if (d) storeDtm(d); }
+      if (which !== 'dtm') { const o = await fetchOcTimer();  if (o) storeOc(o); }
       updateTimers();
     } catch(_){}
   }
@@ -4710,7 +4798,7 @@ try { (function () {
    * navigation costs one cycle rather than retrying on every tick. Same
    * reasoning as doForumRefresh rescheduling before it fires.
    */
-  const BG_DUE = { ocdtm: 'cbDueOcDtm', travel: 'cbDueTravel', prot: 'cbDueProt', hot: 'cbDueHot' };
+  const BG_DUE = { oc: 'cbDueOc', dtm: 'cbDueDtm', travel: 'cbDueTravel', prot: 'cbDueProt', hot: 'cbDueHot' };
   function bgDueAt(k) { return parseInt(GM_getValue(BG_DUE[k], 0) || 0, 10); }
   function bgSetDue(k, ms) { GM_setValue(BG_DUE[k], Date.now() + ms); }
 
@@ -4753,35 +4841,42 @@ try { (function () {
     return minMs;
   }
 
+  /* The reference's random style (2000.344): its COOLDOWN_REFRESH is a uniform
+   * 4–6 minutes, i.e. 300s ±20%. Each scheduled gap is rolled once, here, and
+   * stored as a due time — never re-rolled per tick. */
+  function bgJit(ms) { return Math.round(ms * (0.8 + Math.random() * 0.4)); }
+
   function bgGapFor(kind, pollMs) {
     let remMs = 0;
     try {
-      if (kind === 'ocdtm') {
-        const o = getOc(), d = getDtm();          // whichever comes ready first
-        const a = (o && !o.ready) ? (o.total || 0) * 1000 : 0;
-        const b = (d && !d.ready) ? (d.total || 0) * 1000 : 0;
-        remMs = (a && b) ? Math.min(a, b) : (a || b);
+      if (kind === 'oc') {
+        const o = getOc();
+        remMs = (o && !o.ready) ? (o.total || 0) * 1000 : 0;
+      } else if (kind === 'dtm') {
+        const d = getDtm();
+        remMs = (d && !d.ready) ? (d.total || 0) * 1000 : 0;
       } else if (kind === 'travel') {
         const t = getTravel();
         remMs = (t && !t.ready) ? (t.remaining || 0) * 1000 : 0;
       }
     } catch(_) {}
-    if (remMs <= 0) return pollMs;                // ready, or nothing stored yet
+    if (remMs <= 0) return bgJit(pollMs);         // ready / running / nothing stored yet
     // Land just after it comes ready. Jittered, so it isn't a predictable beat.
-    return Math.min(BG_QUIET_CAP, Math.max(pollMs, remMs + 5000 + Math.floor(Math.random() * 10000)));
+    return Math.min(bgJit(BG_QUIET_CAP), Math.max(bgJit(pollMs), remMs + 5000 + Math.floor(Math.random() * 10000)));
   }
 
   // Returns true if it fired something (the caller doesn't wait on it).
   function maybeBgFetch() {
     if (isHalted() || st.inJail || paused || st.acting) return false;
-    const pollMs = Math.max(30, Math.min(900, Number(cfg.bgPollSec) || 60)) * 1000;
+    const pollMs = Math.max(30, Math.min(900, Number(cfg.bgPollSec) || 300)) * 1000;
     const now = Date.now();
-    if (now >= bgDueAt('ocdtm'))  { bgSetDue('ocdtm',  bgGapFor('ocdtm', pollMs));  collectTimers(); return true; }
+    if (now >= bgDueAt('oc'))     { bgSetDue('oc',     bgGapFor('oc', pollMs));     collectTimers('oc');  return true; }
+    if (now >= bgDueAt('dtm'))    { bgSetDue('dtm',    bgGapFor('dtm', pollMs));    collectTimers('dtm'); return true; }
     if (now >= bgDueAt('travel')) { bgSetDue('travel', bgGapFor('travel', pollMs)); fetchTravel();   return true; }
     /* The hot city. Re-read on a schedule rather than once a day, because a
      * stale one sends you flying to the wrong city — and until 2000.261 nothing
      * ever corrected it. Checked more eagerly while it is unknown. */
-    if (now >= bgDueAt('hot'))    { bgSetDue('hot', getHot() ? HOT_REFRESH_MS : pollMs); fetchHotBg(); return true; }
+    if (now >= bgDueAt('hot'))    { bgSetDue('hot', bgJit(getHot() ? HOT_REFRESH_MS : pollMs)); fetchHotBg(); return true; }
     // Protection moves by the hour, not the minute — half the rate is plenty.
     if (now >= bgDueAt('prot'))   { bgSetDue('prot',   bgGapForProt(pollMs * 2));    fetchProt();     return true; }
     return false;
@@ -4813,7 +4908,7 @@ try { (function () {
     if (_protIv)       { clearInterval(_protIv);       _protIv = null; }
 
     const dispMs = Math.max(2, Math.min(60, Number(cfg.timerDispSec) || 5)) * 1000;
-    const pollMs = Math.max(30, Math.min(900, Number(cfg.bgPollSec) || 60)) * 1000;
+    const pollMs = Math.max(30, Math.min(900, Number(cfg.bgPollSec) || 300)) * 1000;
 
     _timerDispIv = setInterval(updateTimers, dispMs);
     /* Both fetch timers now just call maybeBgFetch, which owns the due times.
@@ -4874,10 +4969,31 @@ try { (function () {
    * while tg.msgCheckInt was loaded, saved and never read; now the setting
    * actually drives it.
    */
-  function mailIntervalMs() {
+  /* The gap is rolled ONCE per poll and stored (cbMailGap), never re-rolled on
+   * every tick — re-rolling a random threshold each tick collapses it to its
+   * minimum, which is exactly the jitteredCooldown fault 2000.178 removed.
+   * base + random 0–75%: the default 240 gives 4–7 min, the reference's range. */
+  function mailBaseMs() {
     const s = Number(tg.msgCheckInt);
-    return Math.max(15, Math.min(300, Number.isFinite(s) && s > 0 ? s : 30)) * 1000;
+    return Math.max(60, Math.min(900, Number.isFinite(s) && s > 0 ? s : 240)) * 1000;
   }
+  function rollMailGap() {
+    const g = Math.round(mailBaseMs() * (1 + Math.random() * 0.75));
+    try { localStorage.setItem('cbMailGap', String(g)); } catch(_){}
+    return g;
+  }
+  function mailGapMs() {
+    const g = parseInt(localStorage.getItem('cbMailGap') || '0', 10);
+    return g > 0 ? g : rollMailGap();
+  }
+  // Even with the icon reading "no mail", fetch now and then regardless — a
+  // script-check mail missed because the icon markup changed is the one failure
+  // this file cannot afford (§6). Rolled per check, 25–35 min.
+  const MAIL_BACKSTOP_MIN_MS = 25 * 60 * 1000;
+  const MAIL_BACKSTOP_SPAN_MS = 10 * 60 * 1000;
+  // While sitting on the mailbox page itself, re-read at most this often (it
+  // used to re-fetch on every ~2.5s loop tick).
+  const MAIL_ON_PAGE_MS = 30000;
   const GM_TIMEOUT       = 20000;
   const INVITE_STALE     = 15*60*1000;
   const SCRIPT_TEST_STALE= 5*60*1000;
@@ -8008,6 +8124,16 @@ try { (function () {
     }
   }
 
+  // The reference's own wording check (checkJailBreakResult, 4.20.281/286).
+  const JAIL_FAIL_RE = /You failed to break .+ out of jail!/i;
+  let _jailFailSeen = false;   // per page load — one result, one rest
+  function jailResultText() {
+    const els = [document.getElementById('ctl00_main_lblResult'),
+                 document.querySelector('.TMNErrorFont'),
+                 document.querySelector('[id*="Result"]')].filter(Boolean);
+    return els.map(e => e.textContent || '').join(' ');
+  }
+
   function doJailbreak() {
     if (!st.jail || st.acting || st.inJail || paused) return;
     /* Staff online and "no jail on Mod" enabled — stand down. Checked here as well
@@ -8020,8 +8146,30 @@ try { (function () {
       return;
     }
     const now = Date.now();
+    /* === A FAILED BUST RESTS 40–60s, AS THE REFERENCE DOES (2000.344) ===
+     * The page in front of us after a bust is that bust's postback result. When
+     * it reads "You failed to break X out of jail!" and we were NOT jailed for it
+     * (being jailed is handled by the sentence logic, which returns above), the
+     * reference waits `30 + random(10, 30)` seconds before trying again instead
+     * of going straight back in. Same numbers here. The result is stale by the
+     * time the rest is over, so the next attempt loads a fresh jail page. */
+    if (curPage() === 'jail' && !_jailFailSeen && JAIL_FAIL_RE.test(jailResultText())) {
+      _jailFailSeen = true;
+      const rest = Math.round((30 + 10 + Math.random() * 20) * 1000);
+      st.lastJail = now; GM_setValue('cbDly_jail', rest); saveSt();
+      GM_setValue('cbJailFailAt', now);
+      console.log(`${APP_TAG}[JAIL] Bust failed — resting ${Math.round(rest / 1000)}s before the next one`);
+      return;
+    }
     if (!cooldownElapsed('jail', st.lastJail, cfg.jailInt)) return;
-    if (curPage() !== 'jail') { safeNav('/authenticated/jail.aspx?'+Date.now()); return; }
+    // Still on the very page that showed the failure (it loaded before the
+    // failure was recorded) → its list is a minute old; load a fresh one.
+    const failAt = Number(GM_getValue('cbJailFailAt', 0)) || 0;
+    const pageStale = failAt > 0 && (performance.timeOrigin || 0) < failAt;
+    if (curPage() !== 'jail' || pageStale) {
+      if (pageStale) GM_setValue('cbJailFailAt', 0);
+      safeNav('/authenticated/jail.aspx?'+Date.now()); return;
+    }
     const links = [...document.querySelectorAll('a[id*="btnBreak"]')].filter(a => !a.hasAttribute('disabled') && a.href && a.href.includes('javascript:'));
     if (links.length > 0) {
       st.acting = true; st.action = 'jailbreak'; GM_setValue('cbActStart', now);
@@ -9947,12 +10095,12 @@ try { (function () {
               <label class="jb-label">Chat ID</label>
               <input class="jb-input" id="jb-tg-chat" value="${esc(tg.chat)}" placeholder="From @userinfobot">
             </div>
-            <div class="jb-row" title="How often the inbox is polled in the background. This is the ONLY thing that spots new mail while Jarvis is idle — the on-page envelope only updates when a page loads, so with jail off and Away cadence the page can sit still for many minutes.">
+            <div class="jb-row" title="Base gap between background inbox checks. Each gap is this plus a random 0–75%, so 240 gives 4–7 minutes (the owner script's own range). The check is skipped entirely while the header mail icon reads empty, and new mail showing on the icon is fetched straight away whatever this says.">
               <label class="jb-label" style="white-space:nowrap">Mail check (s):</label>
-              <input class="jb-input jb-input-sm" type="number" id="jb-msg-int" value="${tg.msgCheckInt}" min="15" max="300" step="5">
-              <span class="jb-sub">15–300</span>
+              <input class="jb-input jb-input-sm" type="number" id="jb-msg-int" value="${tg.msgCheckInt}" min="60" max="900" step="10">
+              <span class="jb-sub">60–900 · default 240</span>
             </div>
-            <div class="jb-sub jb-mb" style="color:var(--jb-text-ter);font-size:9px">Lower = faster mail and staff-check alerts when idle.</div>
+            <div class="jb-sub jb-mb" style="color:var(--jb-text-ter);font-size:9px">New mail is normally spotted from the header icon on the next page load, within seconds. This poll is the idle-time net, and it only fetches when the icon shows mail (or every 25–35 min regardless, as a backstop).</div>
             <div class="jb-grid jb-mb">
               <label class="jb-switch"><input type="checkbox" id="jb-tg-captcha" ${tg.captcha?'checked':''}> Script Check</label>
               <label class="jb-switch"><input type="checkbox" id="jb-tg-msgs" ${tg.messages?'checked':''}> Messages</label>
@@ -10076,7 +10224,7 @@ try { (function () {
             <div class="jb-row jb-mb">
               <label class="jb-label" style="white-space:nowrap">Check every:</label>
               <input class="jb-input jb-input-sm" type="number" id="jb-mod-poll" value="${cfg.modPollSec}" min="30" max="600" step="30">
-              <span class="jb-sub">s</span>
+              <span class="jb-sub">s · default 300 (+0–20%)</span>
             </div>
             <label class="jb-switch jb-mb" title="The blunt option: when staff come online, stop everything for a random 1-2 hours."><input type="checkbox" id="jb-mod-break" ${cfg.modBreakOn?'checked':''}> 🛑 Take a break when staff come online</label>
             <div class="jb-row">
@@ -10166,15 +10314,16 @@ try { (function () {
             <div class="jb-row">
               <label class="jb-label" style="white-space:nowrap">Background polls (s):</label>
               <input class="jb-input jb-input-sm" type="number" id="jb-perf-poll" value="${cfg.bgPollSec}" min="30" max="900" step="30">
-              <span class="jb-sub">30–900 · default 60</span>
+              <span class="jb-sub">30–900 · default 300</span>
             </div>
-            <div class="jb-sub jb-mb" style="color:var(--jb-text-ter);font-size:9px">Each background poll parses a whole page into memory (OC, DTM, travel; protection at 2× this). Biggest single lever on a slow device, and nothing is lost by raising it.</div>
+            <div class="jb-sub jb-mb" style="color:var(--jb-text-ter);font-size:9px">How often a READY (or running) OC, DTM or travel timer is re-checked, ±20% at random — 300 gives 4–6 min, as the owner script does. Timers on cooldown are counted down locally and re-read just after they finish. Each poll parses a whole page into memory (protection at 2× this).</div>
             <hr class="jb-sep">
             <div class="jb-sect-title">Advanced</div>
             <label class="jb-switch jb-mb"><input type="checkbox" id="jb-resume" ${resume.on?'checked':''}> Auto-Resume</label>
             <label class="jb-switch jb-mb"><input type="checkbox" id="jb-stats-on" ${stats.on?'checked':''}> Stats Collection</label>
             <label class="jb-switch jb-mb" title="Backstop for when the game's exact XP feed goes quiet: derives XP from the status-bar rank %, which is server-rendered on every page load. It STANDS DOWN whenever an exact reading has arrived in the last 10 minutes — it is rounded to the rank's step (0.3 XP at Global Dominator), so it must never compete with the real figures."><input type="checkbox" id="jb-xpbar-on" ${GM_getValue('cbXpBarOn',true)!==false?'checked':''}> 📊 Status-bar XP fallback</label>
             <label class="jb-switch jb-mb" title="Shows our own computed rank progress (e.g. 40.09%) next to your rank name in the game's header, on every page. Switch off once you've actually bought the real in-game rank bar from the Credits Store — that one becomes the accurate thing to read, and this becomes redundant."><input type="checkbox" id="jb-hdrpct-on" ${cfg.hdrRankPctOn?'checked':''}> 🏷️ Header rank %</label>
+            <label class="jb-switch jb-mb" title="Read XP just before and just after every crime, GTA, booze, OC, DTM and travel, so each action's XP is measured on its own. Costs roughly 120-145 extra requests an hour. Off: XP is read only on the backstop below — totals stay right, but the per-action charts become approximate."><input type="checkbox" id="jb-xp-peraction" ${cfg.xpPerActionOn?'checked':''}> 🎯 XP per action (extra reads)</label>
             <div class="jb-row" title="How often to read your XP. The game's own page polls every 15 seconds while it sits open, and Jarvis fires the identical request — so 15-20s matches what an ordinary open browser does by itself.">
               <label class="jb-label" style="white-space:nowrap">XP backstop (s):</label>
               <input class="jb-input jb-input-sm" type="number" id="jb-xp-poll" value="${cfg.xpPollSec}" min="10" max="1800" step="10">
@@ -11043,9 +11192,14 @@ try { (function () {
         e.target.value = cfg.timerDispSec; GM_setValue('cbTimerDispSec', cfg.timerDispSec);
         restartTimerIntervals(); setStatus(`⚙️ Panel refresh ${cfg.timerDispSec}s`);
       }); }
+    { const xa = _shadow.querySelector('#jb-xp-peraction');
+      if (xa) xa.addEventListener('change', e => {
+        cfg.xpPerActionOn = e.target.checked; GM_setValue('cbXpPerActionOn', cfg.xpPerActionOn);
+        setStatus(cfg.xpPerActionOn ? '🎯 XP read around every action' : '🎯 XP per-action reads off — backstop only');
+      }); }
     { const pp = _shadow.querySelector('#jb-perf-poll');
       if (pp) pp.addEventListener('change', e => {
-        cfg.bgPollSec = Math.max(30, Math.min(900, parseInt(e.target.value,10)||60));
+        cfg.bgPollSec = Math.max(30, Math.min(900, parseInt(e.target.value,10)||300));
         e.target.value = cfg.bgPollSec; GM_setValue('cbBgPollSec', cfg.bgPollSec);
         // Shortening the gap should take effect now, not after the old one runs out.
         try { resetBgDue(); } catch(_){}
@@ -11365,12 +11519,13 @@ try { (function () {
     _shadow.querySelector('#jb-tg-logout').addEventListener('change', e => { tg.logout = e.target.checked; saveTg(); });
     { const mi = _shadow.querySelector('#jb-msg-int');
       if (mi) mi.addEventListener('change', e => {
-        tg.msgCheckInt = Math.max(15, Math.min(300, parseInt(e.target.value,10)||30));
+        tg.msgCheckInt = Math.max(60, Math.min(900, parseInt(e.target.value,10)||240));
         e.target.value = tg.msgCheckInt; saveTg();
         // Clear the last-poll stamp so a shortened interval takes effect now
         // rather than after the old, longer one has elapsed.
         localStorage.setItem('cbLastMailTs','0');
-        setStatus(`📬 Mail check every ${tg.msgCheckInt}s`);
+        rollMailGap();
+        setStatus(`📬 Mail check every ${tg.msgCheckInt}–${Math.round(tg.msgCheckInt * 1.75)}s`);
       }); }
     _shadow.querySelector('#jb-tg-test').addEventListener('click', testTg);
 
@@ -11515,7 +11670,7 @@ try { (function () {
       }); }
     { const mp = _shadow.querySelector('#jb-mod-poll');
       if (mp) mp.addEventListener('change', e => {
-        cfg.modPollSec = Math.max(30, Math.min(600, parseInt(e.target.value,10)||60));
+        cfg.modPollSec = Math.max(30, Math.min(600, parseInt(e.target.value,10)||300));
         e.target.value = cfg.modPollSec; GM_setValue('cbModPollSec', cfg.modPollSec);
         modWatchStart();
       }); }
@@ -11699,7 +11854,7 @@ try { (function () {
           else {
             const s = modState(), on = modsOnline();
             if (!s) { ms.textContent = 'Not checked yet'; ms.style.color = 'var(--jb-text-ter)'; }
-            else if (Date.now() - (s.at||0) > MOD_STALE_MS) {
+            else if (Date.now() - (s.at||0) > modStaleMs()) {
               ms.textContent = `⚠️ Last check ${fmtAgo(s.at)} — stale, suppressing nothing`;
               ms.style.color = 'var(--jb-warning)';
             } else if (on.length) {
@@ -11745,7 +11900,7 @@ try { (function () {
       const wrap = _shadow.querySelector('#jb-mod-light');
       if (wrap && dot) {
         const s = cfg.modWatchOn ? modState() : null;
-        const usable = s && (Date.now() - (s.at || 0)) <= MOD_STALE_MS;
+        const usable = s && (Date.now() - (s.at || 0)) <= modStaleMs();
         let colour, tip;
         if (!usable) {
           colour = 'var(--jb-text-ter)';
@@ -13146,11 +13301,19 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
     // An action just fired: bypass the throttle so its gain is read and attributed
     // before the next action overwrites the snapshot — but only ONCE per snapshot,
     // or a lingering one triggers a refresh every single tick.
-    const snapFresh = snapT && age >= XP_SNAP_MIN_AGE_MS && age < 60000 && snapT !== bypassedFor;
+    /* PER-ACTION READS ARE OFF BY DEFAULT since 2000.344, at the user's request,
+     * to cut server requests: the pre-read and post-read around every crime /
+     * GTA / booze / OC / DTM / travel were ~120-145 hndlr.ashx hits an hour on
+     * their own. With them off only the backstop (cfg.xpPollSec, 300s ±25%) and
+     * the passive interceptor read XP — Total / Session / Rate stay right, but a
+     * reading covers several actions, so the per-action split is approximate.
+     * Settings → System → Advanced → "XP per action" puts them back. */
+    const perAction = !!cfg.xpPerActionOn;
+    const snapFresh = perAction && snapT && age >= XP_SNAP_MIN_AGE_MS && age < 60000 && snapT !== bypassedFor;
 
     // An earning action is about to fire: close off the stretch behind it, which
     // is pure jail. See xpPreReadDueFor.
-    const pre = snapFresh ? null : xpPreReadDueFor();
+    const pre = (snapFresh || !perAction) ? null : xpPreReadDueFor();
 
     const last = GM_getValue('cbLastStatRefresh', 0);
     if (!snapFresh && !pre && Date.now() - last < xpPollMs()) return false;
@@ -14130,13 +14293,18 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
   let _keepAliveIv = null;
 
   function stopKeepAlive() {
-    if (_keepAliveIv) { clearInterval(_keepAliveIv); _keepAliveIv = null; }
+    if (_keepAliveIv) { clearTimeout(_keepAliveIv); _keepAliveIv = null; }
   }
 
+  /* A random 4–6 min gap each time (2000.344) instead of a fixed 5-minute beat.
+   * It only ever fires on a page that has sat still that long, so the count is
+   * unchanged — it just stops being a metronome. */
   function startKeepAlive() {
-    if (_keepAliveIv) clearInterval(_keepAliveIv);
+    if (_keepAliveIv) clearTimeout(_keepAliveIv);
     if (isHalted()) return;   // stopped means stopped: let the session lapse
-    _keepAliveIv = setInterval(() => {
+    const next = () => { _keepAliveIv = setTimeout(tick, Math.round(KEEPALIVE_INTERVAL * (0.8 + Math.random() * 0.4))); };
+    const tick = () => {
+      next();
       if (isHalted()) return;
       if (paused || breaks.isSleeping) return;
       if (!tabs.isMaster) return;
@@ -14157,8 +14325,9 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
       }).catch(e => {
         console.warn('[JB][KEEPALIVE] Ping failed:', e.message);
       });
-    }, KEEPALIVE_INTERVAL);
-    console.log('[JB][KEEPALIVE] Started (every 5 min)');
+    };
+    next();
+    console.log('[JB][KEEPALIVE] Started (every 4–6 min)');
   }
 
   /* === SERVER TIME OFFSET === */
@@ -15238,12 +15407,31 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
 
     // Mail check
     if ((st.autoOC || st.autoDTM || (tg.enabled && (tg.messages||tg.scriptTest||tg.staffMail))) && tabs.isMaster) {
+      /* Random 4–7 min gap (mailGapMs), and — the 4.20.286 idea — no fetch at all
+       * while the header icon says the inbox is empty. A skipped poll still rolls
+       * the next gap, so this does not re-test every tick. cbLastMailTs = 0 (set
+       * by checkNewMsgs when the count rises, or by Settings) forces a real fetch.
+       * A real fetch also happens at least every 25–35 min regardless of the icon,
+       * as a backstop for staff mail. */
+      const now = Date.now();
       const lastMail = parseInt(localStorage.getItem('cbLastMailTs')||'0',10);
+      const lastReal = parseInt(localStorage.getItem('cbLastMailFetch')||'0',10);
       const onMail = curPage() === 'mailbox';
-      if (onMail || (Date.now() - lastMail > mailIntervalMs())) {
-        localStorage.setItem('cbLastMailTs', String(Date.now()));
-        try { await checkMail(); } catch(_){}
-        if (localStorage.getItem(LS_PEND_DTM) || localStorage.getItem(LS_PEND_OC)) { schedLoop(500); return; }
+      const due = onMail ? (now - lastMail > MAIL_ON_PAGE_MS) : (now - lastMail > mailGapMs());
+      if (due) {
+        localStorage.setItem('cbLastMailTs', String(now));
+        rollMailGap();
+        const icon = mailIconState();
+        const backstop = parseInt(localStorage.getItem('cbMailBackstop')||'0',10) || MAIL_BACKSTOP_MIN_MS;
+        const forced = lastMail === 0 || onMail || (now - lastReal > backstop);
+        if (forced || !icon.known || icon.has) {
+          localStorage.setItem('cbLastMailFetch', String(now));
+          localStorage.setItem('cbMailBackstop', String(MAIL_BACKSTOP_MIN_MS + Math.floor(Math.random() * MAIL_BACKSTOP_SPAN_MS)));
+          try { await checkMail(); } catch(_){}
+          if (localStorage.getItem(LS_PEND_DTM) || localStorage.getItem(LS_PEND_OC)) { schedLoop(500); return; }
+        } else {
+          dlog(APP_TAG, '[MAIL] Icon reads no mail — poll skipped');
+        }
       }
     }
 
