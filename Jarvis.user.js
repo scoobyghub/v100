@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.344
+// @version      2000.345
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -36,7 +36,7 @@
 // @downloadURL  https://gist.githubusercontent.com/scoobyghub/32b6a0336551df6e3b3a036e39155fdc/raw/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.344
+/*  Jarvis Bot 2000.345
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -143,13 +143,103 @@ var __jbBoot = { ok: false, err: null, show: null };
     } catch (e) {}
 })();
 
+// The real console and fetch, captured BEFORE the main IIFE shadows both with
+// recording wrappers (ERROR RECORDER, below). Captured here rather than via
+// window.* because in Firefox's Tampermonkey the bare globals and window.*
+// can be different objects, and the tablet is the device this is for.
+var __jbNativeConsole = console;
+var __jbNativeFetch = (typeof fetch === 'function') ? fetch : null;
+
 try { (function () {
   'use strict';
+
+  /* === ERROR RECORDER (2000.345, idea from reference 4.20.294) ===
+   * The tablet has no reachable console, so a fault there has always meant
+   * guessing. Every console.warn / console.error Jarvis makes, every failed or
+   * 4xx/5xx same-origin fetch, and every uncaught error / unhandled promise
+   * that is not the game's own page script is recorded in localStorage
+   * `cbDiagErrors` (last 40, numbers masked so a repeat is one entry with a
+   * count). It appears at the top of Settings → System → 📋 Copy diagnostics.
+   * Purely local; nothing is sent anywhere, and it changes no behaviour.
+   *
+   * `console` and `fetch` are SHADOWED for this IIFE only — the game's own
+   * scripts keep the real ones. These MUST stay the first statements in the
+   * IIFE: any use of `console` above them would hit the temporal dead zone,
+   * and node -c cannot see that. Failures while the page is unloading are
+   * skipped — Jarvis navigates every few seconds and cancels its own fetches.
+   */
+  let _jbUnloading = false;
+  try {
+    window.addEventListener('pagehide', () => { _jbUnloading = true; });
+    window.addEventListener('beforeunload', () => { _jbUnloading = true; });
+  } catch (_) {}
+  const _jbErrSeen = {};
+  function jbErrNote(level, parts) {
+    try {
+      const txt = (parts || []).map(x => {
+        if (x instanceof Error) return x.name + ': ' + x.message;
+        if (x && typeof x === 'object') {
+          if (x.message) return String(x.message);
+          try { return JSON.stringify(x).slice(0, 120); } catch (_) { return String(x); }
+        }
+        return String(x);
+      }).join(' ').replace(/\s+/g, ' ').trim().slice(0, 200);
+      if (!txt) return;
+      const sig = level + ':' + txt.replace(/\d+([.,:]\d+)*/g, '#');
+      const now = Date.now();
+      const seen = _jbErrSeen[sig];
+      // One storage write per message per minute; repeats in between are counted.
+      if (seen && now - seen.t < 60000) { seen.pend++; return; }
+      const add = 1 + (seen ? seen.pend : 0);
+      _jbErrSeen[sig] = { t: now, pend: 0 };
+      let a = JSON.parse(localStorage.getItem('cbDiagErrors') || '[]');
+      if (!Array.isArray(a)) a = [];
+      const page = location.pathname.replace(/^\/authenticated\//i, '');
+      const i = a.findIndex(e => e && e.s === sig);
+      if (i >= 0) {
+        const e = a.splice(i, 1)[0];
+        e.t1 = now; e.n = (e.n || 1) + add; e.m = txt; e.p = page;
+        a.push(e);
+      } else {
+        a.push({ s: sig, l: level, m: txt, t0: now, t1: now, n: add, p: page });
+        while (a.length > 40) a.shift();
+      }
+      localStorage.setItem('cbDiagErrors', JSON.stringify(a));
+    } catch (_) {}
+  }
+  const console = new Proxy(__jbNativeConsole, { get: (t, k) => {
+    if (k === 'error') return (...a) => { t.error(...a); jbErrNote('E', a); };
+    if (k === 'warn')  return (...a) => { t.warn(...a);  jbErrNote('W', a); };
+    const v = t[k];
+    return typeof v === 'function' ? v.bind(t) : v;
+  } });
+  const _jbUrlLabel = u => {
+    try { const x = new URL(String((u && u.url) || u), location.href);
+          return x.origin === location.origin ? x.pathname + x.search : x.hostname; }
+    catch (_) { return '(url)'; }
+  };
+  const fetch = (...a) => __jbNativeFetch(...a).then(
+    r => { if (r && !r.ok && r.status) jbErrNote('H', ['HTTP ' + r.status + ' from', _jbUrlLabel(a[0])]); return r; },
+    e => { if (!_jbUnloading && !(e && e.name === 'AbortError')) jbErrNote('H', ['Request failed:', _jbUrlLabel(a[0]), e]); throw e; });
+  try {
+    window.addEventListener('error', ev => {
+      try {
+        if (!ev || !ev.message || /^Script error\.?$/i.test(ev.message)) return;
+        if (ev.error && ev.error.name === 'InvalidStateError') return;
+        const f = String(ev.filename || '');
+        if (f.startsWith(location.origin)) return;   // the game's own page scripts
+        jbErrNote('U', ['Uncaught:', ev.message, f ? '(' + f.split('/').pop().split('?')[0] + ':' + ev.lineno + ')' : '']);
+      } catch (_) {}
+    });
+    window.addEventListener('unhandledrejection', ev => {
+      try { if (!_jbUnloading) jbErrNote('U', ['Unhandled promise:', ev && ev.reason]); } catch (_) {}
+    });
+  } catch (_) {}
 
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.344';
+  const APP_VERSION = '2000.345';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -867,6 +957,13 @@ try { (function () {
 
     function log(...a) { console.log('[JB Login]', ...a); }
 
+    /* 2000.345 (from reference 4.20.294): re-open a CLEAN login page rather than
+     * reloading whatever address this is. We often sit on
+     * login.aspx?act=out&auto=true, and reloading that re-sends the logout link
+     * every 60s through a sleep or watch-logout window. Same origin, so www and
+     * non-www keep their own storage. */
+    function reloadCleanLogin() { location.replace(location.origin + '/login.aspx'); }
+
     /* === STUCK ON THE LOGIN PAGE (2000.287) ===
      *
      * We fire one alert on landing here and then go quiet, so a device that
@@ -1085,8 +1182,20 @@ try { (function () {
       }
       if (!canAuto()) return;
       const btn = document.getElementById(BID);
-      const done = captchaDone();
       const tok = getToken();
+      /* 2000.345 (from reference 4.20.294): a fresh captcha token and both fields
+       * filled, yet the button is still disabled — the page's own handlers never
+       * saw the fields change (fillCreds() sets .value, which fires nothing). The
+       * nudge in loginStuckTick() only tries after a minute; this just switches the
+       * button on. Only for a NEW token, so a stale one still cannot submit. */
+      if (btn && btn.disabled && tok && tok !== lastTok) {
+        const u = document.getElementById(UID), p = document.getElementById(PID);
+        if (u && u.value && p && p.value) {
+          btn.disabled = false;
+          log('Captcha token present but the login button was disabled — enabled it');
+        }
+      }
+      const done = captchaDone();
       if (btn && !btn.disabled && done && tok && tok !== lastTok && !subTimer) {
         showOverlay('✅ Captcha done — submitting...');
         scheduleSubmit(LOGIN.delay + Math.floor(Math.random()*2000));
@@ -1149,7 +1258,7 @@ try { (function () {
           b.addEventListener('click', () => {
             GM_setValue('cbHalted', false);
             GM_setValue('cbResumePending', true);   // the panel restores your switches on the next load
-            location.reload();
+            reloadCleanLogin();
           });
           overlay.appendChild(b);
           overlay.style.pointerEvents = 'auto';
@@ -1198,7 +1307,7 @@ try { (function () {
           showOverlay(`😴 Sleep mode\nAuto-login disabled until ${wakeTime}`);
           console.log('[JB Login] Sleep mode active — skipping auto-login until', wakeTime);
           // Recheck every 60s in case wake time arrives
-          setTimeout(() => location.reload(), 60000);
+          setTimeout(reloadCleanLogin, 60000);
           return;
         } else {
           GM_setValue('jbIsSleeping', false);
@@ -1213,7 +1322,7 @@ try { (function () {
         const remMin = Math.ceil((owUntil - Date.now()) / 60000);
         showOverlay(`🚪 Watched player online\nAuto-login paused (${remMin}m left)`);
         console.log('[JB Login] Watch-logout active — skipping auto-login for', remMin, 'min');
-        setTimeout(() => location.reload(), 60000);
+        setTimeout(reloadCleanLogin, 60000);
         return;
       }
 
@@ -1367,6 +1476,12 @@ try { (function () {
     /* Forced XP reads around each earning action (2000.288 brackets). OFF by
      * default since 2000.344 to lower server requests — see maybeForceStatRefresh. */
     xpPerActionOn: GM_getValue('cbXpPerActionOn', false),
+    /* Missions (2000.345) — see the MISSIONS section. The tracker reads
+     * missions.aspx about every 15 min (~4 requests/hr); auto-start and mission
+     * travel act on what it reads, so both are off until switched on. */
+    missionOn:        GM_getValue('cbMissionOn', true),
+    missionAutoStart: GM_getValue('cbMissionAutoStart', false),
+    missionTravel:    GM_getValue('cbMissionTravel', false),
     /* Ready reminders: OC/DTM goes ready and then sits there unused because you
      * didn't see the one alert. Re-ping every N minutes while it's STILL ready,
      * capped, and disarming the moment the timer goes back on cooldown. 0 = off. */
@@ -1637,7 +1752,8 @@ try { (function () {
     { key:'witness',     label:'Witness mail',          def:true  },
     { key:'modOnline',   label:'Staff/mod online',      def:true  },
     { key:'holdHq',      label:'Hold HQ (panic)',       def:true  },
-    { key:'shot',        label:'Shot at / attacked',    def:true  }
+    { key:'shot',        label:'Shot at / attacked',    def:true  },
+    { key:'mission',     label:'Missions',              def:true  }
   ];
 
   const tgMsgOn = {};
@@ -3023,6 +3139,17 @@ try { (function () {
     } catch (_) {}
   }
 
+  // One line for Settings → System: how many problems are on record, and the latest.
+  function diagErrSummary() {
+    try {
+      const a = JSON.parse(localStorage.getItem('cbDiagErrors') || '[]');
+      if (!Array.isArray(a) || !a.length) return 'No errors recorded.';
+      const e = a[a.length - 1];
+      const ago = Math.max(0, Math.round((Date.now() - (e.t1 || 0)) / 60000));
+      return `⚠️ ${a.length} problem${a.length === 1 ? '' : 's'} recorded — latest ${ago < 1 ? 'just now' : ago + 'm ago'}: ${esc(String(e.m || '').slice(0, 90))}`;
+    } catch (_) { return ''; }
+  }
+
   function diagReport() {
     const tm = ts => { const n = Number(ts); return n ? new Date(n).toLocaleString('en-GB') : '—'; };
     const J = (k, d) => { try { const v = JSON.parse(localStorage.getItem(k) || 'null'); return v == null ? d : v; } catch (_) { return d; } };
@@ -3032,6 +3159,8 @@ try { (function () {
     const rep = {
       version: APP_VERSION, player: st.player || '?', now: tm(Date.now()),
       page: location.pathname + location.search,
+      // E = console.error, W = console.warn, H = failed request, U = uncaught (see ERROR RECORDER)
+      recentErrors: J('cbDiagErrors', []).slice().reverse().map(e => `${tm(e.t1)}  ×${e.n}  [${e.l}]  [${e.p || ''}]  ${e.m}${e.n > 1 ? `  (first ${tm(e.t0)})` : ''}`),
       state: {
         halted: !!st.halted, paused, pauseWhy: _pauseWhy || '', settingsOpen: _uiPaused,
         masterTab: tabs.isMaster, inJail: !!st.inJail, acting: !!st.acting, action: st.action || '', pending: st.pending || '',
@@ -6423,16 +6552,38 @@ try { (function () {
   // this announces you as ACTIVELY AVAILABLE for an OC/DTM, which is exactly
   // the kind of "still telling the world you're here" signal the HARD HALT
   // is about eliminating, same reasoning as the other outbound features.
+  // 2000.345 (from reference 4.20.294): only list a type this account will
+  // actually take part in. A ready timer with every OC switch off advertised a
+  // player who would never accept. OC counts as on with OC invites or Create
+  // OC; DTM with DTM invites or Create DTM. Switching a type off — or the Kay
+  // switch itself — sends ready=false ONCE (kaySyncType only posts false when
+  // we were listed), which takes the name off the list instead of leaving it
+  // there until Kay ages it out.
+  function kayTypeOn(type) {
+    return type === 'oc' ? !!(st.autoOC || st.createOC) : !!(st.autoDTM || st.createDTM);
+  }
+
   async function maybeKaySync() {
-    if (!cfg.kayWorkerOn || isHalted()) return;
+    if (isHalted()) return;
     if (Date.now() - _kayLastSync < KAY_TICK_MS) return;
+    if (!cfg.kayWorkerOn) {
+      // Switched off while listed: come off the list once, then stay quiet.
+      if (!st.player || (localStorage.getItem('cbKayOCReported') !== 'true' && localStorage.getItem('cbKayDTMReported') !== 'true')) return;
+      _kayLastSync = Date.now();
+      try {
+        const city = getCurCity() || 'Unknown';
+        await kaySyncType('oc', false, city);
+        await kaySyncType('dtm', false, city);
+      } catch(e) { console.warn(`${APP_TAG}[KAY] sync error:`, e); }
+      return;
+    }
     _kayLastSync = Date.now();
     if (!st.player) return;
     try {
       const city = getCurCity() || 'Unknown';
       const oc = getOc(), dtm = getDtm();
-      await kaySyncType('oc',  !!(oc  && oc.ready),  city);
-      await kaySyncType('dtm', !!(dtm && dtm.ready), city);
+      await kaySyncType('oc',  kayTypeOn('oc')  && !!(oc  && oc.ready),  city);
+      await kaySyncType('dtm', kayTypeOn('dtm') && !!(dtm && dtm.ready), city);
     } catch(e) { console.warn(`${APP_TAG}[KAY] sync error:`, e); }
   }
 
@@ -6950,7 +7101,7 @@ try { (function () {
       if (cooldownRemainingMs(act, last, intSec) <= within) return true;
     }
 
-    if (st.autoTravel && getHot() && !isInHot()) {
+    if (st.autoTravel && travelNeeded()) {   // hot city, or the mission's city (2000.345)
       const t = getTravel();
       if (t && (t.ready || (t.remaining * 1000) <= within)) return true;
     }
@@ -9813,6 +9964,9 @@ try { (function () {
               <span class="jb-timer-label">Hot:</span>
               <span class="jb-timer-val" id="jb-hot-display" style="font-size:10px">${getHot()||'—'}</span>
             </div>
+            <div id="jb-mission-row" title="Missions — click for tasks and history" style="${cfg.missionOn ? '' : 'display:none;'}cursor:pointer;font-size:10px;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
+              <span class="jb-timer-label">🎯 Mission:</span> <span id="jb-mission">—</span>
+            </div>
             </div>
           </div>
 
@@ -9880,6 +10034,8 @@ try { (function () {
           ${grp('extras', 'Watch &amp; extras',
             tog('jb-ow-on',   '🟢 Watch', { cfg: 'jb-ow-link', cfgTitle: 'Watched players, groups and per-player actions',
                                            title: 'Master switch for Online Watch — off means neither group can fire. Groups 1 and 2 have their own switches in its ⚙ window.' }) +
+            tog('jb-mission-on', '🎯 Missions', { on: cfg.missionOn, cfg: 'jb-mission-link', cfgTitle: 'Mission tasks, history, auto-start and mission travel',
+                                                  title: 'Track the game’s missions: reads missions.aspx about every 15 minutes and shows progress on the panel. Auto-start and mission travel are in its ⚙ window, both off by default.' }) +
             tog('jb-prop-on', '🏚️ Props', { title: 'Property drop watch' }) +
             tog('jb-hover-on','🔍 Hover', { title: 'Player hover tooltip (switching off needs a reload)' }) +
             tog('jb-sg-on',   '🎨 SG lists', { title: 'Colour player links from your Starvinggeeks lists — watched (orange), safe (green), allied (blue). Read-only: three GETs, nothing is ever sent.',
@@ -10374,8 +10530,9 @@ try { (function () {
             <div class="jb-row">
               <button class="jb-btn jb-btn-danger" id="jb-reset-all">Reset All</button>
               <button class="jb-btn jb-btn-outline" id="jb-clear-player">Clear Player</button>
-              <button class="jb-btn jb-btn-outline" id="jb-diag-copy" title="Copies what Jarvis has been doing — status changes, when the loop last ran, and what led up to each arrival at the login page. Nothing is sent anywhere; paste it to whoever is helping you.">📋 Copy diagnostics</button>
+              <button class="jb-btn jb-btn-outline" id="jb-diag-copy" title="Copies what Jarvis has been doing — recent errors, status changes, when the loop last ran, and what led up to each arrival at the login page. Nothing is sent anywhere; paste it to whoever is helping you.">📋 Copy diagnostics</button>
             </div>
+            <div class="jb-sub" id="jb-diag-errs">${diagErrSummary()}</div>
             </div>
           </div>
         </div>
@@ -10540,6 +10697,22 @@ try { (function () {
             <hr class="jb-sep">
             <div class="jb-sub jb-mb">State: <span id="jb-dtm-state">${getCreateDtmState()} (step ${getCreateDtmStep()})</span></div>
             <button class="jb-btn jb-btn-danger" id="jb-dtm-reset" style="width:100%">Reset DTM Creation</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="jb-modal" id="jb-mission-modal">
+        <div class="jb-modal-content" style="width:340px">
+          <div class="jb-modal-head"><span>🎯 Missions</span><button class="jb-hbtn" id="jb-mission-close">✕</button></div>
+          <div class="jb-modal-body">
+            <label class="jb-switch jb-mb" title="When a new mission is available, start it — clicks Start on the missions page, otherwise posts it in the background. At most once a minute."><input type="checkbox" id="jb-mission-auto" ${cfg.missionAutoStart?'checked':''}> ▶️ Auto-start missions</label>
+            <label class="jb-switch jb-mb" title="When the next unfinished task names a city, Auto Travel flies there instead of the hot city (jet only, as always). A DTM task from a city holds Create DTM until you are there. Needs Auto Travel on. While a mission keeps you away from the hot city, Create OC and the OC/DTM lists wait."><input type="checkbox" id="jb-mission-travel" ${cfg.missionTravel?'checked':''}> ✈️ Travel to the mission city</label>
+            <div class="jb-sub jb-mb" style="color:var(--jb-text-ter);font-size:9px">Mission travel only acts when <b>Auto Travel</b> is on. Read about every 15 minutes, and straight away while you are on the missions page.</div>
+            <div class="jb-row jb-mb">
+              <button class="jb-btn jb-btn-outline" id="jb-mission-refresh">Refresh</button>
+              <button class="jb-btn jb-btn-outline" id="jb-mission-open">Open page</button>
+            </div>
+            <div id="jb-mission-body"></div>
           </div>
         </div>
       </div>
@@ -11843,6 +12016,7 @@ try { (function () {
       try { updateHqUI(); } catch(_){}
       // Catches any switch flipped by code that has no hook into the panel.
       try { repaintRibbon(); } catch(_){}
+      try { paintMission(); } catch(_){}
       try { renderSgStatusUI(); renderSgAccessUI(); } catch(_){}
       /* Staff readout. Deliberately distinguishes "nobody on" from "we don't
        * know" — a stale reading suppresses nothing, so saying "all clear" when
@@ -12089,6 +12263,32 @@ try { (function () {
       renderOwUI();
     });
 
+    // Missions (2000.345) — switch, ⚙ window, panel line.
+    {
+      const openMission = e => { if (e) { e.preventDefault(); e.stopPropagation(); } openModal2('#jb-mission-modal'); renderMissionModal(); };
+      const q = s => _shadow.querySelector(s);
+      q('#jb-mission-link')?.addEventListener('click', openMission);
+      q('#jb-mission-row')?.addEventListener('click', openMission);
+      q('#jb-mission-close')?.addEventListener('click', () => closeModal2('#jb-mission-modal'));
+      q('#jb-mission-on')?.addEventListener('change', e => {
+        cfg.missionOn = e.target.checked; GM_setValue('cbMissionOn', cfg.missionOn);
+        if (cfg.missionOn) GM_setValue('cbDueMission', 0);   // read it on the next tick
+        paintMission();
+      });
+      q('#jb-mission-auto')?.addEventListener('change', e => {
+        cfg.missionAutoStart = e.target.checked; GM_setValue('cbMissionAutoStart', cfg.missionAutoStart); paintMission();
+      });
+      q('#jb-mission-travel')?.addEventListener('change', e => {
+        cfg.missionTravel = e.target.checked; GM_setValue('cbMissionTravel', cfg.missionTravel); paintMission();
+      });
+      q('#jb-mission-refresh')?.addEventListener('click', async () => {
+        if (/\/missions\.aspx/i.test(location.pathname)) missionParse(document); else await fetchMission();
+        renderMissionModal(); paintMission();
+      });
+      q('#jb-mission-open')?.addEventListener('click', () => { safeNav('/authenticated/missions.aspx'); });
+      paintMission();
+    }
+
     // OC Leader modal
     _shadow.querySelector('#jb-oc-close').addEventListener('click', () => closeModal2('#jb-oc-modal'));
     _shadow.querySelector('#jb-oc-type').addEventListener('change', e => { st.ocType = e.target.value; saveSt(); });
@@ -12265,6 +12465,303 @@ try { (function () {
    * generous on purpose — a false "travel went wrong" is worse than a late one. */
   const TRAVEL_SETTLE_MS = 90000;
 
+  /* === MISSIONS (2000.345, from reference 4.20.286 / 4.20.294) ===
+   * The new round added missions (missions.aspx): a list of tasks, some naming a
+   * city, with a cash + FMJ reward. Three parts, each built on the one before:
+   *   · TRACKER (cfg.missionOn, default ON) — reads the page about every 15 min
+   *     in the background (bgJit, so 12–18), and whenever you are on it. Shows
+   *     progress on the panel and in its ⚙ window; Telegram on "new mission
+   *     available" and "mission finished".
+   *   · AUTO-START (cfg.missionAutoStart, default off) — starts an available
+   *     mission: clicks Start on the live page, otherwise GETs the page and posts
+   *     its form in the background (never navigates). At most once a minute.
+   *   · MISSION TRAVEL (cfg.missionTravel, default off, needs Auto Travel) — when
+   *     the next unfinished task names a city, auto-travel flies THERE instead of
+   *     the hot city, using the same jet-only path. A DTM task "from X" holds
+   *     Create DTM until you are in X, so the 2h DTM isn't spent from the wrong
+   *     city. Consequence, and it is the reference's too: features that need the
+   *     HOT city (Create OC, the OC/DTM lists) wait while a mission keeps you away.
+   *
+   * ⚠️ NOT VERIFIED LIVE when written. Every element id below comes from the
+   * reference. If the page has none of them, missionParse says so ONCE per page
+   * load, listing the ctl00_main_ ids it did find — get that line before changing
+   * anything. The task-city pattern ("… in Paris - …") is also the reference's.
+   */
+  const LS_MISSION      = 'cbMission';
+  const LS_MISSION_HIST = 'cbMissionHist';
+  const MISSION_POLL_MS  = 15 * 60 * 1000;   // ±20% via bgJit
+  const MISSION_STALE_MS = 40 * 60 * 1000;   // older than this: don't travel on it
+  const MISSION_CITIES = ['Paris', 'Las Vegas', 'Amsterdam', 'Sydney', 'London', 'New York', 'Toronto'];
+
+  function missionGet() { try { return JSON.parse(localStorage.getItem(LS_MISSION) || 'null'); } catch (_) { return null; } }
+  function missionHist() { try { const h = JSON.parse(localStorage.getItem(LS_MISSION_HIST) || '[]'); return Array.isArray(h) ? h : []; } catch (_) { return []; } }
+  function missionDoneCount(m) { return ((m && m.tasks) || []).filter(x => parseFloat(x.pct) >= 100).length; }
+  function missionNextTask(m) { return ((m && m.tasks) || []).find(x => !(parseFloat(x.pct) >= 100)) || null; }
+
+  let _missionShapeWarned = false;
+  function missionParse(doc) {
+    if (!doc || !doc.getElementById('ctl00_userInfo_lblcash')) return false;   // not a signed-in game page
+    const t = id => ((doc.getElementById(id) || {}).textContent || '').replace(/\s+/g, ' ').trim();
+    const panel    = doc.getElementById('ctl00_main_pnlCurrentMission');
+    const startPnl = doc.getElementById('ctl00_main_pnlStartMission');
+    const startBtn = doc.getElementById('ctl00_main_btnStartNewMission');
+    if (!panel && !startPnl && !startBtn && !_missionShapeWarned) {
+      _missionShapeWarned = true;
+      const ids = [...doc.querySelectorAll('[id^="ctl00_main_"]')].map(e => e.id).slice(0, 30).join(', ');
+      console.warn(APP_TAG, '[MISSION] missions page has none of the expected panels — ids found: ' + (ids || 'none'));
+    }
+    let m;
+    if (!panel) {
+      m = { none: true, at: Date.now(), startPanel: !!startPnl,
+            available: !!(startBtn && !startBtn.disabled), info: t('ctl00_main_lblNextMissionInfo') };
+    } else {
+      const tasks = [];
+      doc.querySelectorAll('#ctl00_main_gvMissionProgress tr').forEach(r => {
+        if (!r.cells || r.cells.length < 3 || r.querySelector('th')) return;
+        const c = i => (r.cells[i].textContent || '').replace(/\s+/g, ' ').trim();
+        tasks.push({ n: c(0), task: c(1), pct: c(2) });
+      });
+      m = { title: t('ctl00_main_lblMissionTitle'), desc: t('ctl00_main_lblMissionDescription'),
+            instructions: t('ctl00_main_lblInstructions'), difficulty: t('ctl00_main_lblDifficulty'),
+            total: t('ctl00_main_lblNumberTasks'), cash: t('ctl00_main_lblMissionRewardCash'),
+            fmj: t('ctl00_main_lblMissionRewardFMJ'), tasks, at: Date.now() };
+    }
+
+    // History: file the previous mission when it is evidently over.
+    const prev = missionGet();
+    const old = prev ? (prev.none ? prev.last : prev) : null;
+    const file = o => {
+      const h = missionHist();
+      const rec = { title: o.title, done: missionDoneCount(o), total: o.total || (o.tasks || []).length, cash: o.cash, fmj: o.fmj, at: o.at };
+      h.unshift(rec);
+      while (h.length > 20) h.pop();
+      localStorage.setItem(LS_MISSION_HIST, JSON.stringify(h));
+      console.log(APP_TAG, `[MISSION] Finished: ${rec.title} ${rec.done}/${rec.total}`);
+      tgMsg('mission', `🎯 <b>Mission finished</b>\n${esc(st.player||'?')} | ${esc(rec.title)} — ${rec.done}/${esc(rec.total)}${[rec.cash, rec.fmj].filter(Boolean).length ? '\nReward: ' + esc([rec.cash, rec.fmj].filter(Boolean).join(' + ')) : ''}`);
+    };
+    if (m.none) {
+      if (old && old.title && m.startPanel) file(old);      // the Start panel is back, so it is over
+      else if (old) m.last = old;
+    } else if (old && old.title && (old.title !== m.title || missionDoneCount(m) < missionDoneCount(old))) {
+      file(old);                                            // a different (or restarted) mission
+    }
+
+    // Announce a newly available mission once, on the transition.
+    if (m.none && m.available && !(prev && prev.none && prev.available)) {
+      console.log(APP_TAG, '[MISSION] A new mission is available' + (m.info ? ' — ' + m.info : ''));
+      if (!cfg.missionAutoStart) tgMsg('mission', `🎯 <b>Mission available</b>\n${esc(st.player||'?')} | a new mission can be started${m.info ? '\n' + esc(m.info) : ''}`);
+    }
+    // The next task changed: let mission travel react now rather than next tick's guess.
+    const nt = x => { const k = missionNextTask(x); return k ? k.task : ''; };
+    if (!m.none && prev && !prev.none && nt(m) !== nt(prev)) {
+      console.log(APP_TAG, `[MISSION] Next task: ${nt(m) || '(all done)'}`);
+    }
+    localStorage.setItem(LS_MISSION, JSON.stringify(m));
+    return true;
+  }
+
+  let _missionBusy = false;
+  async function fetchMission() {
+    if (isHalted() || _missionBusy) return false;
+    _missionBusy = true;
+    try {
+      const r = await fetch('/authenticated/missions.aspx?_=' + Date.now(), { credentials: 'same-origin', cache: 'no-store' });
+      if (!r.ok) return false;
+      const doc = new DOMParser().parseFromString(await r.text(), 'text/html');
+      if (respIsLogin(r.url) || docIsLoginForm(doc)) { noteSessionLost('missions'); return false; }
+      if (!/\/missions\.aspx/i.test(r.url || '')) {
+        console.warn(APP_TAG, '[MISSION] missions.aspx redirected to ' + (r.url || '?') + ' — not reading it');
+        return false;
+      }
+      const ok = missionParse(doc);
+      if (ok) { try { paintMission(); } catch (_) {} }
+      return ok;
+    } catch (e) {
+      console.warn(APP_TAG, '[MISSION] fetch failed:', e && e.message ? e.message : e);
+      return false;
+    } finally { _missionBusy = false; }
+  }
+
+  async function missionStart(reason) {
+    if (isHalted()) return false;
+    const now = Date.now();
+    if (now - (parseInt(localStorage.getItem('cbMissionStartAt') || '0', 10) || 0) < 60000) return false;
+    localStorage.setItem('cbMissionStartAt', String(now));
+    try {
+      if (/\/missions\.aspx/i.test(location.pathname)) {
+        const b = document.getElementById('ctl00_main_btnStartNewMission');
+        if (!b || b.disabled) { console.log(APP_TAG, `[MISSION] Start (${reason}): no enabled Start button on this page`); return false; }
+        console.log(APP_TAG, `[MISSION] Starting mission (${reason}) — clicking Start`);
+        localStorage.setItem('cbActionLockUntil', String(now + 8000));   // a postback, not a stall
+        tgMsg('mission', `🎯 <b>Mission started</b>\n${esc(st.player||'?')} (${esc(reason)})`);
+        b.click();
+        return true;
+      }
+      const url = '/authenticated/missions.aspx';
+      const g = await fetch(url + '?_=' + now, { credentials: 'same-origin', cache: 'no-store' });
+      const doc = new DOMParser().parseFromString(await g.text(), 'text/html');
+      if (respIsLogin(g.url) || docIsLoginForm(doc)) { noteSessionLost('mission-start'); return false; }
+      const b = doc.getElementById('ctl00_main_btnStartNewMission');
+      if (!b || b.disabled || !b.name) {
+        missionParse(doc);
+        console.log(APP_TAG, `[MISSION] Start (${reason}): no Start button on the page`);
+        return false;
+      }
+      const p = new URLSearchParams();
+      (doc.getElementById('aspnetForm') || doc).querySelectorAll('input[type="hidden"]').forEach(i => { if (i.name) p.append(i.name, i.value); });
+      p.append(b.name, b.value || 'Start');
+      console.log(APP_TAG, `[MISSION] Starting mission (${reason}) — posting Start in the background`);
+      const r = await fetch(url, { method: 'POST', credentials: 'same-origin',
+                                   headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: p.toString() });
+      const rd = new DOMParser().parseFromString(await r.text(), 'text/html');
+      const ok = missionParse(rd) && !!rd.getElementById('ctl00_main_pnlCurrentMission');
+      const title = ((rd.getElementById('ctl00_main_lblMissionTitle') || {}).textContent || '').trim();
+      const why = ((rd.getElementById('ctl00_lblMsg') || {}).textContent || '').trim();
+      if (ok) {
+        console.log(APP_TAG, `[MISSION] Started: ${title}`);
+        tgMsg('mission', `🎯 <b>Mission started</b>\n${esc(st.player||'?')} | ${esc(title || '?')} (${esc(reason)})`);
+      } else {
+        console.warn(APP_TAG, `[MISSION] Did not start: ${why || 'no mission panel in the reply'}`);
+      }
+      try { paintMission(); } catch (_) {}
+      return ok;
+    } catch (e) {
+      console.warn(APP_TAG, '[MISSION] start failed:', e && e.message ? e.message : e);
+      return false;
+    }
+  }
+
+  // Called every main-loop tick (master tab, not halted). Cheap when nothing is due.
+  function missionTick() {
+    if (!cfg.missionOn || isHalted() || !tabs.isMaster) return;
+    const now = Date.now();
+    if (/\/missions\.aspx/i.test(location.pathname)) {
+      // On the page already: read it for free, at most every few seconds.
+      if (now - (missionTick._live || 0) > 3000) {
+        missionTick._live = now;
+        if (missionParse(document)) { GM_setValue('cbDueMission', now + bgJit(MISSION_POLL_MS)); try { paintMission(); } catch (_) {} }
+      }
+    } else if (!st.inJail && !paused && !st.acting && now >= (parseInt(GM_getValue('cbDueMission', 0), 10) || 0)) {
+      GM_setValue('cbDueMission', now + bgJit(MISSION_POLL_MS));   // stamped first: a failure costs one cycle
+      fetchMission();
+      return;
+    }
+    if (cfg.missionAutoStart && !st.inJail && !paused && !st.acting) {
+      const m = missionGet();
+      if (m && m.none && m.available && now - (m.at || 0) < 15 * 60 * 1000) missionStart('auto');
+    }
+  }
+
+  // The city the next unfinished task needs, or null. Only with mission travel on.
+  function missionNeed() {
+    if (!cfg.missionOn || !cfg.missionTravel) return null;
+    const m = missionGet();
+    if (!m || m.none || Date.now() - (m.at || 0) > MISSION_STALE_MS) return null;
+    const t = missionNextTask(m);
+    if (!t) return null;
+    const c = String(t.task || '').match(/\b(?:from|to|in)\s+(.+?)\s+-\s+/i);
+    if (!c) return null;
+    const city = MISSION_CITIES.find(k => c[1].toLowerCase().includes(k.toLowerCase()));
+    return city ? { city, dtm: /\bDTM\b/i.test(t.task), task: t.task, n: t.n } : null;
+  }
+
+  // Tolerant both ways, exactly like isInHot().
+  function inCity(c) {
+    const cur = getCurCity();
+    if (!c || !cur) return false;
+    const a = cur.toLowerCase(), b = String(c).toLowerCase();
+    return a.includes(b) || b.includes(a);
+  }
+  // Where auto-travel should be: the mission's city when one is needed, else the hot city.
+  function travelGoal() {
+    const mn = missionNeed();
+    if (mn) return { city: mn.city, why: 'mission', task: mn.task };
+    const h = getHot();
+    return h ? { city: h, why: 'hot' } : null;
+  }
+  function travelNeeded() { const g = travelGoal(); return !!(g && !inCity(g.city)); }
+  // A mission DTM task must START in its city — hold Create DTM until we are there.
+  function missionHoldsDtm() {
+    const mn = missionNeed();
+    if (!mn || !mn.dtm || inCity(mn.city)) return false;
+    if (Date.now() - (missionHoldsDtm._log || 0) > 10 * 60 * 1000) {
+      missionHoldsDtm._log = Date.now();
+      console.log(APP_TAG, `[MISSION] DTM task needs ${mn.city} — holding Create DTM until we are there`);
+    }
+    return true;
+  }
+
+  // Panel line (Timers section). Reads storage only.
+  function paintMission() {
+    if (!_shadow) return;
+    const row = _shadow.querySelector('#jb-mission-row');
+    const el  = _shadow.querySelector('#jb-mission');
+    if (!row || !el) return;
+    row.style.display = cfg.missionOn ? '' : 'none';
+    if (!cfg.missionOn) return;
+    const m = missionGet();
+    let html;
+    if (!m) html = '<span style="color:var(--jb-text-ter)">not read yet</span>';
+    else if (m.none) html = m.available
+      ? `<span style="color:var(--jb-warning);font-weight:600">● ready to start</span>${cfg.missionAutoStart ? ' (auto)' : ''}`
+      : '<span style="color:var(--jb-text-ter)">none</span>';
+    else {
+      const nx = missionNextTask(m);
+      const tot = (m.tasks || []).length || m.total || '?';
+      const mn = missionNeed();
+      html = `<span style="color:var(--jb-success)">●</span> ${missionDoneCount(m)}/${esc(tot)}` +
+             (nx ? ` · ${esc(String(nx.task).slice(0, 48))}${nx.pct ? ' ' + esc(nx.pct) : ''}` : ' · all done') +
+             (mn && !inCity(mn.city) ? ` · ✈️ ${esc(mn.city)}` : '');
+    }
+    if (el.innerHTML !== html) el.innerHTML = html;
+  }
+
+  // The ⚙ window body.
+  function renderMissionModal() {
+    if (!_shadow) return;
+    const body = _shadow.querySelector('#jb-mission-body');
+    if (!body) return;
+    const m = missionGet(), hist = missionHist();
+    const when = ms => ms ? new Date(ms).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '?';
+    const head = s => `<div class="jb-sect-title" style="margin-top:8px">${s}</div>`;
+    let h = '';
+    if (!m) h += '<div class="jb-sub">Not read yet — press Refresh.</div>';
+    else if (m.none) {
+      h += m.available
+        ? `<div style="font-weight:600;color:var(--jb-warning)">A new mission is available</div>${m.info ? `<div class="jb-sub">${esc(m.info)}</div>` : ''}<button class="jb-btn" id="jb-mission-start" style="margin-top:6px">▶ Start mission</button>`
+        : `<div class="jb-sub">No active mission.${m.info ? ' ' + esc(m.info) : ''}</div>`;
+      h += `<div class="jb-sub" style="margin-top:4px">Checked ${when(m.at)}</div>`;
+      if (m.last) h += head('Last seen') + `<div class="jb-sub">${esc(m.last.title)} — ${missionDoneCount(m.last)}/${esc(m.last.total || (m.last.tasks || []).length)} · ${when(m.last.at)}</div>`;
+    } else {
+      const tasks = m.tasks || [];
+      h += `<div style="font-weight:600">${esc(m.title || 'Mission')} <span style="color:var(--jb-accent)">${missionDoneCount(m)}/${esc(m.total || tasks.length)}</span></div>`;
+      if (m.desc) h += `<div class="jb-sub">${esc(m.desc)}</div>`;
+      if (m.instructions) h += `<div class="jb-sub" style="color:var(--jb-warning)">${esc(m.instructions)}</div>`;
+      h += `<div class="jb-sub">Difficulty ${esc(m.difficulty || '?')} · Reward ${esc([m.cash, m.fmj].filter(Boolean).join(' + ') || '?')}</div>`;
+      h += head('Tasks');
+      let seenOpen = false;
+      h += '<table style="width:100%;border-collapse:collapse;font-size:10px">' + tasks.map(x => {
+        const done = parseFloat(x.pct) >= 100, next = !done && !seenOpen;
+        if (!done) seenOpen = true;
+        const col = done ? 'var(--jb-success)' : next ? 'var(--jb-text)' : 'var(--jb-text-ter)';
+        return `<tr style="color:${col}"><td style="padding:1px 3px">${done ? '✓' : next ? '▶' : ''}</td><td style="padding:1px 3px">${esc(x.n)}</td><td style="padding:1px 3px">${esc(x.task)}</td><td style="padding:1px 3px;text-align:right;white-space:nowrap">${esc(x.pct)}</td></tr>`;
+      }).join('') + '</table>';
+      h += `<div class="jb-sub" style="margin-top:4px">Updated ${when(m.at)}</div>`;
+    }
+    h += head('History');
+    h += hist.length
+      ? '<table style="width:100%;border-collapse:collapse;font-size:10px">' + hist.map(x => `<tr><td style="padding:1px 3px">${esc(x.title)}</td><td style="padding:1px 3px;white-space:nowrap">${esc(x.done)}/${esc(x.total)}</td><td style="padding:1px 3px">${esc([x.cash, x.fmj].filter(Boolean).join(' + '))}</td><td style="padding:1px 3px;text-align:right;white-space:nowrap;color:var(--jb-text-ter)">${when(x.at)}</td></tr>`).join('') + '</table>'
+      : '<div class="jb-sub">Nothing yet — a mission is filed here when it finishes.</div>';
+    body.innerHTML = h;
+    const sb = body.querySelector('#jb-mission-start');
+    if (sb) sb.addEventListener('click', async () => {
+      sb.disabled = true; sb.textContent = 'Starting…';
+      localStorage.setItem('cbMissionStartAt', '0');
+      await missionStart('button');
+      renderMissionModal();
+    });
+  }
+
   // Check if we're currently in the hot city
   function isInHot() {
     const hot = getHot();
@@ -12391,11 +12888,14 @@ try { (function () {
       }
     } catch(_){}
 
-    // Need hot city known
-    if (!getHot()) { fetchHot(); return false; }
+    /* Where to: the mission's city when mission travel needs one, otherwise the
+     * hot city (2000.345 — see MISSIONS). Everything below says "hotCity" because
+     * it was written for the hot city; it now means "the destination". */
+    const goal = travelGoal();
+    if (!goal) { fetchHot(); return false; }
 
-    // Already in hot city
-    if (isInHot()) {
+    // Already there
+    if (inCity(goal.city)) {
       localStorage.removeItem(LS_TRAVEL_PENDING);
       return false;
     }
@@ -12422,16 +12922,16 @@ try { (function () {
 
     // If not on travel page, navigate there
     if (pg !== 'travel') {
-      console.log('[JB][TRAVEL] Navigating to travel page for auto-travel to', getHot());
+      console.log('[JB][TRAVEL] Navigating to travel page for auto-travel to', goal.city, goal.why === 'mission' ? `(mission task: ${goal.task})` : '(hot city)');
       localStorage.setItem(LS_TRAVEL_PENDING, '1');
-      setStatus(`✈️ Traveling to ${getHot()}...`);
+      setStatus(`✈️ Traveling to ${goal.city}${goal.why === 'mission' ? ' (mission)' : ''}...`);
       safeNav('/authenticated/travel.aspx?' + Date.now());
       return true;
     }
 
     // On travel page — select hot city radio and click travel
     if (localStorage.getItem(LS_TRAVEL_PENDING) === '1') {
-      const hotCity = getHot();
+      const hotCity = goal.city;
       const hotLower = hotCity.toLowerCase();
       console.log('[JB][TRAVEL] On travel page — looking for radio matching', hotCity);
 
@@ -12613,7 +13113,7 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
           st.acting = true; st.action = 'travel';
           GM_setValue('cbActStart', Date.now());
           saveSt();
-          tgMsg('travel', `🛩️ <b>Traveled</b>\n${st.player||'?'} → ${hotCity} | 20m cooldown`);
+          tgMsg('travel', `🛩️ <b>Traveled</b>\n${st.player||'?'} → ${hotCity}${goal.why === 'mission' ? ' (mission task)' : ''} | 20m cooldown`);
           setStatus(`🛩️ Jet → ${hotCity}`);
 
           /* Last thing, and nothing may follow it. There is no navigate-away step
@@ -13251,7 +13751,7 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
      * is gated exactly as jailShouldHoldOff gates it. Keyed on the stored due
      * time so it fires once per flight, not once per tick while sitting ready in
      * the wrong city. */
-    if (st.autoTravel && getHot() && !isInHot()) {
+    if (st.autoTravel && travelNeeded()) {   // hot city, or the mission's city (2000.345)
       const tv = getTravel();
       if (tv && (tv.ready || tv.remaining * 1000 <= XP_PRE_READ_LEAD_MS)) {
         const key = Math.floor(Date.now() / 60000);   // at most one per minute
@@ -15336,7 +15836,7 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
       if (dtmSt === 'idle') {
         try {
           const dtm = getDtm();
-          if (dtm && !dtm.inProgress && (dtm.ready || (dtm.total||0)<=0) && isDtmSchedReady()) triggerCreateDTM();
+          if (dtm && !dtm.inProgress && (dtm.ready || (dtm.total||0)<=0) && isDtmSchedReady() && !missionHoldsDtm()) triggerCreateDTM();
         } catch(_){}
       }
       if (dtmSt !== 'idle') {
@@ -15442,6 +15942,7 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
      * backstop, because a page rarely lives long enough for one to fire. See
      * maybeBgFetch. Fire-and-forget: it must never delay an action. */
     try { maybeBgFetch(); } catch(_){}
+    try { missionTick(); } catch(_){}      // missions: read ~every 15 min, auto-start if switched on
     try { maybeWatchScan(); } catch(_){}   // online / mod / property — see maybeWatchScan
     try { doForumRefresh(); } catch(_){}   // fire-and-forget; never gates the loop
     try { maybeSgPush(); } catch(_){}      // fire-and-forget; off by default, see maybeSgPush()
