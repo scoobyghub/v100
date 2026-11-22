@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.347
+// @version      2000.348
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -36,7 +36,7 @@
 // @downloadURL  https://gist.githubusercontent.com/scoobyghub/32b6a0336551df6e3b3a036e39155fdc/raw/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.347
+/*  Jarvis Bot 2000.348
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -239,7 +239,7 @@ try { (function () {
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.347';
+  const APP_VERSION = '2000.348';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -261,6 +261,12 @@ try { (function () {
     geff:   6
   };
   const STAFF_NAMES = Object.keys(STAFF_IDS);
+  /* The mods, by name (user-confirmed 2026-11-22): Marc, Stipe, Snail, Geff.
+   * SQL is a NORMAL PLAYER now. One list, used by the staff-mail name checks and
+   * the on-page staff-check text match, so they cannot drift apart again (SQL
+   * survived in four places after 2000.344 dropped it from STAFF_IDS). Same set
+   * as the owner's TMN_MOD_NAME_RE. */
+  const MOD_NAMES_SRC = '(marc|stipe|snail|geff)';
 
   function isStaffSender(name) {
     return STAFF_NAMES.includes(String(name || '').trim().toLowerCase());
@@ -3392,12 +3398,12 @@ try { (function () {
     const div = document.querySelector('div.NewGridTitle');
     const hasImp = div && div.textContent.includes('Important message');
     const txt = document.body.textContent;
-    const hasSql = /(SQL|Stipe|Marc)\s*(Script Check|what your favourite|tell .* what)/i.test(txt);
+    const hasSql = new RegExp(MOD_NAMES_SRC + '\\s*(Script Check|what your favourite|tell .* what)', 'i').test(txt);
     if (hasImp || hasSql) {
       let q = 'Check the page';
       for (const p of document.querySelectorAll('p,div')) {
         const t = p.textContent;
-        if (/(SQL|Stipe|Marc)/i.test(t) && t.includes('?')) { q = t.trim(); break; }
+        if (new RegExp(MOD_NAMES_SRC, 'i').test(t) && t.includes('?')) { q = t.trim(); break; }
       }
       // Persist a content-keyed fingerprint so reloads don't re-alert. Using the
       // list-based seenOnce (not a single last-value) means a check that cycles
@@ -3459,12 +3465,13 @@ try { (function () {
     );
   }
 
-  // Snail and Geff added 2000.347 — the new round's mods (the owner's TMN_MOD_NAME_RE is stipe|snail|geff|marc).
-  function isSqlStipeSender(name) { return /^(sql|stipe|marc|snail|geff)$/i.test(String(name||'').trim()); }
+  // The mods by NAME (MOD_NAMES_SRC). SQL is a normal player now and must not
+  // be here — a mail from SQL used to raise a false 5× staff alert.
+  function isSqlStipeSender(name) { return new RegExp('^' + MOD_NAMES_SRC + '$', 'i').test(String(name||'').trim()); }
 
   function hasStaffSignal(sender, subject, row, body='') {
     const all = `${sender||''} ${subject||''} ${row||''} ${body||''}`;
-    return /\b(SQL|Stipe|Marc|Snail|Geff)\b/i.test(all) &&
+    return new RegExp('\\b' + MOD_NAMES_SRC + '\\b', 'i').test(all) &&
            /(script\s*check|staff|admin|answer|question|reply|respond|favourite|favorite|important|mail|message)/i.test(all);
   }
 
@@ -10523,7 +10530,7 @@ try { (function () {
               <label class="jb-switch"><input type="checkbox" id="jb-tg-msgs" ${tg.messages?'checked':''}> Messages</label>
               <label class="jb-switch"><input type="checkbox" id="jb-tg-st" ${tg.scriptTest?'checked':''}> Script test 5x</label>
               <label class="jb-switch"><input type="checkbox" id="jb-tg-staff" ${tg.staffMail?'checked':''}> Staff mail 5x</label>
-              <label class="jb-switch"><input type="checkbox" id="jb-tg-sql" ${tg.sqlCheck?'checked':''}> SQL/Staff page</label>
+              <label class="jb-switch"><input type="checkbox" id="jb-tg-sql" ${tg.sqlCheck?'checked':''}> Staff check page</label>
               <label class="jb-switch"><input type="checkbox" id="jb-tg-logout" ${tg.logout?'checked':''}> Logout</label>
             </div>
             <button class="jb-btn" id="jb-tg-test">Test Connection</button>
