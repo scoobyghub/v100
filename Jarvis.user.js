@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.346
+// @version      2000.347
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -36,7 +36,7 @@
 // @downloadURL  https://gist.githubusercontent.com/scoobyghub/32b6a0336551df6e3b3a036e39155fdc/raw/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.346
+/*  Jarvis Bot 2000.347
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -239,7 +239,7 @@ try { (function () {
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.346';
+  const APP_VERSION = '2000.347';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -3459,11 +3459,12 @@ try { (function () {
     );
   }
 
-  function isSqlStipeSender(name) { return /^(sql|stipe|marc)$/i.test(String(name||'').trim()); }
+  // Snail and Geff added 2000.347 — the new round's mods (the owner's TMN_MOD_NAME_RE is stipe|snail|geff|marc).
+  function isSqlStipeSender(name) { return /^(sql|stipe|marc|snail|geff)$/i.test(String(name||'').trim()); }
 
   function hasStaffSignal(sender, subject, row, body='') {
     const all = `${sender||''} ${subject||''} ${row||''} ${body||''}`;
-    return /\b(SQL|Stipe|Marc)\b/i.test(all) &&
+    return /\b(SQL|Stipe|Marc|Snail|Geff)\b/i.test(all) &&
            /(script\s*check|staff|admin|answer|question|reply|respond|favourite|favorite|important|mail|message)/i.test(all);
   }
 
@@ -3477,7 +3478,8 @@ try { (function () {
   }
 
   function isScriptTestSubject(subject, row) {
-    return /^script\s*test$/i.test(String(subject||'').trim()) || /\bscript\s*test\b/i.test(String(row||''));
+    // "check" as well as "test", and a 1 for the i — the owner's pattern (2000.347).
+    return /^scr[i1]pt\s*(test|check)$/i.test(String(subject||'').trim()) || /\bscr[i1]pt\s*(test|check)\b/i.test(String(row||''));
   }
 
   /* === ONLINE WATCH FUNCTIONS === */
@@ -5129,7 +5131,8 @@ try { (function () {
   const MAIL_ON_PAGE_MS = 30000;
   const GM_TIMEOUT       = 20000;
   const INVITE_STALE     = 15*60*1000;
-  const SCRIPT_TEST_STALE= 5*60*1000;
+  const SCRIPT_TEST_STALE= 5*60*1000;   // no longer gates script-test alerts (2000.347) — see checkMail
+  const STAFF_MAIL_MAX_AGE = 6*3600*1000; // sanity ceiling only; the watermark does the real work
 
   /* === INVITE SUBJECT MATCHING (2000.241) ===
    * These two patterns were asymmetric, and OC was the loser. DTM accepted
@@ -5380,15 +5383,55 @@ try { (function () {
 
       const inboxUrl = `${location.origin}/authenticated/mailbox.aspx?p=m`;
       const res = await gmGet(inboxUrl);
-      if (!/\/authenticated\/mailbox\.aspx/i.test(res.finalUrl)) return;
+      if (!/\/authenticated\/mailbox\.aspx/i.test(res.finalUrl)) {
+        console.warn(`${APP_TAG}[MAIL] inbox fetch did not land on the mailbox (${String(res.finalUrl||'').replace(/^https?:\/\/[^/]+/,'')}) — mail NOT checked`);
+        return;
+      }
       const doc = new DOMParser().parseFromString(res.html, 'text/html');
+      /* Rows: the grid if it is there, otherwise any innermost row carrying a
+       * mail link (2000.347). A missing #ctl00_main_gridMail used to return here
+       * silently, which would kill every mail feature — script checks included —
+       * with nothing to say so. The owner's script has never used that id; it
+       * reads tr.unreadmail from the whole page. */
       const grid = doc.querySelector('#ctl00_main_gridMail');
-      if (!grid) return;
-      const rows = [...grid.querySelectorAll('tr')].slice(1);
+      let rows;
+      if (grid) rows = [...grid.querySelectorAll('tr')].slice(1);
+      else {
+        rows = [...doc.querySelectorAll('tr')].filter(tr =>
+          !tr.querySelector('tr') && tr.querySelector('a[href*="mailbox.aspx"][href*="id="]'));
+        const lk = 'cbMailNoGridWarn', lt = parseInt(localStorage.getItem(lk) || '0', 10);
+        if (Date.now() - lt > 3600000) {
+          try { localStorage.setItem(lk, String(Date.now())); } catch(_){}
+          console.warn(`${APP_TAG}[MAIL] #ctl00_main_gridMail missing on the inbox — using ${rows.length} row(s) found by their mail links`);
+        }
+      }
       /* The new-mail watermark as it stood BEFORE this poll. Rows are newest
        * first, and comparing each against a watermark the first row had already
        * raised meant two mails arriving inside one poll only ever alerted once. */
       const mailBase = GM_getValue('cbLastNotifiedId', null);
+      let _rowsMax = null;
+      const rowsMaxId = () => {
+        if (_rowsMax !== null) return _rowsMax;
+        let maxId = 0;
+        for (const row of rows) {
+          const rl = [...row.querySelectorAll('a[href*="mailbox.aspx"]')].find(a => /[?&]id=\d+/i.test(a.getAttribute('href')||''));
+          if (rl) { const rid = parseInt(parseMailId(rl.getAttribute('href')||''),10)||0; if (rid > maxId) maxId = rid; }
+        }
+        return (_rowsMax = maxId);
+      };
+      /* One-time (2000.347): the script-test gate moved from "under 5 min old"
+       * to a watermark, and cbLastScriptTestId is 0 on most installs — so without
+       * this the first poll after updating would alert on every old staff mail in
+       * the inbox. Lift both watermarks to the newest mail present, once. */
+      if (rows.length && !GM_getValue('cbStaffWm347', false)) {
+        const mx = rowsMaxId();
+        if (mx > (Number(GM_getValue('cbLastScriptTestId', 0)) || 0)) GM_setValue('cbLastScriptTestId', mx);
+        const ls = GM_getValue('cbLastStaffMailId', null);
+        if (ls === null || mx > (Number(ls) || 0)) GM_setValue('cbLastStaffMailId', mx);
+        GM_setValue('cbStaffWm347', true);
+        console.log(`${APP_TAG}[MAIL] staff / script-test watermark set at mail ${mx} — alerts from the next one`);
+      }
+      const staffWmAtStart = Math.max(Number(GM_getValue('cbLastScriptTestId', 0)) || 0, Number(GM_getValue('cbLastStaffMailId', 0)) || 0);
 
       for (const r of rows) {
         const link = [...r.querySelectorAll('a[href*="mailbox.aspx"]')].find(a => /[?&]id=\d+/i.test(a.getAttribute('href')||''));
@@ -5612,36 +5655,55 @@ try { (function () {
           continue;
         }
 
+        /* === SCRIPT TEST / STAFF MAIL (reworked 2000.347) ===
+         * These used to need the mail to be under 5 min (script test) or 15 min
+         * (staff mail) old when Jarvis FOUND it — and a mail found later was
+         * marked handled with no alert and no log. Since 2000.344 the idle inbox
+         * poll runs every 4–7 min, and no mail is fetched at all during a break,
+         * a pause or with Settings open, so "found late" is ordinary. A late
+         * script-check alert is far better than none (§6), so the gate is now the
+         * highest-id watermark — first-poll protection for old mail, the same
+         * scheme as witness / shot / payout — plus a 6h sanity ceiling. Every
+         * outcome is logged under [MAIL]. */
+        const staffish = isFromStaff || isSqlStipeSender(sender) || isScriptTestSubject(subject, rowTxt);
+        const nIdS = parseInt(mailId,10)||0;
+        if (staffish && nIdS > staffWmAtStart && !(tg.enabled && (tg.scriptTest || tg.staffMail)) && seenOnce('staffmailoff', mailId, 30)) {
+          console.warn(`${APP_TAG}[MAIL] mail ${mailId} from ${sender} ("${subject}") looks like STAFF / a script test, but NO alert is sent: ` +
+            (!tg.enabled ? 'Telegram is off' : 'both "Script test" and "Staff mail 5x" are off'));
+        }
+
         // Script test inbox alert (by title OR staff profile ID)
         if (tg.enabled && tg.scriptTest && (isScriptTestSubject(subject, rowTxt) || isFromStaff)) {
           const lastSt = GM_getValue('cbLastScriptTestId', 0);
-          const nId = parseInt(mailId,10)||0;
-          if (nId > Number(lastSt||0)) {
-            GM_setValue('cbLastScriptTestId', nId);
+          if (nIdS > Number(lastSt||0)) {
+            GM_setValue('cbLastScriptTestId', nIdS);
             const ts = parseTmnDate(rowTxt);
-            if (!isOlderThan(ts, SCRIPT_TEST_STALE)) {
+            if (isOlderThan(ts, STAFF_MAIL_MAX_AGE)) {
+              console.warn(`${APP_TAG}[MAIL] script-test mail ${mailId} from ${sender} is over ${STAFF_MAIL_MAX_AGE/3600000}h old — not alerted`);
+            } else {
+              console.log(`${APP_TAG}[MAIL] SCRIPT TEST mail ${mailId} from ${sender} ("${subject}") — alerting`);
               sendScriptTestAlert(mailId, sender, subject);
+              // One alert per mail: without this the staff-mail branch fired a
+              // second 5× burst for the same mail on the next poll.
+              if (nIdS > (Number(GM_getValue('cbLastStaffMailId', 0)) || 0)) GM_setValue('cbLastStaffMailId', nIdS);
               continue;
             }
           }
         }
 
-        // Staff mail alert (SQL/Stipe/Marc by name OR profile ID)
+        // Staff mail alert (staff by name OR profile ID)
         if (tg.enabled && tg.staffMail) {
           const lastStaff = GM_getValue('cbLastStaffMailId', null);
-          const nId = parseInt(mailId,10)||0;
+          const nId = nIdS;
           if (lastStaff === null) {
-            let maxId = 0;
-            for (const row of rows) {
-              const rl = [...row.querySelectorAll('a[href*="mailbox.aspx"]')].find(a => /[?&]id=\d+/i.test(a.getAttribute('href')||''));
-              if (rl) { const rid = parseInt(parseMailId(rl.getAttribute('href')||''),10)||0; if (rid > maxId) maxId = rid; }
-            }
-            GM_setValue('cbLastStaffMailId', maxId);
+            GM_setValue('cbLastStaffMailId', rowsMaxId());
           } else if (nId > Number(lastStaff||0)) {
             const ts = parseTmnDate(rowTxt);
-            if (isOlderThan(ts, INVITE_STALE)) {
+            if (isOlderThan(ts, STAFF_MAIL_MAX_AGE)) {
               GM_setValue('cbLastStaffMailId', nId);
+              if (staffish) console.warn(`${APP_TAG}[MAIL] staff mail ${mailId} from ${sender} is over ${STAFF_MAIL_MAX_AGE/3600000}h old — not alerted`);
             } else if (isFromStaff || isSqlStipeSender(sender) || hasStaffSignal(sender, subject, rowTxt)) {
+              console.log(`${APP_TAG}[MAIL] STAFF mail ${mailId} from ${sender} ("${subject}") — alerting`);
               GM_setValue('cbLastStaffMailId', nId);
               let body = '';
               try { body = await fetchMailBody(href)||''; } catch(_){}
