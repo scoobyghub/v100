@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.345
+// @version      2000.346
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -36,7 +36,7 @@
 // @downloadURL  https://gist.githubusercontent.com/scoobyghub/32b6a0336551df6e3b3a036e39155fdc/raw/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.345
+/*  Jarvis Bot 2000.346
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -239,7 +239,7 @@ try { (function () {
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.345';
+  const APP_VERSION = '2000.346';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -1482,6 +1482,9 @@ try { (function () {
     missionOn:        GM_getValue('cbMissionOn', true),
     missionAutoStart: GM_getValue('cbMissionAutoStart', false),
     missionTravel:    GM_getValue('cbMissionTravel', false),
+    /* OC gear auto-buy (2000.346) — see OC GEAR AUTO-BUY. Buys only when an OC
+     * seat needs a weapon/explosive and NONE is owned; once per OC. */
+    ocAutoBuy:        GM_getValue('cbOcAutoBuy', true),
     /* Ready reminders: OC/DTM goes ready and then sits there unused because you
      * didn't see the one alert. Re-ping every N minutes while it's STILL ready,
      * capped, and disarming the moment the timer goes back on cooldown. 0 = off. */
@@ -1753,7 +1756,8 @@ try { (function () {
     { key:'modOnline',   label:'Staff/mod online',      def:true  },
     { key:'holdHq',      label:'Hold HQ (panic)',       def:true  },
     { key:'shot',        label:'Shot at / attacked',    def:true  },
-    { key:'mission',     label:'Missions',              def:true  }
+    { key:'mission',     label:'Missions',              def:true  },
+    { key:'ocGear',      label:'OC gear bought/missing', def:true  }
   ];
 
   const tgMsgOn = {};
@@ -5891,6 +5895,196 @@ try { (function () {
     return true;
   }
 
+  /* === OC GEAR AUTO-BUY (2000.346) ===
+   * Seated in an OC as Weapon Master or Explosive Expert with NOTHING of that
+   * kind owned, the OC page shows an empty dropdown and the seat can never be
+   * filled — the generic loop in handleOcPage would click Choose on nothing,
+   * and the whole team's OC stalls. Ported from the reference's
+   * handleOCParticipantPart / handleStorePageForOCPart (4.20.294), narrowed to
+   * what was asked for: buy ONLY when none is owned.
+   *  · Anything owned → never buys. Picks the best owned item it recognises
+   *    (XM-29 / CheyTac, C4 — the reference's ranking), otherwise the first, as
+   *    before. Unlike the reference it never refuses owned gear and never buys
+   *    an upgrade.
+   *  · ONE purchase per OC seat (state keyed by ocid, written BEFORE the buy
+   *    navigation). If the item still is not listed after 3 re-reads, alert and
+   *    stand down — a broke player or a changed store must not become a loop.
+   *  · Transporter is not covered: a car comes from the garage (parking above).
+   *  · Store links weapon/24 = XM-29 OICW and explosive/9 = C4 are the
+   *    reference's, NOT verified live. A missing link logs every buy link seen.
+   *  · cfg.ocAutoBuy off → no purchase; one alert that the seat needs gear,
+   *    and no blind Choose click.
+   */
+  const LS_OC_GEAR      = 'cbOcGear';   // JSON {role, ocid, at, phase, goAt, boughtAt, checks, lastCheck}
+  const OC_GEAR_MAX_MS  = 3 * 60 * 60 * 1000;
+  const OC_GEAR_STORE   = '/authenticated/store.aspx?p=w&r=organizedcrime';
+  const OC_GEAR = {
+    weaponmaster: {
+      label: 'Weapon Master', what: 'weapon',
+      dd:  ['ctl00_main_weaponslist', 'ctl00_main_weaponlist'],
+      btn: ['ctl00_main_btnChooseWeapon', 'ctl00_main_btnchooseweapon', 'ctl00_main_btnchooseweapons'],
+      status: 'ctl00_main_lblweaponmasterstatus', item: 'ctl00_main_lblweaponmasteritem',
+      buy: 'a[href*="cat=weapon"][href*="itemid=24"]', buyName: 'XM-29 OICW',
+      best: [/XM[\s\-]?29|OICW/i, /CheyTac|LRRS/i]
+    },
+    explosiveexpert: {
+      label: 'Explosive Expert', what: 'explosive',
+      dd:  ['ctl00_main_explosiveslist'],
+      btn: ['ctl00_main_btnchooseexplosive'],
+      status: 'ctl00_main_lblexplosiveexpertstatus', item: 'ctl00_main_lblexplosiveexpertitem',
+      buy: 'a[href*="cat=explosive"][href*="itemid=9"]', buyName: 'C4',
+      best: [/\bC[\s\-]?4\b/i]
+    }
+  };
+  function ocGearNormRole(raw) {
+    const r = String(raw || '').toLowerCase().replace(/[\s_-]+/g, '');
+    if (r === 'weaponmaster') return 'weaponmaster';
+    if (r === 'explosiveexpert' || r === 'explosive') return 'explosiveexpert';
+    return '';
+  }
+  function ocGearGet() {
+    try {
+      const g = JSON.parse(localStorage.getItem(LS_OC_GEAR) || 'null');
+      if (g && OC_GEAR[g.role] && Date.now() - (g.at || 0) < OC_GEAR_MAX_MS) return g;
+      if (g) localStorage.removeItem(LS_OC_GEAR);
+    } catch(_) {}
+    return null;
+  }
+  function ocGearSave(g) { try { const { url, ...keep } = g; localStorage.setItem(LS_OC_GEAR, JSON.stringify(keep)); } catch(_) {} }
+  function ocGearEl(ids) { for (const id of ids) { const el = document.getElementById(id); if (el) return el; } return null; }
+  // Which seat is ours: the accept URL says (pos=WeaponMaster&ocid=…) — a new
+  // ocid starts fresh state, the SAME one keeps it, because ASP.NET posts back
+  // to the same URL and a reset there would allow a second purchase. Without an
+  // accept URL, stored state is trusted only mid-buy (our own re-reads of the
+  // OC page); otherwise the seat is inferred from the one gear dropdown on the
+  // page. A seat remembered from an EARLIER OC is never applied to this page —
+  // as a transporter, say, it would read someone else's "Pending" as ours.
+  // g.url = the role came from this page's own accept URL.
+  function ocGearSeat() {
+    const sp = new URLSearchParams(location.search);
+    const role = ocGearNormRole(sp.get('pos')), ocid = sp.get('ocid') || '';
+    let g = ocGearGet();
+    if (role) {
+      if (!g || g.role !== role || g.ocid !== ocid) { g = { role, ocid, at: Date.now(), phase: '' }; ocGearSave(g); }
+      return { ...g, url: true };
+    }
+    if (g && (g.phase === 'buy' || g.phase === 'bought')) return g;
+    const w = ocGearEl(OC_GEAR.weaponmaster.dd), e = ocGearEl(OC_GEAR.explosiveexpert.dd);
+    const r = (w && !e) ? 'weaponmaster' : (e && !w) ? 'explosiveexpert' : '';
+    if (!r) return null;
+    if (g && g.role === r && !g.ocid) return g;                // same inferred seat seen again
+    g = { role: r, ocid: '', at: Date.now(), phase: '' }; ocGearSave(g);
+    return g;
+  }
+  function ocGearStandDown(status) {
+    localStorage.removeItem('cbPendOcHandle'); localStorage.removeItem('cbPendOcHandleTs');
+    localStorage.removeItem(LS_PEND_OC);
+    st.acting = false; st.action = ''; GM_setValue('cbActStart', 0);
+    if (status) setStatus(status);
+    return true;
+  }
+  // On the OC page. true = handled this tick; false = carry on to the generic
+  // choose loop (which clicks Choose on whatever is selected).
+  function ocGearStep() {
+    if (st.inJail) return false;
+    const g = ocGearSeat();
+    if (!g) return false;
+    const G = OC_GEAR[g.role];
+    const dd = ocGearEl(G.dd);
+    const status = ((document.getElementById(G.status) || {}).textContent || '').trim();
+    const item   = ((document.getElementById(G.item)   || {}).textContent || '').trim();
+    if (/ready/i.test(status) || item) {                       // seat already equipped
+      if (g.phase !== 'have') { g.phase = 'have'; ocGearSave(g); }
+      return false;
+    }
+    if (dd && dd.tagName === 'SELECT' && dd.options.length > 0) {   // something owned: never buy
+      const opts = [...dd.options];
+      let idx = -1;
+      for (const re of G.best) { idx = opts.findIndex(o => re.test(o.textContent || '')); if (idx >= 0) break; }
+      if (idx >= 0) dd.selectedIndex = idx;
+      if (g.phase !== 'have') {
+        const pick = opts[dd.selectedIndex >= 0 ? dd.selectedIndex : 0];
+        console.log(`${APP_TAG}[OCGEAR] ${G.label}: owned [${opts.map(o => (o.textContent||'').trim()).join(' | ')}] — choosing "${(pick && pick.textContent || '').trim()}"`);
+        g.phase = 'have'; ocGearSave(g);
+      }
+      return false;
+    }
+    // Needs gear? An empty dropdown is the game asking us to choose from nothing.
+    // With no dropdown at all, only a seat reading "Pending" counts — the page keeps
+    // showing an old roster after an OC ends, and that must never trigger a buy.
+    const empty   = !!(dd && dd.tagName === 'SELECT' && dd.options.length === 0);
+    const waiting = !dd && !ocGearEl(G.btn) && /pending/i.test(status) && (g.url || g.phase === 'bought');
+    if (!empty && !waiting) return false;
+
+    const now = Date.now();
+    if (g.phase === 'have' || g.phase === 'gaveup' || g.phase === 'told') return ocGearStandDown('');
+    if (!cfg.ocAutoBuy) {
+      g.phase = 'told'; ocGearSave(g);
+      console.warn(`${APP_TAG}[OCGEAR] ${G.label}: no ${G.what} owned and OC gear auto-buy is off — seat left for you`);
+      tgMsg('ocGear', `🛒 <b>OC: no ${G.what} owned</b>\n${esc(st.player||'?')} | Your ${G.label} seat needs one — buy it in the store (OC gear auto-buy is off)`);
+      return ocGearStandDown(`⚠️ OC: no ${G.what} owned`);
+    }
+    if (!g.phase) {
+      g.phase = 'buy'; g.goAt = now; g.checks = 0; ocGearSave(g);   // ONE purchase per seat, recorded first
+      localStorage.setItem('cbPendOcHandleTs', String(now));
+      console.log(`${APP_TAG}[OCGEAR] ${G.label}: no ${G.what} owned — going to the store for ${G.buyName}`);
+      setStatus(`🛒 OC: buying ${G.buyName}`);
+      safeNav(OC_GEAR_STORE);
+      return true;
+    }
+    if (g.phase === 'buy') {                                   // on our way to the store
+      if (now - (g.goAt || 0) < 15000) return true;
+      g.phase = 'gaveup'; ocGearSave(g);
+      console.warn(`${APP_TAG}[OCGEAR] ${G.label}: never reached the store buy step — not retrying`);
+      tgMsg('ocGear', `⚠️ <b>OC gear not bought</b>\n${esc(st.player||'?')} | Could not reach the store for ${G.buyName} — choose your ${G.what} by hand`);
+      return ocGearStandDown('⚠️ OC gear not bought');
+    }
+    if (g.phase === 'bought') {                                // bought, waiting for it to be listed
+      localStorage.setItem('cbPendOcHandleTs', String(now));
+      if (now - (g.lastCheck || g.boughtAt || 0) < 10000) { st.acting = false; return true; }
+      if ((g.checks || 0) < 3) {
+        g.checks = (g.checks || 0) + 1; g.lastCheck = now; ocGearSave(g);
+        console.log(`${APP_TAG}[OCGEAR] ${G.label}: bought ${G.buyName}, not listed yet — re-reading the OC page (${g.checks}/3)`);
+        safeNav(OC_PATH + '?' + now);
+        return true;
+      }
+      g.phase = 'gaveup'; ocGearSave(g);
+      console.warn(`${APP_TAG}[OCGEAR] ${G.label}: ${G.buyName} still not listed after ${g.checks} re-reads — NOT buying again`);
+      tgMsg('ocGear', `⚠️ <b>OC gear: bought but not listed</b>\n${esc(st.player||'?')} | ${G.buyName} still isn't in your ${G.label} list — the buy may have failed (not enough cash?). Not buying again; check the OC page`);
+      return ocGearStandDown('⚠️ OC gear not listed');
+    }
+    return false;
+  }
+  // On the store page during a buy: one navigation to the buy link, with the
+  // state moved to 'bought' FIRST so no reload can repeat it, then back to the OC.
+  function ocGearStorePage() {
+    const g = ocGearGet();
+    if (!g || g.phase !== 'buy') return false;
+    if (!location.pathname.toLowerCase().includes('/store.aspx')) return false;
+    const G = OC_GEAR[g.role];
+    st.acting = true; st.action = 'oc-gear'; GM_setValue('cbActStart', Date.now());
+    localStorage.setItem('cbPendOcHandleTs', String(Date.now()));
+    localStorage.setItem(LS_PEND_OC, window.location.origin + OC_PATH);   // the next tick returns to the OC
+    g.phase = 'bought'; g.boughtAt = Date.now(); g.checks = 0; ocGearSave(g);
+    const link = document.querySelector(G.buy);
+    if (!link) {
+      const seen = [...document.querySelectorAll('a[href*="itemid="]')].slice(0, 30)
+        .map(a => `${(a.textContent||'').trim() || '?'} → ${a.getAttribute('href')}`);
+      console.warn(`${APP_TAG}[OCGEAR] Store: no buy link for ${G.buyName} (${G.buy}). Buy links on the page: ${seen.join(' | ') || 'none'}`);
+      g.phase = 'gaveup'; ocGearSave(g);
+      tgMsg('ocGear', `⚠️ <b>OC gear not bought</b>\n${esc(st.player||'?')} | ${G.buyName} not found in the store — choose your ${G.what} by hand`);
+      return ocGearStandDown('⚠️ OC gear not in store');
+    }
+    const href = link.href;
+    console.log(`${APP_TAG}[OCGEAR] Store: buying ${G.buyName} for the ${G.label} seat — ${link.getAttribute('href')}`);
+    tgMsg('ocGear', `🛒 <b>OC gear: buying ${G.buyName}</b>\n${esc(st.player||'?')} | ${G.label} seat, none owned`);
+    setStatus(`🛒 OC: buying ${G.buyName}`);
+    // A single GET from the store page (so the referer is the store), never a
+    // click-plus-fallback pair that could fire the purchase twice.
+    setTimeout(() => { if (!isHalted()) location.assign(href); }, rndDelay(DLY.quick));
+    return true;
+  }
+
   function handleOcPage() {
     if (localStorage.getItem('cbPendOcHandle') !== 'true') return false;
     const pts = parseInt(localStorage.getItem('cbPendOcHandleTs')||'0',10);
@@ -5898,6 +6092,7 @@ try { (function () {
       localStorage.removeItem('cbPendOcHandle'); localStorage.removeItem('cbPendOcHandleTs');
       st.acting = false; return false;
     }
+    if (ocGearStorePage()) return true;
     if (!window.location.pathname.toLowerCase().includes('organizedcrime.aspx')) {
       const retry = localStorage.getItem(LS_PEND_OC);
       if (retry) { localStorage.removeItem(LS_PEND_OC); try { const u = new URL(retry); window.location.href = u.pathname+u.search; } catch(_) { window.location.href = retry.replace(/^https?:\/\/[^/]+/,''); } return true; }
@@ -5940,6 +6135,9 @@ try { (function () {
       st.acting = false;
       return true;
     }
+
+    // WEAPON MASTER / EXPLOSIVE EXPERT — pick the best owned item, or buy one when none is owned.
+    if (ocGearStep()) return true;
 
     const selIds = ['ctl00_main_explosiveslist','ctl00_main_weaponslist','ctl00_main_carslist','ctl00_main_vehicleslist','ctl00_main_weaponlist','ctl00_main_carlist'];
     for (const sid of selIds) { const sel = document.getElementById(sid); if (sel && sel.tagName === 'SELECT' && sel.options.length > 0) { if (sel.selectedIndex < 0) sel.selectedIndex = 0; try { sel.dispatchEvent(new Event('change',{bubbles:true})); } catch(_){} } }
@@ -10019,6 +10217,7 @@ try { (function () {
                                                    title: 'START a DTM yourself and invite a partner — set them in its ⚙ window.' }) +
             tog('jb-auto-oclist',  '📋 OC List',  { on: st.autoOcList,  title: 'ADVERTISE yourself on the OC list (ocads.aspx) when an OC is ready, so others can invite you.' }) +
             tog('jb-auto-dtmlist', '📋 DTM List', { on: st.autoDtmList, title: 'ADVERTISE yourself on the DTM list (ocads.aspx) when a DTM is ready, so others can invite you.' }) +
+            tog('jb-oc-autobuy', '🛒 OC gear', { on: cfg.ocAutoBuy, title: 'Seated in an OC as Weapon Master or Explosive Expert with NONE of that kind owned: buy one (XM-29 OICW / C4) so the seat can be filled. Never buys if you already own any, never upgrades, and buys at most once per OC.' }) +
             tog('jb-wl-on', '🛂 Whitelist', { cfg: 'jb-wl-link', cfgTitle: 'Whitelist, blacklist and allied/safe-only filters',
                                              title: 'Only accept invites from the players on your whitelist. The blacklist always applies.' }) +
             tog('jb-notify-ready', '🔔 Ready alerts', { title: 'Telegram ping when an OC or DTM comes off cooldown, plus the repeat reminders while it sits unused. Only the OC/DTM ready pings — every other alert lives in Settings → Alerts, and script checks are never gated by it.' })
@@ -12270,6 +12469,9 @@ try { (function () {
       q('#jb-mission-link')?.addEventListener('click', openMission);
       q('#jb-mission-row')?.addEventListener('click', openMission);
       q('#jb-mission-close')?.addEventListener('click', () => closeModal2('#jb-mission-modal'));
+      q('#jb-oc-autobuy')?.addEventListener('change', e => {
+        cfg.ocAutoBuy = e.target.checked; GM_setValue('cbOcAutoBuy', cfg.ocAutoBuy);
+      });
       q('#jb-mission-on')?.addEventListener('change', e => {
         cfg.missionOn = e.target.checked; GM_setValue('cbMissionOn', cfg.missionOn);
         if (cfg.missionOn) GM_setValue('cbDueMission', 0);   // read it on the next tick
