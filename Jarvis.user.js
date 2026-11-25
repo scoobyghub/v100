@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.348
+// @version      2000.349
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -36,7 +36,7 @@
 // @downloadURL  https://gist.githubusercontent.com/scoobyghub/32b6a0336551df6e3b3a036e39155fdc/raw/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.348
+/*  Jarvis Bot 2000.349
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -239,7 +239,7 @@ try { (function () {
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.348';
+  const APP_VERSION = '2000.349';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -272,11 +272,17 @@ try { (function () {
     return STAFF_NAMES.includes(String(name || '').trim().toLowerCase());
   }
 
+  /* A mail from ANY of these profile ids is ALWAYS a 5× staff alert (user,
+   * 2026-11-25: "messages from id 1 2 3 4 5 6 7 8 should always be a 5x
+   * alert"). Wider than STAFF_IDS on purpose: 7 and 8 have no known names, and
+   * the low ids are the game's staff/system accounts. Change the ids HERE. */
+  const STAFF_ALERT_IDS = [1, 2, 3, 4, 5, 6, 7, 8];
+
   function isStaffProfileLink(href) {
     const m = String(href || '').match(/[?&]id=(\d+)/i);
     if (!m) return false;
     const id = parseInt(m[1], 10);
-    return Object.values(STAFF_IDS).includes(id);
+    return STAFF_ALERT_IDS.includes(id) || Object.values(STAFF_IDS).includes(id);
   }
 
   function isStaffRow(row) {
@@ -5603,6 +5609,50 @@ try { (function () {
           }
         }
 
+        /* === STAFF / SCRIPT-TEST MAIL (2000.349 — runs BEFORE invite handling) ===
+         * A mail from profile id 1–8 (STAFF_ALERT_IDS) is ALWAYS a 5× alert:
+         *  · it needs only Telegram plus EITHER "Script test" or "Staff mail 5x";
+         *  · it no longer has to pass a name/keyword test;
+         *  · it sits ABOVE the invite block, whose `continue` used to swallow any
+         *    staff mail whose text happened to read like an OC/DTM invite (e.g.
+         *    "…your mission"), so it never reached the staff check at all.
+         * Script-test subjects from anyone, and mod names with a staff keyword, are
+         * kept as before. Gate is the highest-id watermark AS IT STOOD AT THE START
+         * OF THIS POLL (two staff mails in one poll both alert — the old live
+         * watermark let only the newest through), plus the 6h sanity ceiling.
+         * Every outcome is logged under [MAIL]. */
+        const nIdS = parseInt(mailId,10)||0;
+        const stSubj = isScriptTestSubject(subject, rowTxt);
+        const byName = !isFromStaff && (isSqlStipeSender(sender) || hasStaffSignal(sender, subject, rowTxt));
+        let staffAlerted = false;
+        if (nIdS > staffWmAtStart && (isFromStaff || stSubj || byName)) {
+          const wants = isFromStaff ? (tg.staffMail || tg.scriptTest)
+                      : stSubj ? tg.scriptTest : tg.staffMail;
+          if (!tg.enabled || !wants) {
+            if (seenOnce('staffmailoff', mailId, 30))
+              console.warn(`${APP_TAG}[MAIL] mail ${mailId} from ${sender} ("${subject}") looks like STAFF / a script test, but NO alert is sent: ` +
+                (!tg.enabled ? 'Telegram is off' : (isFromStaff ? 'both "Script test" and "Staff mail 5x" are off' : stSubj ? '"Script test" is off' : '"Staff mail 5x" is off')));
+          } else {
+            // Raise both watermarks (monotonic) so neither branch re-alerts next poll.
+            for (const k of ['cbLastScriptTestId', 'cbLastStaffMailId'])
+              if (nIdS > (Number(GM_getValue(k, 0)) || 0)) GM_setValue(k, nIdS);
+            const ts = parseTmnDate(rowTxt);
+            if (isOlderThan(ts, STAFF_MAIL_MAX_AGE)) {
+              console.warn(`${APP_TAG}[MAIL] staff mail ${mailId} from ${sender} is over ${STAFF_MAIL_MAX_AGE/3600000}h old — not alerted`);
+            } else if (stSubj) {
+              console.log(`${APP_TAG}[MAIL] SCRIPT TEST mail ${mailId} from ${sender} ("${subject}") — alerting 5×`);
+              sendScriptTestAlert(mailId, sender, subject);
+              staffAlerted = true;
+            } else {
+              console.log(`${APP_TAG}[MAIL] STAFF mail ${mailId} from ${sender} ("${subject}")${isFromStaff ? ' [staff id]' : ''} — alerting 5×`);
+              let body = '';
+              try { body = await fetchMailBody(href)||''; } catch(_){}
+              sendStaffAlert(mailId, sender, subject, body);
+              staffAlerted = true;
+            }
+          }
+        }
+
         /* Invite handling. Both kinds run the identical gate sequence, so it lives
          * in one place — the OC and DTM versions had drifted apart, which is how
          * OC ended up with a stricter subject rule than DTM (see the patterns
@@ -5662,65 +5712,8 @@ try { (function () {
           continue;
         }
 
-        /* === SCRIPT TEST / STAFF MAIL (reworked 2000.347) ===
-         * These used to need the mail to be under 5 min (script test) or 15 min
-         * (staff mail) old when Jarvis FOUND it — and a mail found later was
-         * marked handled with no alert and no log. Since 2000.344 the idle inbox
-         * poll runs every 4–7 min, and no mail is fetched at all during a break,
-         * a pause or with Settings open, so "found late" is ordinary. A late
-         * script-check alert is far better than none (§6), so the gate is now the
-         * highest-id watermark — first-poll protection for old mail, the same
-         * scheme as witness / shot / payout — plus a 6h sanity ceiling. Every
-         * outcome is logged under [MAIL]. */
-        const staffish = isFromStaff || isSqlStipeSender(sender) || isScriptTestSubject(subject, rowTxt);
-        const nIdS = parseInt(mailId,10)||0;
-        if (staffish && nIdS > staffWmAtStart && !(tg.enabled && (tg.scriptTest || tg.staffMail)) && seenOnce('staffmailoff', mailId, 30)) {
-          console.warn(`${APP_TAG}[MAIL] mail ${mailId} from ${sender} ("${subject}") looks like STAFF / a script test, but NO alert is sent: ` +
-            (!tg.enabled ? 'Telegram is off' : 'both "Script test" and "Staff mail 5x" are off'));
-        }
-
-        // Script test inbox alert (by title OR staff profile ID)
-        if (tg.enabled && tg.scriptTest && (isScriptTestSubject(subject, rowTxt) || isFromStaff)) {
-          const lastSt = GM_getValue('cbLastScriptTestId', 0);
-          if (nIdS > Number(lastSt||0)) {
-            GM_setValue('cbLastScriptTestId', nIdS);
-            const ts = parseTmnDate(rowTxt);
-            if (isOlderThan(ts, STAFF_MAIL_MAX_AGE)) {
-              console.warn(`${APP_TAG}[MAIL] script-test mail ${mailId} from ${sender} is over ${STAFF_MAIL_MAX_AGE/3600000}h old — not alerted`);
-            } else {
-              console.log(`${APP_TAG}[MAIL] SCRIPT TEST mail ${mailId} from ${sender} ("${subject}") — alerting`);
-              sendScriptTestAlert(mailId, sender, subject);
-              // One alert per mail: without this the staff-mail branch fired a
-              // second 5× burst for the same mail on the next poll.
-              if (nIdS > (Number(GM_getValue('cbLastStaffMailId', 0)) || 0)) GM_setValue('cbLastStaffMailId', nIdS);
-              continue;
-            }
-          }
-        }
-
-        // Staff mail alert (staff by name OR profile ID)
-        if (tg.enabled && tg.staffMail) {
-          const lastStaff = GM_getValue('cbLastStaffMailId', null);
-          const nId = nIdS;
-          if (lastStaff === null) {
-            GM_setValue('cbLastStaffMailId', rowsMaxId());
-          } else if (nId > Number(lastStaff||0)) {
-            const ts = parseTmnDate(rowTxt);
-            if (isOlderThan(ts, STAFF_MAIL_MAX_AGE)) {
-              GM_setValue('cbLastStaffMailId', nId);
-              if (staffish) console.warn(`${APP_TAG}[MAIL] staff mail ${mailId} from ${sender} is over ${STAFF_MAIL_MAX_AGE/3600000}h old — not alerted`);
-            } else if (isFromStaff || isSqlStipeSender(sender) || hasStaffSignal(sender, subject, rowTxt)) {
-              console.log(`${APP_TAG}[MAIL] STAFF mail ${mailId} from ${sender} ("${subject}") — alerting`);
-              GM_setValue('cbLastStaffMailId', nId);
-              let body = '';
-              try { body = await fetchMailBody(href)||''; } catch(_){}
-              if (isFromStaff || isSqlStipeSender(sender) || hasStaffSignal(sender, subject, rowTxt, body)) {
-                sendStaffAlert(mailId, sender, subject, body);
-                continue;
-              }
-            }
-          }
-        }
+        // Staff mail already alerted above (5×) — not a plain "New Mail" as well.
+        if (staffAlerted) continue;
 
         // Regular mail notification
         if (tg.enabled && tg.messages) {
