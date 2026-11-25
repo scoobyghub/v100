@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.349
+// @version      2000.350
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -36,7 +36,7 @@
 // @downloadURL  https://gist.githubusercontent.com/scoobyghub/32b6a0336551df6e3b3a036e39155fdc/raw/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.349
+/*  Jarvis Bot 2000.350
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -239,7 +239,7 @@ try { (function () {
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.349';
+  const APP_VERSION = '2000.350';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -2240,6 +2240,17 @@ try { (function () {
      * the `already pending` return above, so a re-queued check can't re-post. */
     try { discordCriticalAlert(key, msg); } catch(e) { console.warn(APP_TAG, '[DC] critical alert', e); }
     pumpCriticalAlerts();
+  }
+
+  // Append a mail-body preview to a still-pending critical alert (2000.350): the
+  // alert is queued BEFORE the body is fetched, so it cannot be lost to a page
+  // change mid-fetch; whatever sends remain carry the preview.
+  function addCritPreview(key, body) {
+    const q = _loadCrit();
+    const a = q.find(x => x.key === key);
+    if (!a || /<pre>/.test(a.msg)) return;
+    a.msg += `\n<pre>${esc(String(body).substring(0, 300))}</pre>`;
+    _saveCrit(q);
   }
 
   // Cancel a pending critical alert (e.g. once its check is cleared).
@@ -5626,12 +5637,12 @@ try { (function () {
         const byName = !isFromStaff && (isSqlStipeSender(sender) || hasStaffSignal(sender, subject, rowTxt));
         let staffAlerted = false;
         if (nIdS > staffWmAtStart && (isFromStaff || stSubj || byName)) {
-          const wants = isFromStaff ? (tg.staffMail || tg.scriptTest)
-                      : stSubj ? tg.scriptTest : tg.staffMail;
+          // A staff id (1–8) needs NOTHING but Telegram — not either switch (user: "always").
+          const wants = isFromStaff ? true : stSubj ? tg.scriptTest : tg.staffMail;
           if (!tg.enabled || !wants) {
             if (seenOnce('staffmailoff', mailId, 30))
               console.warn(`${APP_TAG}[MAIL] mail ${mailId} from ${sender} ("${subject}") looks like STAFF / a script test, but NO alert is sent: ` +
-                (!tg.enabled ? 'Telegram is off' : (isFromStaff ? 'both "Script test" and "Staff mail 5x" are off' : stSubj ? '"Script test" is off' : '"Staff mail 5x" is off')));
+                (!tg.enabled ? 'Telegram is off' : stSubj ? '"Script test" is off' : '"Staff mail 5x" is off'));
           } else {
             // Raise both watermarks (monotonic) so neither branch re-alerts next poll.
             for (const k of ['cbLastScriptTestId', 'cbLastStaffMailId'])
@@ -5645,10 +5656,20 @@ try { (function () {
               staffAlerted = true;
             } else {
               console.log(`${APP_TAG}[MAIL] STAFF mail ${mailId} from ${sender} ("${subject}")${isFromStaff ? ' [staff id]' : ''} — alerting 5×`);
-              let body = '';
-              try { body = await fetchMailBody(href)||''; } catch(_){}
-              sendStaffAlert(mailId, sender, subject, body);
+              /* QUEUE FIRST, fetch the body AFTER (2000.350). The watermark is
+               * already raised above, and this used to `await fetchMailBody`
+               * BEFORE queuing — Jarvis navigates every few seconds, so a page
+               * change during that fetch lost the 5× for good while the plain
+               * "New Mail" (no such watermark) still went out on the next poll.
+               * Exactly what Frankie got for Marc's "Profile image" on 347. Now the
+               * alert is persisted synchronously; the body only adds a preview to
+               * the sends still pending. */
+              sendStaffAlert(mailId, sender, subject);
               staffAlerted = true;
+              try {
+                const body = await fetchMailBody(href) || '';
+                if (body) addCritPreview('staffmail:' + mailId, body);
+              } catch(_){}
             }
           }
         }
@@ -5714,6 +5735,8 @@ try { (function () {
 
         // Staff mail already alerted above (5×) — not a plain "New Mail" as well.
         if (staffAlerted) continue;
+        // …or on an earlier poll (that page may have died mid body-fetch after queuing it).
+        if ((isFromStaff || stSubj || byName) && nIdS <= staffWmAtStart) continue;
 
         // Regular mail notification
         if (tg.enabled && tg.messages) {
