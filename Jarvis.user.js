@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.352
+// @version      2000.353
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -37,7 +37,7 @@
 // @downloadURL  https://gist.githubusercontent.com/scoobyghub/32b6a0336551df6e3b3a036e39155fdc/raw/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.352
+/*  Jarvis Bot 2000.353
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -240,7 +240,7 @@ try { (function () {
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.352';
+  const APP_VERSION = '2000.353';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -1914,7 +1914,15 @@ try { (function () {
    * retry/backoff/429 machinery here was built the hard way. Items carry a `dest`
    * so one pump serves both; anything without one is Telegram, which keeps every
    * pre-existing queued item working across the upgrade. */
-  function sendDiscord(embed, content) {
+  /* `critical` (default TRUE, 2000.353): at-least-once, like Telegram's check
+   * alerts. Discord items used to fall under the at-most-once sweep, so a post
+   * whose request was cut off by Jarvis navigating (every few seconds) was
+   * dropped as "assumed delivered" on the next page. That is the best fit for
+   * rank-ups and script checks reaching Telegram (crit, retried) but never
+   * Discord, while the Test button — pressed with Settings open, so no
+   * navigation — always worked. Event posts are already deduped BEFORE the queue
+   * (dcSendOnce), so the cost is a rare duplicate; only the test passes false. */
+  function sendDiscord(embed, content, critical = true) {
     if (!dcConfigured()) return;
     const q = _loadTgQ();
     /* `content` is the plain line above the embed, used only to carry a mention.
@@ -1926,7 +1934,7 @@ try { (function () {
       payload.allowed_mentions = { parse: ['users', 'roles', 'everyone'] };
     }
     q.push({ id: Date.now() + '_' + Math.random().toString(36).slice(2, 7),
-             dest: 'dc', payload, attempts: 0, nextAt: 0 });
+             dest: 'dc', payload, attempts: 0, nextAt: 0, crit: !!critical, sentAt: 0 });
     _capTgQ(q, 50);
     _saveTgQ(q);
     pumpTgQueue();
@@ -2324,7 +2332,7 @@ try { (function () {
     /* The mention is included deliberately. It is the one part that can be
      * misconfigured silently, and a real script check is precisely the wrong
      * moment to find that out — so the test proves the ping, not just the post. */
-    sendDiscord(e, (dc.mention || '').trim());   // not dcSendOnce: repeat tests are fine
+    sendDiscord(e, (dc.mention || '').trim(), false);   // not dcSendOnce: repeat tests are fine; not retried
     alert('Test sent — check the channel.\n\nIt is clearly marked THIS IS A TEST.' +
           (dc.mention ? '\n\nIt includes your ping, so you can confirm the notification works.'
                       : '\n\nNo ping is set, so a real script check would post SILENTLY. Set one if you want your phone to buzz.'));
