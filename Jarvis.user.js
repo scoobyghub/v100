@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.350
+// @version      2000.351
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -28,6 +28,7 @@
 // @grant        GM_xmlhttpRequest
 // @connect      api.telegram.org
 // @connect      discord.com
+// @connect      ntfy.sh
 // @connect      raw.githubusercontent.com
 // @connect      starvinggeeks.net
 // @connect      helper.starvinggeeks.net
@@ -36,7 +37,7 @@
 // @downloadURL  https://gist.githubusercontent.com/scoobyghub/32b6a0336551df6e3b3a036e39155fdc/raw/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.350
+/*  Jarvis Bot 2000.351
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -239,7 +240,7 @@ try { (function () {
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.350';
+  const APP_VERSION = '2000.351';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -1666,6 +1667,49 @@ try { (function () {
     return !!(dc.enabled && /^https:\/\/(discord\.com|discordapp\.com)\/api\/webhooks\//i.test(dc.url));
   }
 
+  /* === NTFY (2000.351) ===
+   * A third alert channel, for the BAN-RISK events only: script tests, staff
+   * mail (incl. any mail from profile ids 1–8), the on-page staff check and
+   * anti-bot / soft-ban messages — plus, optionally, "staff came online".
+   * Nothing else goes here, by request: it is the loud phone channel, so it
+   * must only ever ring for something that needs answering.
+   *
+   * · Rides the critical-alert queue, so it is reload-proof and NOT gated by
+   *   the halt (a queued check must still go out while stopped, §6).
+   * · One urgent push when the check arrives, then one per follow-up (every
+   *   ~3 min) until it is answered/cleared — not the 5× quick burst: a
+   *   priority-5 ntfy push is already persistent and loud.
+   * · Shares the Telegram/Discord send queue (dest:'nt'); check pushes are
+   *   at-least-once, like Telegram's critical sends.
+   * · ntfy.sh topics are readable by anyone who knows the name, so the topic
+   *   should be long and random — the Generate button makes one. Stored per
+   *   device, never in the source (public repo, same rule as the webhook).
+   * · A self-hosted server works too; Tampermonkey asks once to allow the host,
+   *   since only ntfy.sh is in @connect. */
+  const ntfy = {
+    enabled:   GM_getValue('cbNtEnabled', false),
+    server:    GM_getValue('cbNtServer', 'https://ntfy.sh'),
+    topic:     GM_getValue('cbNtTopic', ''),
+    token:     GM_getValue('cbNtToken', ''),
+    modOnline: GM_getValue('cbNtModOnline', false)
+  };
+  function saveNtfy() {
+    GM_setValue('cbNtEnabled', ntfy.enabled);
+    GM_setValue('cbNtServer', ntfy.server);
+    GM_setValue('cbNtTopic', ntfy.topic);
+    GM_setValue('cbNtToken', ntfy.token);
+    GM_setValue('cbNtModOnline', ntfy.modOnline);
+  }
+  function ntfyBase() {
+    return String(ntfy.server || '').trim().replace(/\/+$/, '') || 'https://ntfy.sh';
+  }
+  function ntfyConfigured() {
+    return !!(ntfy.enabled && /^[A-Za-z0-9_-]{1,64}$/.test(String(ntfy.topic || '')) && /^https:\/\/[^\s/]+/i.test(ntfyBase()));
+  }
+  // Ban-risk alerts have somewhere to go. Used by the gates that used to test
+  // tg.enabled alone, which left an NTFY-only setup alerting on nothing.
+  function critAlertsOn() { return !!(tg.enabled || ntfyConfigured()); }
+
   function saveTg() {
     GM_setValue('cbTgToken', tg.token); GM_setValue('cbTgChat', tg.chat);
     GM_setValue('cbTgEnabled', tg.enabled); GM_setValue('cbNotifyCaptcha', tg.captcha);
@@ -1820,8 +1864,8 @@ try { (function () {
   function _capTgQ(q, max) {
     if (q.length <= max) return q;
     while (q.length > max) {
-      const i = q.findIndex(it => it.dest !== 'dc');   // oldest Telegram item first
-      if (i === -1) break;                             // all Discord — keep them all
+      const i = q.findIndex(it => !it.dest);           // oldest Telegram item first
+      if (i === -1) break;                             // all Discord/NTFY — keep them all
       q.splice(i, 1);
     }
     if (q.length > max) q.splice(0, q.length - max);   // still over: they are all Discord
@@ -1865,13 +1909,57 @@ try { (function () {
     pumpTgQueue();
   }
 
+  // Telegram markup → plain text for an ntfy push.
+  function ntfyText(msg) {
+    return dcFromTgText(msg).replace(/\*\*/g, '').replace(/```\n?/g, '').trim();
+  }
+
+  /* Queue an ntfy push (2000.351). `critical` = at-least-once, like Telegram's
+   * check alerts. JSON publishing to the server root, because a Title HEADER
+   * cannot carry emoji/UTF-8 reliably. */
+  function sendNtfy(title, message, priority, tags, critical) {
+    if (!ntfyConfigured()) return;
+    const q = _loadTgQ();
+    q.push({ id: Date.now() + '_' + Math.random().toString(36).slice(2, 7), dest: 'nt',
+             payload: { topic: String(ntfy.topic).trim(), title: String(title || APP_NAME).slice(0, 200),
+                        message: String(message || '').slice(0, 3000), priority: priority || 3, tags: tags || [] },
+             attempts: 0, nextAt: 0, crit: !!critical, sentAt: 0 });
+    _capTgQ(q, 50);
+    _saveTgQ(q);
+    pumpTgQueue();
+  }
+
+  // A ban-risk alert → ntfy. Called by the critical-alert pump: once when the
+  // check arrives, then once per follow-up until it is cleared.
+  function ntfyCritical(key, msg, followup) {
+    if (!ntfyConfigured()) return;
+    const kind = DC_CRIT_KIND[String(key).split(':')[0]] || 'STAFF ALERT';
+    sendNtfy(`🚨 ${kind}${followup ? ' (reminder)' : ''} — ${st.player || '?'}`,
+             `${ntfyText(msg)}\n\nAnswer it in the game. Jarvis never answers a check for you.`,
+             5, ['rotating_light'], true);
+  }
+
+  function ntfyModOnline(names) {
+    if (!ntfy.modOnline || !ntfyConfigured()) return;
+    sendNtfy(`👮 Staff online — ${st.player || '?'}`, (names || []).join(', ') || 'staff', 4, ['police_officer'], false);
+  }
+
+  function testNtfy() {
+    if (!ntfyConfigured()) { setStatus('⚠️ NTFY not set up — switch it on and set a topic'); return; }
+    sendNtfy(`🧪 THIS IS A TEST — ${st.player || '?'}`,
+             `THIS IS A TEST from ${APP_NAME} ${APP_VERSION}. Nothing has happened. Real script checks arrive at urgent priority.`,
+             3, ['test_tube'], false);
+    setStatus('🔔 NTFY test queued');
+  }
+
   function pumpTgQueue() {
     /* Gated PER ITEM, not up front. The old single check returned early unless
      * Telegram was configured, which would have stranded every Discord item for
      * anyone using Discord alone. */
     const tgOk = !!(tg.enabled && tg.token && tg.chat);
     const dcOk = dcConfigured();
-    if (!tgOk && !dcOk) return;
+    const ntOk = ntfyConfigured();
+    if (!tgOk && !dcOk && !ntOk) return;
     const q = _loadTgQ();
     if (!q.length) return;
 
@@ -1891,16 +1979,20 @@ try { (function () {
      *
      * _tgInFlight is per-page and empty on load, which is exactly what makes
      * "started on a previous page" detectable at all. */
-    let swept = 0;
+    let swept = 0, sweptDc = 0;
     for (let i = q.length - 1; i >= 0; i--) {
       const it = q[i];
       if (!it.sentAt || _tgInFlight[it.id]) continue;
       if (it.crit) { it.sentAt = 0; continue; }     // never assume for these
+      if (it.dest === 'dc') sweptDc++;
       q.splice(i, 1); swept++;
     }
     if (swept) {
       _saveTgQ(q);
       console.log(APP_TAG, `TG ${swept} message(s) were mid-send when the page changed — assuming delivered rather than sending twice`);
+      /* A warn, so it lands in Copy diagnostics (2000.351): if a rank-up never
+       * reaches Discord, this says whether it was dropped here. */
+      if (sweptDc) console.warn(APP_TAG, `[DC] ${sweptDc} Discord post(s) were mid-send when the page changed — assumed delivered, not retried`);
       if (!q.length) return;
     }
 
@@ -1908,17 +2000,20 @@ try { (function () {
     for (const item of q) {
       if (_tgInFlight[item.id]) continue;
       if (now < (item.nextAt || 0)) continue;
-      const isDc = item.dest === 'dc';
-      if (isDc ? !dcOk : !tgOk) continue;      // channel switched off — leave it queued
-      const label = isDc ? 'Discord' : 'TG';
+      const dest = item.dest === 'dc' ? 'dc' : item.dest === 'nt' ? 'nt' : 'tg';
+      if (dest === 'dc' ? !dcOk : dest === 'nt' ? !ntOk : !tgOk) continue;   // channel switched off — leave it queued
+      const label = dest === 'dc' ? 'Discord' : dest === 'nt' ? 'NTFY' : 'TG';
+      const isDc = dest !== 'tg';   // Discord or NTFY: JSON payload, response body worth logging
+      const headers = {'Content-Type':'application/json'};
+      if (dest === 'nt' && String(ntfy.token || '').trim()) headers.Authorization = 'Bearer ' + String(ntfy.token).trim();
       _tgInFlight[item.id] = true;
       item.attempts = (item.attempts || 0) + 1;
       item.sentAt = Date.now();     // survives the page; see the sweep above
       _saveTgQ(q);
       GM_xmlhttpRequest({
         method:'POST',
-        url: isDc ? dc.url : `https://api.telegram.org/bot${tg.token}/sendMessage`,
-        timeout:15000, headers:{'Content-Type':'application/json'},
+        url: dest === 'dc' ? dc.url : dest === 'nt' ? ntfyBase() + '/' : `https://api.telegram.org/bot${tg.token}/sendMessage`,
+        timeout:15000, headers,
         data: isDc ? JSON.stringify(item.payload)
                    : JSON.stringify({chat_id:tg.chat, text:item.msg, parse_mode:'HTML'}),
         onload: r => {
@@ -2079,22 +2174,27 @@ try { (function () {
     return false;
   }
 
-  // `key` identifies the EVENT. Returns true if it was actually queued.
+  // `key` identifies the EVENT. Returns true if it was actually queued; the
+  // reason for a refusal is left in _dcRefusal (2000.351, for the rank-up log).
+  let _dcRefusal = '';
   function dcSendOnce(bucket, key, embed, content) {
-    if (!dcConfigured()) return false;
+    _dcRefusal = '';
+    if (!dcConfigured()) { _dcRefusal = 'Discord off or webhook URL invalid'; return false; }
     /* These two were dlog() — invisible unless verbose debug was on. A Discord
      * post silently not happening is exactly the case you need to SEE, so they
      * are plain logs now. */
-    if (!dc.thisDevice) { console.warn(APP_TAG, `[DC] NOT POSTING ${bucket}: this device is set not to post. Each device is a different player — this should normally be ON.`); return false; }
-    if (!tabs.isMaster)  { console.warn(APP_TAG, `[DC] NOT POSTING ${bucket}: this tab is not the master tab.`); return false; }
-    if (!seenOnce(bucket, key, 60)) { console.log(APP_TAG, `[DC] Already posted ${bucket}:${key} — not posting again`); return false; }
-    if (dcRecentlySent(embed)) return false;
+    if (!dc.thisDevice) { _dcRefusal = '"Post from this device" is off'; console.warn(APP_TAG, `[DC] NOT POSTING ${bucket}: this device is set not to post. Each device is a different player — this should normally be ON.`); return false; }
+    if (!tabs.isMaster)  { _dcRefusal = 'not the master tab'; console.warn(APP_TAG, `[DC] NOT POSTING ${bucket}: this tab is not the master tab.`); return false; }
+    if (!seenOnce(bucket, key, 60)) { _dcRefusal = 'already posted this event'; console.log(APP_TAG, `[DC] Already posted ${bucket}:${key} — not posting again`); return false; }
+    if (dcRecentlySent(embed)) { _dcRefusal = 'identical post sent in the last minute'; return false; }
     sendDiscord(embed, content);
     return true;
   }
 
+  // Returns what happened, for the rank-up log (2000.351).
   function discordRankUp(fromName, toName) {
-    if (!dc.rankup || !dcConfigured()) return;
+    if (!dc.rankup) return 'not sent: "Rank ups" switch is off';
+    if (!dcConfigured()) return 'not sent: Discord off or webhook URL invalid';
     const e = dcBase(`⭐ Ranked up to ${toName}`, DC_COLOUR.rankup);
     e.description = `**${fromName}**  →  **${toName}**`;
     const fields = [];
@@ -2108,7 +2208,7 @@ try { (function () {
     if (fields.length) e.fields = fields;
     // Keyed by the transition, so the same rank-up can never post twice however
     // many times it is re-detected.
-    dcSendOnce('dcrank', `${fromName}>${toName}`, e);
+    return dcSendOnce('dcrank', `${fromName}>${toName}`, e) ? 'queued for Discord' : `not sent: ${_dcRefusal || 'unknown'}`;
   }
 
   function discordWitness(mailId, killer, victim) {
@@ -2267,6 +2367,11 @@ try { (function () {
     for (const a of q) {
       if (a.remaining > 0 && now >= a.nextAt) {
         sendTg(a.msg, true);        // critical: never dropped
+        // NTFY (2000.351): the first send and each follow-up, not the quick burst.
+        if (!a.ntDone || a.inFollowup) {
+          try { ntfyCritical(a.key, a.msg, !!a.inFollowup); } catch(e) { console.warn(APP_TAG, '[NTFY] critical', e); }
+          a.ntDone = true;
+        }
         a.remaining--;
         if (a.remaining > 0) {
           a.nextAt = now + a.gapMs;                 // continue the quick burst
@@ -2274,6 +2379,7 @@ try { (function () {
           a.remaining = 1;                          // schedule a slower backstop ping
           a.followups--;
           a.nextAt = now + a.followupGapMs;
+          a.inFollowup = true;
         }
       }
     }
@@ -3205,7 +3311,11 @@ try { (function () {
       })),
       lastStop: (() => { try { const h = GM_getValue('cbHaltInfo', null); return h ? `${tm(h.at)}  ${h.reason}  on ${h.page || '?'}` : 'never recorded'; } catch (_) { return '?'; } })(),
       sessionFalseAlarms: J('cbSessionFalseAlarms', []).map(f => `${tm(f.at)}  ${f.src}`),
-      pendingCriticalAlerts: J('cbCritAlerts', []).map(c => `${c.key}  (${String(c.msg || '').replace(/<[^>]+>/g, '').slice(0, 120)})`)
+      pendingCriticalAlerts: J('cbCritAlerts', []).map(c => `${c.key}  (${String(c.msg || '').replace(/<[^>]+>/g, '').slice(0, 120)})`),
+      // 2000.351: which rank Jarvis last saw, and every rank-up it detected + what Discord did.
+      rankLastSeen: (() => { try { return rankState.lastName || '(none)'; } catch (_) { return '?'; } })(),
+      rankUps: J('cbRankUpLog', []).slice().reverse().map(r => `${tm(r.t)}  ${r.from} → ${r.to}  · Discord: ${r.dc}  [${r.page || ''}]`),
+      alertChannels: `Telegram ${tg.enabled ? 'on' : 'off'} · Discord ${dcConfigured() ? 'on' : 'off'} · NTFY ${ntfyConfigured() ? 'on' : 'off'}`
     };
     return JSON.stringify(rep, null, 2);
   }
@@ -3307,7 +3417,7 @@ try { (function () {
    * immediate inbox fetch on EVERY page load — a page load every few seconds.
    * Now it fires only when the count actually rises. */
   function checkNewMsgs() {
-    if (!tg.enabled && !st.autoOC && !st.autoDTM) return false;
+    if (!critAlertsOn() && !st.autoOC && !st.autoDTM) return false;
     const { has, ct } = mailIconState();
     const last = parseInt(localStorage.getItem('cbLastMsgCt') || '0', 10) || 0;
     if (has && ct > last) {
@@ -3411,7 +3521,8 @@ try { (function () {
 
   let _sqlSent = false;
   function checkSqlCheck() {
-    if (!tg.enabled || !tg.sqlCheck) return false;
+    // NTFY on counts too (2000.351): it exists for exactly this.
+    if (!((tg.enabled && tg.sqlCheck) || ntfyConfigured())) return false;
     const div = document.querySelector('div.NewGridTitle');
     const hasImp = div && div.textContent.includes('Important message');
     const txt = document.body.textContent;
@@ -4061,6 +4172,7 @@ try { (function () {
       const fresh = names.filter(n => !was.includes(n));
       if (fresh.length) {
         console.log(`${APP_TAG}[MOD] Staff online: ${names.join(', ')}`);
+        try { ntfyModOnline(names); } catch(_){}   // optional, off by default (2000.351)
         if (cfg.modVary && modVaryApplies()) planModReaction(names);
         else if (cfg.modBreakOn) startModBreak(names);
         else tgMsg('modOnline', `👮 <b>Staff online</b> — ${esc(names.join(', '))}\n${st.player||'?'}${cfg.noJailOnMod ? ' | jail paused' : ''}`);
@@ -5403,7 +5515,7 @@ try { (function () {
     _mailBusy = true;
     try {
       if (!tabs.isMaster) return;
-      if (!st.autoOC && !st.autoDTM && !(tg.enabled && (tg.messages || tg.scriptTest || tg.staffMail))) return;
+      if (!st.autoOC && !st.autoDTM && !(tg.enabled && (tg.messages || tg.scriptTest || tg.staffMail)) && !ntfyConfigured()) return;
 
       const inboxUrl = `${location.origin}/authenticated/mailbox.aspx?p=m`;
       const res = await gmGet(inboxUrl);
@@ -5638,11 +5750,12 @@ try { (function () {
         let staffAlerted = false;
         if (nIdS > staffWmAtStart && (isFromStaff || stSubj || byName)) {
           // A staff id (1–8) needs NOTHING but Telegram — not either switch (user: "always").
-          const wants = isFromStaff ? true : stSubj ? tg.scriptTest : tg.staffMail;
-          if (!tg.enabled || !wants) {
+          // NTFY carries only these, so it always wants them (2000.351).
+          const wants = isFromStaff || ntfyConfigured() ? true : stSubj ? tg.scriptTest : tg.staffMail;
+          if (!critAlertsOn() || !wants) {
             if (seenOnce('staffmailoff', mailId, 30))
               console.warn(`${APP_TAG}[MAIL] mail ${mailId} from ${sender} ("${subject}") looks like STAFF / a script test, but NO alert is sent: ` +
-                (!tg.enabled ? 'Telegram is off' : stSubj ? '"Script test" is off' : '"Staff mail 5x" is off'));
+                (!critAlertsOn() ? 'Telegram and NTFY are both off' : stSubj ? '"Script test" is off' : '"Staff mail 5x" is off'));
           } else {
             // Raise both watermarks (monotonic) so neither branch re-alerts next poll.
             for (const k of ['cbLastScriptTestId', 'cbLastStaffMailId'])
@@ -10583,6 +10696,28 @@ try { (function () {
             <button class="jb-btn" id="jb-dc-test">Test Discord</button>
             <div class="jb-sub jb-mb" style="color:var(--jb-text-ter);font-size:9px;margin-top:6px"><b>Each event posts once.</b> Rank-ups are keyed by the rank change and witness statements by their mail, so neither can post twice however often it is re-detected, and only the master tab posts. Your <b>other devices are different players</b>, so their posts are their own events, not copies of yours — <b>leave "post from this device" ON everywhere</b>. Switch it off only if you want that particular account to stop posting.<br>Independent of Telegram; they share the retry queue, so a post interrupted by a page change is redelivered rather than lost.<br><b>The URL is stored on this device only</b> and is deliberately not built into the script: this repo is public and the script is served raw from GitHub, so a webhook in the source would be one anyone could post to.</div>
             <hr class="jb-sep">
+            <div class="jb-sect-title">NTFY (script checks only)</div>
+            <label class="jb-switch jb-mb"><input type="checkbox" id="jb-nt-on" ${ntfy.enabled?'checked':''}> 🔔 Send script checks to NTFY</label>
+            <div class="jb-mb">
+              <label class="jb-label">Topic</label>
+              <div class="jb-row">
+                <input class="jb-input" id="jb-nt-topic" value="${esc(ntfy.topic)}" placeholder="long-random-name" autocomplete="off">
+                <button class="jb-btn" id="jb-nt-gen" title="Make a long random topic name — anyone who knows the name can read it">Generate</button>
+              </div>
+              <div class="jb-sub" id="jb-nt-state" style="font-size:9px"></div>
+            </div>
+            <div class="jb-mb">
+              <label class="jb-label">Server</label>
+              <input class="jb-input" id="jb-nt-server" value="${esc(ntfy.server)}" placeholder="https://ntfy.sh">
+            </div>
+            <div class="jb-mb">
+              <label class="jb-label">Access token (optional)</label>
+              <input class="jb-input" type="password" autocomplete="off" id="jb-nt-token" value="${esc(ntfy.token)}" placeholder="tk_… — only for a protected topic">
+            </div>
+            <label class="jb-switch jb-mb"><input type="checkbox" id="jb-nt-mod" ${ntfy.modOnline?'checked':''}> 👮 Also when staff come online</label>
+            <button class="jb-btn" id="jb-nt-test">Test NTFY</button>
+            <div class="jb-sub jb-mb" style="color:var(--jb-text-ter);font-size:9px;margin-top:6px">Only <b>ban-risk</b> alerts go here: script tests, staff mail (any mail from ids 1–8), the on-screen staff check and anti-bot messages. One <b>urgent</b> push when it arrives, then a reminder every ~3 min until it is cleared. Nothing else, so the phone only rings when something needs answering.<br>Install the ntfy app, tap <b>+</b> and subscribe to the same topic. <b>Anyone who knows a topic name can read it</b> — use Generate. Each device has its own setting: one topic for all your players is fine (each push names the player), or give each its own.<br>Sends while Jarvis is stopped, like Telegram.</div>
+            <hr class="jb-sep">
             <div class="jb-sect-title">Ready reminders</div>
             <div class="jb-sub jb-mb" style="color:var(--jb-text-ter);font-size:9px">The OC/DTM ready alert fires once. Miss it and a finished 2h cooldown can sit unused all evening with nothing to say so. These re-ping while it is <b>still</b> ready, and stop the moment you use it.</div>
             <div class="jb-row">
@@ -12025,6 +12160,42 @@ try { (function () {
     { const t = _shadow.querySelector('#jb-dc-test');
       if (t) t.addEventListener('click', testDiscord); }
     renderDcState();
+
+    // --- NTFY (2000.351) ---
+    function renderNtState() {
+      const el = _shadow.querySelector('#jb-nt-state');
+      if (!el) return;
+      const t = String(ntfy.topic || '');
+      if (!t) { el.textContent = 'No topic set — nothing will be sent.'; el.style.color = 'var(--jb-text-ter)'; return; }
+      if (!/^[A-Za-z0-9_-]{1,64}$/.test(t)) { el.textContent = '⚠️ Letters, numbers, - and _ only (max 64) — nothing will be sent.'; el.style.color = 'var(--jb-danger)'; return; }
+      if (!ntfy.enabled) { el.textContent = 'NTFY is switched off.'; el.style.color = 'var(--jb-text-ter)'; return; }
+      if (t.length < 16) { el.textContent = '⚠️ Short topics are easy to guess — anyone can read them. Use Generate.'; el.style.color = 'var(--jb-warning, #d08000)'; return; }
+      el.textContent = `✓ Sending to ${ntfyBase()}/${t}`; el.style.color = 'var(--jb-success)';
+    }
+    { const n = _shadow.querySelector('#jb-nt-on');
+      if (n) n.addEventListener('change', e => {
+        ntfy.enabled = e.target.checked; saveNtfy(); renderNtState();
+        setStatus(ntfy.enabled ? '🔔 NTFY on' : '🔔 NTFY off');
+      }); }
+    { const tp = _shadow.querySelector('#jb-nt-topic');
+      if (tp) tp.addEventListener('input', e => { ntfy.topic = e.target.value.trim(); saveNtfy(); renderNtState(); }); }
+    { const g = _shadow.querySelector('#jb-nt-gen');
+      if (g) g.addEventListener('click', () => {
+        const a = new Uint8Array(12); crypto.getRandomValues(a);
+        ntfy.topic = 'jarvis-' + Array.from(a, b => b.toString(36).padStart(2, '0')).join('').slice(0, 20);
+        saveNtfy();
+        const tp = _shadow.querySelector('#jb-nt-topic'); if (tp) tp.value = ntfy.topic;
+        renderNtState();
+      }); }
+    { const sv = _shadow.querySelector('#jb-nt-server');
+      if (sv) sv.addEventListener('input', e => { ntfy.server = e.target.value.trim() || 'https://ntfy.sh'; saveNtfy(); renderNtState(); }); }
+    { const tk = _shadow.querySelector('#jb-nt-token');
+      if (tk) tk.addEventListener('input', e => { ntfy.token = e.target.value.trim(); saveNtfy(); }); }
+    { const md = _shadow.querySelector('#jb-nt-mod');
+      if (md) md.addEventListener('change', e => { ntfy.modOnline = e.target.checked; saveNtfy(); }); }
+    { const t = _shadow.querySelector('#jb-nt-test');
+      if (t) t.addEventListener('click', testNtfy); }
+    renderNtState();
 
     // --- Hold HQ (panic) ---
     { const hq = _shadow.querySelector('#jb-holdhq-on');
@@ -14195,8 +14366,21 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
       while (xpState.history.length > XP_HISTORY_CAP) xpState.history.pop();
       saveXpState();
     } catch(_){}
-    tgMsg('rankup', `⭐ <b>RANK UP</b>\n${st.player||'?'} | ${esc(fromName)} → <b>${esc(toName)}</b>`);
-    try { discordRankUp(fromName, toName); } catch(e) { console.warn(APP_TAG, '[DC] rankup', e); }
+    try { tgMsg('rankup', `⭐ <b>RANK UP</b>\n${st.player||'?'} | ${esc(fromName)} → <b>${esc(toName)}</b>`); } catch(e) { console.warn(APP_TAG, '[TG] rankup', e); }
+    let dcOut = '?';
+    try { dcOut = discordRankUp(fromName, toName) || '?'; } catch(e) { dcOut = 'error: ' + (e && e.message || e); console.warn(APP_TAG, '[DC] rankup', e); }
+    /* RANK-UP RECORD (2000.351). A rank-up that did not reach Discord gave no
+     * trace beyond a console line. Kept in localStorage (last 10) and shown in
+     * Copy diagnostics, so the next one says whether it was detected at all and
+     * what Discord did with it. */
+    console.log(`${APP_TAG}[RANK] Discord: ${dcOut}`);
+    try {
+      const log = JSON.parse(localStorage.getItem('cbRankUpLog') || '[]');
+      const arr = Array.isArray(log) ? log : [];
+      arr.push({ t: Date.now(), from: fromName, to: toName, dc: dcOut, page: location.pathname });
+      while (arr.length > 10) arr.shift();
+      localStorage.setItem('cbRankUpLog', JSON.stringify(arr));
+    } catch(_){}
     try { updateXpUI(); } catch(_){}
   }
 
@@ -16193,7 +16377,7 @@ ${st.player||'?'} | couldn't hold <b>${esc(hotCity)}</b> selected on the page �
     }
 
     // Mail check
-    if ((st.autoOC || st.autoDTM || (tg.enabled && (tg.messages||tg.scriptTest||tg.staffMail))) && tabs.isMaster) {
+    if ((st.autoOC || st.autoDTM || (tg.enabled && (tg.messages||tg.scriptTest||tg.staffMail)) || ntfyConfigured()) && tabs.isMaster) {
       /* Random 4–7 min gap (mailGapMs), and — the 4.20.286 idea — no fetch at all
        * while the header icon says the inbox is empty. A skipped poll still rolls
        * the next gap, so this does not re-test every tick. cbLastMailTs = 0 (set

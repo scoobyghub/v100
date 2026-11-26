@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.350
+// @version      2000.351
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -28,6 +28,7 @@
 // @grant        GM_xmlhttpRequest
 // @connect      api.telegram.org
 // @connect      discord.com
+// @connect      ntfy.sh
 // @connect      raw.githubusercontent.com
 // @connect      starvinggeeks.net
 // @connect      helper.starvinggeeks.net
