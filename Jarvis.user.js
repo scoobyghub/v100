@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Jarvis Bot
 // @namespace    http://tampermonkey.net/
-// @version      2000.351
+// @version      2000.352
 // @description  Jarvis Bot — automated game assistant with Office-style UI, light/dark theme, Telegram alerts, OC/DTM auto-accept, online watch, garage management
 // @author       Jarvis
 // @match        *://www.tmn2010.net/login.aspx*
@@ -37,7 +37,7 @@
 // @downloadURL  https://gist.githubusercontent.com/scoobyghub/32b6a0336551df6e3b3a036e39155fdc/raw/Jarvis.user.js
 // ==/UserScript==
 
-/*  Jarvis Bot 2000.351
+/*  Jarvis Bot 2000.352
  *  Game automation assistant — MS Office inspired UI
  *  Features: auto crime/gta/booze/jail, garage crusher,
  *  OC/DTM invite accept, team creation, online watch,
@@ -240,7 +240,7 @@ try { (function () {
   /* === CONSTANTS & HELPERS === */
 
   const APP_NAME    = 'Jarvis Bot';
-  const APP_VERSION = '2000.351';
+  const APP_VERSION = '2000.352';
   const APP_TAG     = '[JB]';
 
   // Verbose logging (off by default) — gates high-frequency chatter like the
@@ -1700,6 +1700,29 @@ try { (function () {
     GM_setValue('cbNtToken', ntfy.token);
     GM_setValue('cbNtModOnline', ntfy.modOnline);
   }
+  /* ONLY A REAL ntfy ACCESS TOKEN IS EVER SENT (2000.352).
+   * 351's token box was type="password", and Chrome ignores autocomplete="off"
+   * on password boxes — it autofilled a saved password into it, which then went
+   * to ntfy.sh as a Bearer token: 401 on every send, so the test never arrived,
+   * and the retries earned a 429 rate limit. ntfy access tokens always start
+   * "tk_", so anything else is ignored (never sent), the box is no longer a
+   * password type, and a stored non-token is cleared once below. A token the
+   * server rejects (401/403) is remembered by hash and the push is re-sent
+   * WITHOUT it — a script-check alert must not be lost to a bad token. */
+  const NT_TOKEN_RE = /^tk_[A-Za-z0-9]{8,64}$/;
+  if (!GM_getValue('cbNtTokenFix352', false)) {
+    GM_setValue('cbNtTokenFix352', true);
+    if (ntfy.token && !NT_TOKEN_RE.test(String(ntfy.token).trim())) {
+      ntfy.token = ''; GM_setValue('cbNtToken', '');
+      console.warn(APP_TAG, '[NTFY] Cleared the access-token box: it held something that is not an ntfy token (they start tk_) — most likely a password the browser autofilled.');
+    }
+  }
+  function ntfyAuthToken() {
+    const t = String(ntfy.token || '').trim();
+    if (!NT_TOKEN_RE.test(t)) return '';
+    if (GM_getValue('cbNtAuthBad', '') === contentHash(t)) return '';   // the server already refused it
+    return t;
+  }
   function ntfyBase() {
     return String(ntfy.server || '').trim().replace(/\/+$/, '') || 'https://ntfy.sh';
   }
@@ -1851,8 +1874,8 @@ try { (function () {
   /* Deferring also clears sentAt: we got a definite answer from the server, so
    * this is a genuine retry, not an interrupted send. */
   function _deferTgQ(id, at) { const q = _loadTgQ(); const it = q.find(i => i.id === id); if (it) { it.nextAt = at; it.sentAt = 0; _saveTgQ(q); } }
-  function _backoffOrDropTgQ(id, attempts) {
-    if (attempts >= 8) { _removeTgQ(id); console.error(APP_TAG, 'TG give up after', attempts, 'tries'); return; }
+  function _backoffOrDropTgQ(id, attempts, label) {
+    if (attempts >= 8) { _removeTgQ(id); console.error(APP_TAG, label || 'TG', 'give up after', attempts, 'tries'); return; }
     _deferTgQ(id, Date.now() + Math.min(60000, 2000 * attempts));
   }
 
@@ -2005,7 +2028,8 @@ try { (function () {
       const label = dest === 'dc' ? 'Discord' : dest === 'nt' ? 'NTFY' : 'TG';
       const isDc = dest !== 'tg';   // Discord or NTFY: JSON payload, response body worth logging
       const headers = {'Content-Type':'application/json'};
-      if (dest === 'nt' && String(ntfy.token || '').trim()) headers.Authorization = 'Bearer ' + String(ntfy.token).trim();
+      const ntTok = dest === 'nt' ? ntfyAuthToken() : '';   // only a real tk_ token, never a stray password
+      if (ntTok) headers.Authorization = 'Bearer ' + ntTok;
       _tgInFlight[item.id] = true;
       item.attempts = (item.attempts || 0) + 1;
       item.sentAt = Date.now();     // survives the page; see the sweep above
@@ -2031,15 +2055,30 @@ try { (function () {
               const ra = (j.parameters && j.parameters.retry_after) != null ? j.parameters.retry_after : j.retry_after;
               if (ra != null) wait = Math.ceil((Number(ra) + 1) * 1000);
             } catch(_){}
+            // ntfy.sh rate-limits (and briefly bans) after repeated failures — back right off.
+            if (dest === 'nt') wait = Math.max(wait, 60000);
             console.error(APP_TAG, label, '429 — retry in', wait, 'ms');
             _deferTgQ(item.id, Date.now() + wait);
+          } else if (dest === 'nt' && (r.status === 401 || r.status === 403) && ntTok) {
+            /* The server refused the token. Remember it (by hash) and re-send
+             * straight away WITHOUT it — a public topic needs none, and a check
+             * alert must not die on a bad token (2000.352). */
+            GM_setValue('cbNtAuthBad', contentHash(ntTok));
+            console.warn(APP_TAG, `[NTFY] The access token was rejected (${r.status}) — sending without it. Fix or clear the token in Settings → Alerts → NTFY.`);
+            _deferTgQ(item.id, 0);
+            setTimeout(pumpTgQueue, 0);
+          } else if (dest === 'nt' && r.status >= 400 && r.status < 500) {
+            /* Any other 4xx will not fix itself by retrying — and retrying is what
+             * earned the 429. Drop it, say why once. */
+            console.warn(APP_TAG, `[NTFY] Refused (${r.status}) — not retrying: ${(r.responseText||'').slice(0,160)}`);
+            _removeTgQ(item.id);
           } else {
             console.error(APP_TAG, label, 'fail', r.status, isDc ? (r.responseText||'').slice(0,120) : '');
-            _backoffOrDropTgQ(item.id, item.attempts);
+            _backoffOrDropTgQ(item.id, item.attempts, label);
           }
         },
-        onerror: () => { delete _tgInFlight[item.id]; console.error(APP_TAG, label, 'err'); _backoffOrDropTgQ(item.id, item.attempts); },
-        ontimeout: () => { delete _tgInFlight[item.id]; console.error(APP_TAG, label, 'timeout'); _backoffOrDropTgQ(item.id, item.attempts); }
+        onerror: () => { delete _tgInFlight[item.id]; console.error(APP_TAG, label, 'err'); _backoffOrDropTgQ(item.id, item.attempts, label); },
+        ontimeout: () => { delete _tgInFlight[item.id]; console.error(APP_TAG, label, 'timeout'); _backoffOrDropTgQ(item.id, item.attempts, label); }
       });
     }
   }
@@ -10711,8 +10750,9 @@ try { (function () {
               <input class="jb-input" id="jb-nt-server" value="${esc(ntfy.server)}" placeholder="https://ntfy.sh">
             </div>
             <div class="jb-mb">
-              <label class="jb-label">Access token (optional)</label>
-              <input class="jb-input" type="password" autocomplete="off" id="jb-nt-token" value="${esc(ntfy.token)}" placeholder="tk_… — only for a protected topic">
+              <label class="jb-label">Access token (optional — leave blank for ntfy.sh)</label>
+              <input class="jb-input" type="text" name="jb-nt-tk" autocomplete="off" data-lpignore="true" spellcheck="false" style="-webkit-text-security:disc" id="jb-nt-token" value="${esc(ntfy.token)}" placeholder="blank · or tk_… for a protected topic">
+              <div class="jb-sub" id="jb-nt-tok-state" style="font-size:9px"></div>
             </div>
             <label class="jb-switch jb-mb"><input type="checkbox" id="jb-nt-mod" ${ntfy.modOnline?'checked':''}> 👮 Also when staff come online</label>
             <button class="jb-btn" id="jb-nt-test">Test NTFY</button>
@@ -12189,13 +12229,23 @@ try { (function () {
       }); }
     { const sv = _shadow.querySelector('#jb-nt-server');
       if (sv) sv.addEventListener('input', e => { ntfy.server = e.target.value.trim() || 'https://ntfy.sh'; saveNtfy(); renderNtState(); }); }
+    function renderNtTokState() {
+      const el = _shadow.querySelector('#jb-nt-tok-state');
+      if (!el) return;
+      const t = String(ntfy.token || '').trim();
+      if (!t) { el.textContent = 'No token — fine for ntfy.sh.'; el.style.color = 'var(--jb-text-ter)'; return; }
+      if (!NT_TOKEN_RE.test(t)) { el.textContent = '⚠️ Not an ntfy token (they start tk_) — ignored, never sent. Clear this box.'; el.style.color = 'var(--jb-danger)'; return; }
+      if (!ntfyAuthToken()) { el.textContent = '⚠️ The server rejected this token — sending without it.'; el.style.color = 'var(--jb-danger)'; return; }
+      el.textContent = '✓ Token will be sent.'; el.style.color = 'var(--jb-success)';
+    }
     { const tk = _shadow.querySelector('#jb-nt-token');
-      if (tk) tk.addEventListener('input', e => { ntfy.token = e.target.value.trim(); saveNtfy(); }); }
+      if (tk) tk.addEventListener('input', e => { ntfy.token = e.target.value.trim(); saveNtfy(); renderNtTokState(); }); }
     { const md = _shadow.querySelector('#jb-nt-mod');
       if (md) md.addEventListener('change', e => { ntfy.modOnline = e.target.checked; saveNtfy(); }); }
     { const t = _shadow.querySelector('#jb-nt-test');
       if (t) t.addEventListener('click', testNtfy); }
     renderNtState();
+    renderNtTokState();
 
     // --- Hold HQ (panic) ---
     { const hq = _shadow.querySelector('#jb-holdhq-on');
